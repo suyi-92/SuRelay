@@ -72,6 +72,46 @@ bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstr
 sudo bash install.sh
 ```
 
+### 3.0.1 已部署机器单独补 IPv6 本地节点
+
+如果常规部署已经完成，只需要在不改现有 v4 身份和出口策略的前提下补一套 IPv6 字面量节点，使用短选项 `-6`：
+
+```bash
+# 自动探测公网 IPv6，并允许交互确认
+sudo bash install.sh -6
+
+# 非交互地直接指定地址；方括号可省略
+sudo bash install.sh -6 2001:db8::10
+sudo bash install.sh --add-ipv6-node '[2001:db8::10]'
+```
+
+远程一键入口的参数写在进程替换之后：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh) -6 2001:db8::10
+```
+
+维护模式的前置条件与边界：
+
+1. 安装目录里必须已有 `config.env`，系统必须已有可运行的 sing-box。
+2. `VLESS_UUID_PATH`、Reality private/public key 和 short-id 四份材料必须存在；缺任一项都会在修改前停止。
+3. 修改前会把 `config.env`、当前 sing-box 配置和必要的 UFW 配置放进 `/root/reality-relay-bootstrap-backups/backup-*-ipv6-node/`。
+4. 只更新 `SERVER_IP_IPV6`、`ENABLE_IPV6_LISTEN=true`、`CLIENT_UDP=true`、`RESET_PROXY_KEYS=false`；不会修改 `SERVER_IP_IPV4` 或 `PROXY_IP_VERSION`，因此 v6 只是新增客户端入口地址，原有出口/DNS 策略保持不变。
+5. `net.ipv6.bindv6only=1` 且已有 IPv4 节点时会在修改前停止，避免 `::` 监听导致 v4 节点掉线。重启后还会按每个实际入口端口分别验证 IPv4 和 IPv6 listener。
+6. UFW 启用时会确保 `/etc/default/ufw` 使用 `IPV6=yes`，规则仍只开放实际 VLESS TCP 端口；云厂商 IPv6 安全组需要手动同步。
+7. 即使启用了 `CUSTOM_DOMAIN`，这三份专用文件也会强制使用 IPv6 字面量作为 `server`，但继续复用现有 Reality SNI 与其它参数。
+8. 该模式只生成本地 v6 文件，不主动刷新订阅 systemd 服务；需要时可在确认配置后另行执行 `sudo bash bootstrap.sh --phase subscription`。
+
+输出文件：
+
+```text
+/root/reality-relay-bootstrap-v6-vless.txt  # 每行一个可导入的 vless:// Reality 分享链接
+/root/reality-relay-bootstrap-v6-nodes.txt  # VLESS 字段文本，含 udp=true
+/root/reality-relay-bootstrap-v6-clash.yaml # Mihomo/Clash，含 ipv6: true 与 udp: true
+```
+
+VLESS Reality 使用 TCP 作为承载，但客户端的 UDP 数据会封装在该连接里，所以防火墙不需要额外开放同号 UDP 端口。
+
 一键脚本当前只让你填写这些内容，其余变量使用默认值；其中 `ADMIN_PUBKEY` 会逐条询问，可以添加多个：
 
 | 需要填写 | 默认值/提示 | 说明 |
@@ -601,7 +641,13 @@ vless-plain,vless://uuid@example.com:12345?type=tcp&encryption=none&security=non
 1. `listen_port` 可留空自动分配；填写时不能与 `DIRECT_PORT`、`home-proxies.csv` 或其他上游节点重复。
 2. `listen_port` 必须在 `HOME_PORT_START` 和 `HOME_PORT_END` 范围内。
 3. 上游节点链接里包含密码、UUID、Reality public key 等连接信息，不要公开、不要提交到 GitHub。
-4. 这不是简单 TCP 转发；客户端连你的 VPS，VPS 再用普通 VLESS TCP 或 VLESS Reality 连接上游节点。
+4. 客户端连接本机 VLESS+Reality 入口，本机再通过 TCP transport 使用普通 VLESS 或 VLESS Reality 连接上游；原有 Reality、Vision 及链接参数保持有效。
+
+`type=tcp` 指上游 VLESS transport，可代理的目标流量同时包括 TCP 和 UDP。生成的 VLESS outbound 省略 `network`，使用 sing-box 默认的 TCP+UDP 支持和 XUDP 编码；`type=ws`、`type=udp` 等不支持的 transport 仍会报错。参见 [sing-box 官方 VLESS outbound 文档](https://sing-box.sagernet.org/configuration/outbound/vless/)。
+
+实时通信、VoIP、Wi-Fi Calling 所需的 UDP（包括 UDP 500/4500）沿原有 inbound → 指定 outbound 映射转发，无需增加专用域名、IP 或端口规则。客户端与上游落地机也需要支持 UDP relay/XUDP。UDP 载荷封装在 VLESS TCP 连接内，UFW 仍只开放实际 VLESS TCP 入口端口。
+
+升级时保留现有 `upstream-nodes.txt` 格式和字段，保持 `RESET_PROXY_KEYS=false`，然后执行 `sudo bash bootstrap.sh --phase singbox` 重新生成配置、校验并重启服务。`home-proxies.csv` 的 SOCKS/HTTP `network` 语义不变。
 
 ---
 

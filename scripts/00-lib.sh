@@ -697,6 +697,37 @@ wait_for_port_listener() {
   return 1
 }
 
+local_tcp_connects() {
+  local family="$1" port="$2"
+  python3 - "$family" "$port" <<'PY'
+import socket
+import sys
+
+family = sys.argv[1]
+port = int(sys.argv[2])
+af, host = (socket.AF_INET6, "::1") if family == "6" else (socket.AF_INET, "127.0.0.1")
+sock = socket.socket(af, socket.SOCK_STREAM)
+sock.settimeout(1.0)
+try:
+    sock.connect((host, port))
+finally:
+    sock.close()
+PY
+}
+
+wait_for_local_tcp_family() {
+  local family="$1" port="$2" timeout="${3:-15}" deadline
+  [[ "$family" == "4" || "$family" == "6" ]] || return 2
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS <= deadline )); do
+    if local_tcp_connects "$family" "$port" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 diagnose_singbox_listeners() {
   warn "当前 TCP 监听端口如下（用于排查 sing-box 未监听问题）："
   (ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null || true) | tee -a "$LOG_FILE" >&2

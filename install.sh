@@ -20,23 +20,10 @@ DEFAULT_BRANCH="${RRB_BRANCH:-main}"
 RUN_PHASES="${RRB_RUN_PHASES:-true}"
 RRB_VERBOSE="${RRB_VERBOSE:-false}"
 INSTALL_LOG_FILE="${RRB_INSTALL_LOG_FILE:-/tmp/reality-relay-bootstrap-install.log}"
-export RRB_VERBOSE
-
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  echo "ERROR: 请使用 root 运行，例如：sudo bash install.sh" >&2
-  exit 1
-fi
-
-if [[ -n "${RRB_INPUT_TTY:-}" ]]; then
-  INPUT_TTY="$RRB_INPUT_TTY"
-elif [[ -r /dev/tty ]]; then
-  INPUT_TTY="/dev/tty"
-elif [[ -t 0 ]]; then
-  INPUT_TTY="/dev/stdin"
-else
-  echo "ERROR: 需要交互式终端来填写配置。" >&2
-  exit 1
-fi
+INSTALL_MODE="full"
+IPV6_NODE_ADDRESS=""
+INPUT_TTY=""
+export RRB_VERBOSE RUN_PHASES
 
 BOLD=$'\033[1m'
 DIM=$'\033[2m'
@@ -51,6 +38,68 @@ line() { printf '%b\n' "${DIM}────────────────�
 info() { printf '%b\n' "${BLUE}INFO${RESET} $*" >&2; }
 warn() { printf '%b\n' "${YELLOW}WARN${RESET} $*" >&2; }
 die() { printf '%b\n' "${RED}ERROR${RESET} $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+用法：
+  sudo bash install.sh
+  sudo bash install.sh -6 [IPv6地址]
+  sudo bash install.sh --add-ipv6-node [IPv6地址]
+
+选项：
+  -6, --add-ipv6-node [地址]  在已有部署上启用 IPv6 监听，并单独生成 v6 VLESS 节点
+      --ipv6-address <地址>   与 -6 相同，但要求显式提供 IPv6 地址
+  -h, --help                 显示帮助
+
+-6 是维护模式：要求现有 config.env、sing-box 和 Reality 密钥都已就绪；
+不会重跑 SSH 初始化，也不会轮换 VLESS UUID、Reality keypair 或 short-id。
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -6|--add-ipv6-node)
+        INSTALL_MODE="ipv6-node"
+        if [[ $# -ge 2 && "${2:-}" != -* ]]; then
+          IPV6_NODE_ADDRESS="$2"
+          shift 2
+        else
+          shift
+        fi
+        ;;
+      --ipv6-address)
+        [[ $# -ge 2 && -n "${2:-}" ]] || die "--ipv6-address 后必须填写 IPv6 地址。"
+        INSTALL_MODE="ipv6-node"
+        IPV6_NODE_ADDRESS="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        [[ $# -eq 0 ]] || die "不支持位置参数：$*"
+        ;;
+      *)
+        die "不支持的参数：$1；使用 --help 查看可用选项。"
+        ;;
+    esac
+  done
+}
+
+init_input_tty() {
+  if [[ -n "${RRB_INPUT_TTY:-}" ]]; then
+    INPUT_TTY="$RRB_INPUT_TTY"
+  elif [[ -r /dev/tty ]]; then
+    INPUT_TTY="/dev/tty"
+  elif [[ -t 0 ]]; then
+    INPUT_TTY="/dev/stdin"
+  else
+    die "需要交互式终端来填写配置；也可以使用 -6 <IPv6地址> 直接指定地址。"
+  fi
+}
 
 run_logged() {
   if [[ "$RRB_VERBOSE" == "true" ]]; then
@@ -331,6 +380,34 @@ public_ipv4() {
     ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}')"
   fi
   printf '%s\n' "$ip"
+}
+
+public_ipv6() {
+  local ip=""
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -6fsS --max-time 4 https://api64.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]] && command -v ip >/dev/null 2>&1; then
+    ip="$(ip -6 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
+  fi
+  printf '%s\n' "$ip"
+}
+
+normalize_ipv6() {
+  local value="$1"
+  command -v python3 >/dev/null 2>&1 || die "找不到 python3，无法校验 IPv6 地址。"
+  python3 - "$value" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv6Address(sys.argv[1].strip().strip("[]"))
+except ValueError as exc:
+    raise SystemExit(f"ERROR: IPv6 地址不合法：{sys.argv[1]}（{exc}）")
+if address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local:
+    raise SystemExit(f"ERROR: 不能把 {address} 用作公网 VLESS 节点地址。")
+print(address.compressed)
+PY
 }
 
 ensure_project() {
@@ -693,10 +770,46 @@ run_install_flow() {
   printf '  sudo bash bootstrap.sh --phase output-nodes\n'
 }
 
+run_ipv6_node_flow() {
+  local project_dir="$1" detected_ipv6 normalized_ipv6
+  [[ -f "$project_dir/config.env" ]] || die "-6 维护模式要求已有配置：$project_dir/config.env"
+  [[ -x "$project_dir/scripts/16-add-ipv6-node.sh" || -f "$project_dir/scripts/16-add-ipv6-node.sh" ]] \
+    || die "当前分支缺少 IPv6 节点维护脚本。"
+
+  if [[ -z "$IPV6_NODE_ADDRESS" ]]; then
+    detected_ipv6="$(public_ipv6)"
+    IPV6_NODE_ADDRESS="$(read_default "SERVER_IP_IPv6" "$detected_ipv6")"
+  fi
+  [[ -n "$IPV6_NODE_ADDRESS" ]] || die "IPv6 地址不能为空。"
+  normalized_ipv6="$(normalize_ipv6 "$IPV6_NODE_ADDRESS")" || die "IPv6 地址校验失败。"
+
+  line
+  printf '%b\n' "${CYAN}${BOLD}IPv6 节点维护模式${RESET}"
+  printf '  项目目录：%s\n' "$project_dir"
+  printf '  IPv6 地址：%s\n' "$normalized_ipv6"
+  printf '%b\n' "${DIM}只复用现有 VLESS/Reality 身份并补充 v6；不会执行 SSH 初始化或重置密钥。${RESET}"
+
+  RRB_PROJECT_DIR="$project_dir" \
+  RRB_CONFIG_FILE="$project_dir/config.env" \
+  RRB_VERBOSE="$RRB_VERBOSE" \
+    bash "$project_dir/scripts/16-add-ipv6-node.sh" --address "$normalized_ipv6"
+}
+
 main() {
+  parse_args "$@"
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    die "请使用 root 运行，例如：sudo bash install.sh"
+  fi
+  if [[ "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ]]; then
+    init_input_tty
+  fi
   banner
   local project_dir default_ip
   project_dir="$(ensure_project)"
+  if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
+    run_ipv6_node_flow "$project_dir"
+    return 0
+  fi
   default_ip="$(public_ipv4)"
 
   line

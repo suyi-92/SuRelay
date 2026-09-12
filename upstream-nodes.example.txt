@@ -16,3 +16,5 @@ tag,node_url,listen_port
 # Current supported upstream protocols:
 # - vless:// with security=none and type=tcp
 # - vless:// with security=reality and type=tcp
+# type=tcp selects the VLESS transport; both TCP and UDP destinations are relayed.
+# VLESS outbound network is omitted; sing-box uses XUDP for UDP by default.

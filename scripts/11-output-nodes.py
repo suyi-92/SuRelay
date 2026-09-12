@@ -10,6 +10,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import quote, urlencode
 
 
 SUBSCRIPTION_TARGETS = {"ClashMeta"}
@@ -55,7 +56,9 @@ def normalize_subscription_target(value: str) -> str:
     return target
 
 
-def get_server_ip(env: Dict[str, str], server_override: str = "") -> str:
+def get_server_ip(env: Dict[str, str], server_override: str = "", force_server_override: bool = False) -> str:
+    if force_server_override and server_override.strip():
+        return server_override.strip()
     if env.get("ENABLE_CUSTOM_DOMAIN", "false").lower() == "true" and env.get("CUSTOM_DOMAIN", "").strip():
         return env["CUSTOM_DOMAIN"].strip()
     if server_override.strip():
@@ -82,11 +85,18 @@ def get_server_ip(env: Dict[str, str], server_override: str = "") -> str:
     raise SystemExit("SERVER_IP 为空且无法自动获取公网 IP；请在 config.env 填写 SERVER_IP_IPV4 或 SERVER_IP_IPV6。")
 
 
-def build_nodes(env: Dict[str, str], rows: List[Dict[str, Any]], gen, server_override: str = "", name_suffix: str = "") -> List[Dict[str, Any]]:
+def build_nodes(
+    env: Dict[str, str],
+    rows: List[Dict[str, Any]],
+    gen,
+    server_override: str = "",
+    name_suffix: str = "",
+    force_server_override: bool = False,
+) -> List[Dict[str, Any]]:
     uuid = gen.read_vless_uuid(env)
     public_key = gen.read_reality_public_key(env)
     short_id = gen.read_reality_short_id(env)
-    server = get_server_ip(env, server_override)
+    server = get_server_ip(env, server_override, force_server_override)
     alpn = [item.strip() for item in env["CLIENT_ALPN"].split(",") if item.strip()]
     udp = gen.as_bool(env, "CLIENT_UDP")
 
@@ -149,6 +159,42 @@ def node_to_text(node: Dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def node_to_vless_uri(node: Dict[str, Any]) -> str:
+    server = str(node["server"]).strip().strip("[]")
+    authority_server = f"[{server}]" if ":" in server else server
+    params = [
+        ("encryption", "none"),
+        ("security", "reality"),
+        ("type", "tcp"),
+        ("sni", node["servername"]),
+        ("fp", node["client-fingerprint"]),
+        ("pbk", node["reality-opts"]["public-key"]),
+        ("sid", node["reality-opts"]["short-id"]),
+        ("spx", "/"),
+    ]
+    if node.get("flow"):
+        params.insert(1, ("flow", node["flow"]))
+    if node.get("alpn"):
+        params.append(("alpn", ",".join(node["alpn"])))
+    query = urlencode(params, quote_via=quote)
+    fragment = quote(str(node["name"]), safe="")
+    return f"vless://{node['uuid']}@{authority_server}:{node['port']}?{query}#{fragment}"
+
+
+def write_private_file(path_value: str, text: str) -> None:
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+        os.chmod(path, 0o600)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def build_clash_yaml(env: Dict[str, str], nodes: List[Dict[str, Any]], clash_ipv6: str = "auto") -> str:
@@ -224,7 +270,9 @@ def main() -> int:
     ap.add_argument("--generator", required=True)
     ap.add_argument("--nodes-out", default="/root/reality-relay-bootstrap-nodes.txt")
     ap.add_argument("--clash-out", default="/root/reality-relay-bootstrap-clash.yaml")
+    ap.add_argument("--vless-out", default="")
     ap.add_argument("--server-override", default="")
+    ap.add_argument("--force-server-override", action="store_true")
     ap.add_argument("--name-suffix", default="")
     ap.add_argument("--extra-server", default="")
     ap.add_argument("--extra-name-suffix", default="")
@@ -240,40 +288,47 @@ def main() -> int:
     env = gen.defaults(gen.parse_env_file(env_path))
     gen.validate_env(env)
     rows = gen.load_rows(env, env_path.parent, allow_empty=True)
-    nodes = build_nodes(env, rows, gen, args.server_override, args.name_suffix)
+    nodes = build_nodes(
+        env,
+        rows,
+        gen,
+        args.server_override,
+        args.name_suffix,
+        args.force_server_override,
+    )
     if args.extra_server:
-        extra_nodes = build_nodes(env, rows, gen, args.extra_server, args.extra_name_suffix)
+        extra_nodes = build_nodes(
+            env,
+            rows,
+            gen,
+            args.extra_server,
+            args.extra_name_suffix,
+            args.force_server_override,
+        )
         nodes = interleave_nodes(nodes, extra_nodes)
 
     nodes_text = "\n---\n".join(node_to_text(node) for node in nodes) + "\n"
     clash_yaml = build_clash_yaml(env, nodes, args.clash_ipv6)
+    vless_text = "\n".join(node_to_vless_uri(node) for node in nodes) + "\n"
 
     if not args.skip_node_files:
         for out, text in [(args.nodes_out, nodes_text), (args.clash_out, clash_yaml)]:
-            path = Path(out)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.chmod(tmp, 0o600)
-            tmp.replace(path)
-            os.chmod(path, 0o600)
+            write_private_file(out, text)
+        if args.vless_out:
+            write_private_file(args.vless_out, vless_text)
 
     if args.subscription_out:
         target = normalize_subscription_target(args.subscription_target or env.get("SUBSCRIPTION_TARGET", "ClashMeta"))
         subscription_payload = build_subscription_payload(target, clash_yaml, nodes)
-        path = Path(args.subscription_out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(subscription_payload, encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        tmp.replace(path)
-        os.chmod(path, 0o600)
+        write_private_file(args.subscription_out, subscription_payload)
         if not args.quiet:
             print(f"已生成 {target} 订阅文件：{args.subscription_out}")
 
     if not args.quiet and not args.skip_node_files:
         print(f"已生成节点文件：{args.nodes_out}")
         print(f"已生成 Clash/Mihomo 文件：{args.clash_out}")
+        if args.vless_out:
+            print(f"已生成 VLESS 分享链接文件：{args.vless_out}")
         print("控制台脱敏摘要：")
         for node in nodes:
             print(

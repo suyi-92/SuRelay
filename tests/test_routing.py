@@ -23,27 +23,14 @@ gen = load_module("gen", ROOT / "scripts" / "08-generate-singbox-config.py")
 
 class RoutingTest(unittest.TestCase):
     def upstream_row(self):
-        return {
-            "tag": "frontier",
-            "listen_port": 51043,
-            "type": "vless-reality",
-            "server": "frontier.example.com",
-            "server_port": 443,
-            "source": "upstream",
-            "outbound": {
-                "type": "vless",
-                "tag": "out-frontier",
-                "server": "frontier.example.com",
-                "server_port": 443,
-                "uuid": "11111111-1111-1111-1111-111111111111",
-                "network": "tcp",
-                "tls": {
-                    "enabled": True,
-                    "server_name": "www.microsoft.com",
-                    "reality": {"enabled": True, "public_key": "public-key"},
-                },
-            },
-        }
+        return gen.parse_vless_upstream(
+            "frontier",
+            51043,
+            "vless://11111111-1111-1111-1111-111111111111@frontier.example.com:443"
+            "?security=reality&type=tcp&flow=xtls-rprx-vision"
+            "&sni=www.microsoft.com&pbk=public-key",
+            2,
+        )
 
     def test_legacy_smart_mode_is_normalized_to_direct(self):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -87,6 +74,8 @@ class RoutingTest(unittest.TestCase):
             rules,
         )
         self.assertNotIn("rule_set", config["route"])
+        upstream_outbound = next(item for item in config["outbounds"] if item["tag"] == "out-frontier")
+        self.assertNotIn("network", upstream_outbound)
         split_keys = {
             "domain",
             "domain_suffix",

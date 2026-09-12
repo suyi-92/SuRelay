@@ -78,6 +78,31 @@ Cloudflare API Token 和逐条填写的家宽代理密码会按输入字符数�
 
 管理员 SSH 公钥支持一次性粘贴多行，每行一把，完成后输入空行结束。尚未录入公钥时直接回车会警告并继续等待，格式不正确的行也会提示重新输入；只有单独输入大写 `SKIP` 才能跳过本次录入。跳过后仍需 root 已有可用公钥，否则后续 SSH 部署检查会停止。
 
+已经完成部署、现在只想补一套 IPv6 字面量的本地 VLESS 节点时，使用 `-6` 维护模式。地址可自动探测后确认，也可以直接传入：
+
+```bash
+sudo bash install.sh -6
+sudo bash install.sh -6 2001:db8::10
+```
+
+远程一键脚本同样可以接收该选项：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh) -6 2001:db8::10
+```
+
+`-6` 要求 `/opt/reality-relay-bootstrap/config.env`（或 `RRB_INSTALL_DIR` 指定目录）以及现有 sing-box、VLESS UUID、Reality keypair、short-id 都已经就绪。它不会重跑 SSH 初始化，也不会轮换身份材料；只设置 `SERVER_IP_IPV6`、`ENABLE_IPV6_LISTEN=true`、`CLIENT_UDP=true` 和 `RESET_PROXY_KEYS=false`，保留原有 `PROXY_IP_VERSION` 出口/DNS 策略，然后同步 UFW v6 规则、重启并验证 sing-box 的 IPv4/IPv6 监听。
+
+成功后生成三份仅含 IPv6 地址的 600 权限本地文件：
+
+```text
+/root/reality-relay-bootstrap-v6-vless.txt
+/root/reality-relay-bootstrap-v6-nodes.txt
+/root/reality-relay-bootstrap-v6-clash.yaml
+```
+
+其中 VLESS 分享链接会正确使用 `[IPv6]` authority；Mihomo/Clash 显式包含 `ipv6: true`、`type: vless`、`network: tcp` 和 `udp: true`。VLESS UDP 流量封装在 TCP/Reality 入口内，不需要开放同号 UDP 端口。仍需在云厂商 IPv6 安全组中放行实际使用的 VLESS TCP 端口。该模式只生成本地 v6 文件，不主动改动现有订阅服务。
+
 一键脚本仍然保留 SSH 二阶段安全确认：完成 `ssh-phase1` 后，需要你另开窗口确认 root 公钥登录正常，才会继续执行 `ssh-final`。家宽代理既可以按提示逐个填写，也可以选择一次性粘贴多行 CSV；上游节点可以直接逐行粘贴普通 `vless://` 或 VLESS Reality 分享链接，也可以粘贴 `tag,node_url,listen_port` CSV。
 
 ## 第一次使用
@@ -239,7 +264,13 @@ vless-relay,vless://uuid@example.com:443?encryption=none&security=reality&flow=x
 vless-plain,vless://uuid@example.com:12345?type=tcp&encryption=none&security=none#vless-plain,51049
 ```
 
-也可以不写表头，只逐行放 `vless://` 节点链接；脚本会从 `HOME_PORT_START` 到 `HOME_PORT_END` 的空闲端口中自动分配。当前支持普通 VLESS TCP 和 VLESS Reality 上游。
+也可以不写表头，只逐行放 `vless://` 节点链接；脚本会从 `HOME_PORT_START` 到 `HOME_PORT_END` 的空闲端口中自动分配。当前支持普通 VLESS 和 VLESS Reality 上游，均使用 TCP transport。
+
+链接中的 `type=tcp` 表示上游 VLESS transport，不限制可代理的目标流量。生成器不设置 VLESS outbound 的 `network`，因此默认允许 TCP 和 UDP；UDP 默认使用 VLESS 的 XUDP 编码，详见 [sing-box 官方 VLESS outbound 文档](https://sing-box.sagernet.org/configuration/outbound/vless/)。Reality、Vision 和现有链接参数继续保留，不支持的 transport（例如 `type=ws`、`type=udp`）仍会被拒绝。
+
+这可承载实时通信、VoIP、Wi-Fi Calling 等应用的 UDP 流量。UDP 500/4500 与其他 UDP 目标一样沿固定的 inbound → 指定 outbound 转发，无需专用域名、IP 或端口分流规则；客户端与上游落地机也需要支持相应的 UDP relay/XUDP。VLESS 入口及上游连接仍使用 TCP，UFW 继续只放行实际使用的 VLESS TCP 入口端口。
+
+已有 `upstream-nodes.txt` 无需新增字段或更改格式。更新代码后，保持 `RESET_PROXY_KEYS=false`，执行 `sudo bash bootstrap.sh --phase singbox` 重新生成并校验配置、重启服务，即可应用此修复。`home-proxies.csv` 中 SOCKS/HTTP 代理的 `network` 语义保持不变。
 
 ## 标准执行流程
 

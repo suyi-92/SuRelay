@@ -15,6 +15,8 @@ nano upstream-nodes.txt
 
 `upstream-nodes.txt` 是可选文件，用来接入上游节点分享链接。当前只支持 `vless://...security=none...` 和 `vless://...security=reality...`。推荐写 `tag,node_url,listen_port`，也可逐行只写节点链接让脚本自动分配端口；旧 `tag,listen_port,node_url` 仍兼容。
 
+链接中的 `type=tcp` 表示上游 VLESS transport；生成的 VLESS outbound 省略 `network`，默认可代理 TCP+UDP，UDP 默认使用 XUDP。固定 inbound → 指定 outbound 映射及 UFW 的 TCP 入口规则保持不变；客户端与上游落地机需要支持 UDP relay/XUDP。已有节点文件无需新增字段，更新代码后重跑 `singbox` 阶段即可重新生成配置并应用修复。
+
 如需启用自有域名，DNS 默认按 Cloudflare 灰云 / DNS only 处理，A/AAAA 指向服务器公网 IP，并在 `config.env` 填写：
 
 ```bash

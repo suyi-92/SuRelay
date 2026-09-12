@@ -45,6 +45,14 @@ sudo bash bootstrap.sh --phase output-nodes
 
 这两个文件包含 VLESS UUID、Reality public key、short-id 等节点信息，权限为 600，不要公开。
 
+如果机器最初只配置了 IPv4，后来只想补出一套 IPv6 字面量本地节点，可以运行：
+
+```bash
+sudo bash install.sh -6 2001:db8::10
+```
+
+它会保留现有 UUID、Reality key、端口与出口映射，在 `/root` 生成 `reality-relay-bootstrap-v6-vless.txt`、`reality-relay-bootstrap-v6-nodes.txt` 和 `reality-relay-bootstrap-v6-clash.yaml`。v6 Mihomo/Clash 文件显式启用 `ipv6: true` 与 `udp: true`；VLESS UDP 通过现有 TCP/Reality 会话承载，不需要再开放 UDP 监听端口。
+
 如果同时配置了 IPv4 和 IPv6，两个订阅链接都返回同一份完整节点；IPv4 节点名称保持不变，IPv6 节点名称追加 `-IPv6`。
 如果 Clash Verge 或浏览器无法导入 IPv6 字面量订阅地址，有 IPv4 时直接用 IPv4 订阅地址即可，它会返回同一份完整节点。
 

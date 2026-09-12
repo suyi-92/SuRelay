@@ -533,13 +533,14 @@ def parse_vless_upstream(tag: str, listen_port: int, node_url: str, lineno: int)
     if encryption != "none":
         raise ConfigError(f"upstream-nodes.txt 第 {lineno} 行 VLESS encryption 目前只支持 none。")
 
+    # type=tcp describes the VLESS transport, not the destination network.
+    # Omit outbound.network so sing-box can relay both TCP and UDP payloads.
     outbound: Dict[str, Any] = {
         "type": "vless",
         "tag": f"out-{tag}",
         "server": host,
         "server_port": port,
         "uuid": uuid,
-        "network": "tcp",
         "domain_resolver": "dns-cloudflare",
     }
     flow = first_query_value(params, "flow")

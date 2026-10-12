@@ -52,6 +52,21 @@ RRB_RUN_PHASES=false bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/
 
 生成后，按上面的“进入目录 → 编辑 `config.env` → 运行安装”步骤继续部署。
 
+## 重置后重新安装
+
+需要清空旧部署、重新填写配置并生成全新节点时，在服务器项目目录执行：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash install.sh --reset
+```
+
+Alpine 以 root 执行 `bash install.sh --reset`，无需 sudo。远程入口也支持追加 `--reset`；Alpine 下载 `install.sh` 后执行 `bash /tmp/reality-relay-install.sh --reset`。
+
+脚本先显示卸载清单，输入大写 `RESET` 后，将旧文件备份到 `/root/reality-relay-bootstrap-backups/reset-*` 并核验，然后停止旧节点/订阅、删除项目配置与专用服务、清理项目代理端口规则，再进入全新安装。**旧节点、订阅 token、出口列表会失效或清空，域名模式可能需要重新签发证书。**
+
+系统软件包、当前 SSH 通道及公钥、其他站点/证书/防火墙规则保留。重装仍需另开终端验证 root 公钥登录。`--reset` 不能与 `-6` 或 `RRB_RUN_PHASES=false` 合用；备份失败或路径归属不明时停止。详细清理范围、预览及恢复步骤见 [重置安装说明](docs/reset-install.md)。
+
 ## IPv6、CF 域名与 IPv4 不通
 
 CF 在这里提供 DNS 和证书验证，记录必须为**灰云 / DNS only**。A 指向 VPS IPv4，AAAA 指向 VPS IPv6；Reality 流量直接连接 VPS，不能用普通橙云代理。

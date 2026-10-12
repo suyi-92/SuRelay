@@ -25,6 +25,20 @@ if [[ "$ENABLE_SFTP_USER" == "true" ]]; then
   ALLOWED_USERS="$ALLOWED_USERS $SFTP_USER"
 fi
 
+if [[ "${RRB_RESET_INSTALL:-false}" == "true" ]] && ! is_dry_run; then
+  # Only after the renewed root-key login is confirmed, remove old managed SFTP
+  # blocks. Keep accounts and uploaded files; their ownership may predate us.
+  python3 - <<'PY'
+import re
+from pathlib import Path
+path = Path('/etc/ssh/sshd_config')
+text = path.read_text(encoding='utf-8')
+text = re.sub(r'(?m)^# BEGIN reality-relay-bootstrap SFTP user ([A-Za-z0-9_-]+)\n'
+              r'.*?^# END reality-relay-bootstrap SFTP user \1\n?', '', text, flags=re.S | re.M)
+path.write_text(text, encoding='utf-8')
+PY
+fi
+
 write_hardening_file() {
   local kbd_directive="$1"
   write_sshd_policy <<EOF

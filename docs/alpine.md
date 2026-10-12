@@ -21,6 +21,8 @@ bash /tmp/reality-relay-install.sh
 
 ## 平台差异
 
+需要卸载旧部署后重新配置时，用 `bash install.sh --reset`。它会先显示清单、确认并核验备份，再清理项目配置及 OpenRC 专用服务；范围与恢复说明见 [重置安装](reset-install.md)。
+
 | 项目 | Alpine 行为 |
 | --- | --- |
 | `INSTALL_SINGBOX_METHOD=auto` | 选择 `release`。从 SagerNet 官方 Release 下载固定的 sing-box 1.14.3 Linux musl 归档，按架构检查固定 SHA256；替换前运行版本检查和现有配置检查。没有隐式升级到 latest。 |

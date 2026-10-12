@@ -4,6 +4,8 @@ Alpine 3.19 先按 [Alpine 部署说明](alpine.md) 安装 Bash，并保持 `INS
 
 ## 1. 准备配置
 
+已有部署需要全部重置时，使用 `bash install.sh --reset`；先备份并卸载项目配置/服务，再进入交互式安装。普通重跑仍保留节点身份。见 [重置安装说明](reset-install.md)。
+
 ```bash
 cp config.example.env config.env
 nano config.env

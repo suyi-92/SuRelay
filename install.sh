@@ -40,23 +40,33 @@ usage() {
   cat <<'EOF'
 用法：
   sudo bash install.sh
+  sudo bash install.sh --reset
   sudo bash install.sh -6 [IPv6地址]
   sudo bash install.sh --add-ipv6-node [IPv6地址]
 
 选项：
+      --reset               备份并卸载项目配置与服务，再重新填写配置安装
   -6, --add-ipv6-node [地址]  在已有部署上启用 IPv6 监听，并单独生成 v6 VLESS 节点
       --ipv6-address <地址>   与 -6 相同，但要求显式提供 IPv6 地址
   -h, --help                 显示帮助
 
 -6 是维护模式：要求现有 config.env、sing-box 和 Reality 密钥都已就绪；
 不会重跑 SSH 初始化，也不会轮换 VLESS UUID、Reality keypair 或 short-id。
+--reset 会使旧节点和订阅失效；显示清单后需输入 RESET。保留 SSH 登录通道、
+系统软件包和其他证书；不能与 -6 同时使用。
 EOF
 }
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --reset)
+        [[ "$INSTALL_MODE" != "ipv6-node" ]] || die "--reset 不能与 -6 同时使用。"
+        INSTALL_MODE="reset"
+        shift
+        ;;
       -6|--add-ipv6-node)
+        [[ "$INSTALL_MODE" != "reset" ]] || die "--reset 不能与 -6 同时使用。"
         INSTALL_MODE="ipv6-node"
         if [[ $# -ge 2 && "${2:-}" != -* ]]; then
           IPV6_NODE_ADDRESS="$2"
@@ -66,6 +76,7 @@ parse_args() {
         fi
         ;;
       --ipv6-address)
+        [[ "$INSTALL_MODE" != "reset" ]] || die "--reset 不能与 -6 同时使用。"
         [[ $# -ge 2 && -n "${2:-}" ]] || die "--ipv6-address 后必须填写 IPv6 地址。"
         INSTALL_MODE="ipv6-node"
         IPV6_NODE_ADDRESS="$2"
@@ -528,7 +539,14 @@ run_install_flow() {
   section "部署准备"
   info "开始部署；详细日志：$INSTALL_LOG_FILE"
   run_install_phase preflight
-  run_install_phase ssh-phase1
+  if [[ "$INSTALL_MODE" == "reset" || "${RRB_RESET_INSTALL:-false}" == "true" ]]; then
+    # Keep the working SSH policy until the user has verified the new keys.
+    info "更新 root 公钥，验证前保留当前 SSH 登录策略。"
+    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" \
+      bash "$project_dir/scripts/02-setup-root-ssh.sh"
+  else
+    run_install_phase ssh-phase1
+  fi
 
   section "SSH 公钥登录验证"
   printf '另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
@@ -537,7 +555,11 @@ run_install_flow() {
     section "应用配置与验证"
     CONFIRM_ROOT_KEY_LOGIN=yes run_install_phase ssh-final
   else
-    warn "已停在 ssh-phase1；验证后按 README 执行 ssh-final。"
+    if [[ "$INSTALL_MODE" == "reset" || "${RRB_RESET_INSTALL:-false}" == "true" ]]; then
+      warn "重装已停在公钥验证；解决登录后使用 RRB_RESET_INSTALL=true bash install.sh 继续。"
+    else
+      warn "已停在 ssh-phase1；验证后按 README 执行 ssh-final。"
+    fi
     return 0
   fi
 
@@ -589,7 +611,7 @@ configure_install() {
   server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
   printf 'IPv6：填写或保留探测到的公网地址即启用；无地址可留空，安装后用 install.sh -6 补充。\n'
   server_ip_ipv6="$(read_default "SERVER_IP_IPv6（填入即启用）" "$(public_ipv6)")"
-  ssh_port="$(read_default "SSH_PORT" "22")"
+  ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-22}")"
 
   section "Cloudflare 域名（灰云 DNS）"
   enable_custom_domain="$(read_bool_value "ENABLE_CUSTOM_DOMAIN" "false")"
@@ -627,6 +649,9 @@ main() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     die "请使用 root 运行，例如：sudo bash install.sh"
   fi
+  if [[ "$INSTALL_MODE" == "reset" && "$RUN_PHASES" != "true" ]]; then
+    die "--reset 必须执行完整重装，不能与 RRB_RUN_PHASES=false 同时使用。"
+  fi
   if [[ "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ]]; then
     init_input_tty
   fi
@@ -638,6 +663,17 @@ main() {
   if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
     run_ipv6_node_flow "$project_dir"
     return 0
+  fi
+  if [[ "$INSTALL_MODE" == "reset" ]]; then
+    # Read the effective SSH port without sourcing or validating stale config.
+    RESET_SSH_PORT="${SSH_CONNECTION:-}"
+    RESET_SSH_PORT="${RESET_SSH_PORT##* }"
+    if [[ ! "$RESET_SSH_PORT" =~ ^[0-9]+$ ]]; then
+      RESET_SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}' || true)"
+    fi
+    RESET_SSH_PORT="${RESET_SSH_PORT:-22}"
+    RRB_INPUT_TTY="$INPUT_TTY" python3 "$project_dir/scripts/17-reset-install.py" --project-dir "$project_dir" --apply
+    export RRB_RESET_INSTALL=true
   fi
   configure_install "$project_dir"
   run_install_flow "$project_dir"

@@ -93,11 +93,14 @@ apt_get() (
   while true; do
     # Native lock waiting is unavailable in older supported APT versions and
     # does not cover apt lists locks, so use one bounded policy for both phases.
-    if LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=0 "$@" >"$attempt_log" 2>&1; then
-      cat "$attempt_log" >>"$LOG_FILE"
+    # DEBIAN_FRONTEND only controls debconf, not dpkg's conffile questions.
+    # Keep existing configuration and never consume installer/SSH terminal input.
+    # Stream to the persistent log as well, so a running APT command is observable.
+    if LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=0 \
+      -o Dpkg::Options::=--force-confold "$@" </dev/null 2>&1 \
+      | tee "$attempt_log" >>"$LOG_FILE"; then
       return 0
     fi
-    cat "$attempt_log" >>"$LOG_FILE"
     if grep -Eq '^E: Could not get lock .*([Ii]t is held by process|Resource temporarily unavailable)' "$attempt_log"; then
       if (( SECONDS >= deadline )); then
         tail -n 8 "$attempt_log" >&2 || true

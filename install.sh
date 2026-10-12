@@ -463,13 +463,28 @@ ensure_proxy_lists() {
 }
 
 run_install_phase() {
-  local phase="$1"
+  local phase="$1" label="$1" status=0
+  case "$phase" in
+    preflight) label="检查系统与依赖" ;;
+    ssh-phase1) label="准备 SSH 公钥登录" ;;
+    ssh-final) label="应用 SSH 最终加固" ;;
+    fail2ban) label="安装并配置 fail2ban" ;;
+    singbox) label="安装 sing-box、生成节点及配置域名" ;;
+    firewall) label="应用防火墙规则" ;;
+    validate) label="验证服务与节点" ;;
+  esac
+  info "开始：$label"
   if [[ "$RRB_VERBOSE" == "true" ]]; then
-    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase"
+    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" || status=$?
   else
     # Routine stdout goes to the log; warnings and failures stay visible on stderr.
-    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" >>"$INSTALL_LOG_FILE"
+    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" >>"$INSTALL_LOG_FILE" || status=$?
   fi
+  if (( status != 0 )); then
+    warn "阶段失败：$label（退出码 $status）；请查看 $INSTALL_LOG_FILE 和 /var/log/reality-relay-bootstrap.log。"
+    return "$status"
+  fi
+  info "完成：$label"
 }
 
 run_install_flow() {

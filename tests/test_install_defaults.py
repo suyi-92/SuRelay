@@ -123,6 +123,21 @@ run_install_flow "$1"
             self.assertNotIn("routine output", result.stdout)
             self.assertIn("routine output", (root / "install.log").read_text())
             self.assertIn("WARN: fixture failure", result.stderr)
+            self.assertIn("开始：安装 sing-box", result.stderr)
+            self.assertIn("阶段失败：安装 sing-box", result.stderr)
+            self.assertNotIn("完成：", result.stderr)
+
+    def test_phase_reports_start_and_completion_without_exposing_quiet_output(self):
+        for verbose in ("false", "true"):
+            with self.subTest(verbose=verbose), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "bootstrap.sh").write_text('printf "routine output\\n"\n')
+                result = self.run_bash('cd "$1"; run_install_phase singbox', root, RRB_VERBOSE=verbose)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("开始：安装 sing-box", result.stderr)
+                self.assertIn("完成：安装 sing-box", result.stderr)
+                self.assertNotIn("阶段失败", result.stderr)
+                self.assertEqual("routine output" in result.stdout, verbose == "true")
 
 
 if __name__ == "__main__":

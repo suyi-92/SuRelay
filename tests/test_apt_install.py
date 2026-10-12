@@ -31,7 +31,25 @@ sleep() {
 }
 apt-get() {
   printf '%s|%s|%s\n' "$LC_ALL" "$DEBIAN_FRONTEND" "$*" >>"$TEST_ROOT/calls"
-  local operation="$3" counter="$TEST_ROOT/count-$3" count=0
+  while [[ "${1:-}" == -o ]]; do shift 2; done
+  local operation="$1" counter="$TEST_ROOT/count-$1" count=0
+  if [[ "$TEST_SCENARIO" == stdin && "$operation" == install ]]; then
+    if IFS= read -r terminal_input; then
+      printf 'Unexpected terminal input: %s\n' "$terminal_input" >&2
+      return 90
+    fi
+  fi
+  if [[ "$TEST_SCENARIO" == live-log && "$operation" == install ]]; then
+    printf 'INSTALL_IN_PROGRESS\n'
+    for ((attempt=0; attempt<100; attempt++)); do
+      if grep -q '^INSTALL_IN_PROGRESS$' "$LOG_FILE"; then
+        return 0
+      fi
+      command sleep 0.01
+    done
+    printf 'Progress was not visible before the command returned\n' >&2
+    return 91
+  fi
   [[ ! -f "$counter" ]] || read -r count <"$counter"
   count=$((count + 1))
   printf '%s\n' "$count" >"$counter"
@@ -73,6 +91,7 @@ printf 'INSTALL_COMPLETE\n'
             result = subprocess.run(
                 ["bash", "--noprofile", "--norc", "-c", script],
                 capture_output=True, text=True, encoding="utf-8", timeout=10,
+                input="USER_SHELL_COMMAND\n",
                 env={
                     **os.environ, "TEST_ROOT": str(root), "TMPDIR": str(root / "tmp"),
                     "RRB_PROJECT_DIR": str(ROOT),
@@ -95,11 +114,82 @@ printf 'INSTALL_COMPLETE\n'
         self.assertEqual(result.stdout, "INSTALL_COMPLETE\n")
         self.assertEqual(result.stderr, "")
         self.assertEqual(calls, [
-            "C|noninteractive|-o DPkg::Lock::Timeout=0 update -y",
-            "C|noninteractive|-o DPkg::Lock::Timeout=0 install -y ca-certificates curl",
+            "C|noninteractive|-o DPkg::Lock::Timeout=0 -o Dpkg::Options::=--force-confold update -y",
+            "C|noninteractive|-o DPkg::Lock::Timeout=0 -o Dpkg::Options::=--force-confold install -y ca-certificates curl",
         ])
         self.assertEqual(sleeps, [])
         self.assertIn("CURRENT install SUCCESS", log)
+
+    def test_apt_does_not_consume_input_from_the_install_terminal(self):
+        result, _, _, log = self.run_install("stdin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("INSTALL_COMPLETE", result.stdout)
+        self.assertNotIn("USER_SHELL_COMMAND", log)
+
+    def test_apt_output_is_logged_while_the_command_is_still_running(self):
+        result, _, _, log = self.run_install("live-log")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("INSTALL_IN_PROGRESS", log)
+        self.assertNotIn("INSTALL_IN_PROGRESS", result.stdout)
+
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("apt-get", "dpkg-deb", "fakeroot")),
+        "Requires APT, dpkg-deb and fakeroot for an isolated local package install",
+    )
+    def test_real_dpkg_keeps_preexisting_unowned_config_without_prompting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            system = root / "system"
+            package = root / "package"
+            (package / "DEBIAN").mkdir(parents=True)
+            (package / "DEBIAN/control").write_text(
+                "Package: rrb-conffile-fixture\nVersion: 1.0\nArchitecture: all\n"
+                "Maintainer: Test <test@example.invalid>\nDescription: Local conffile regression fixture\n"
+            )
+            (package / "DEBIAN/conffiles").write_text("/etc/sing-box/config.json\n")
+            (package / "etc/sing-box").mkdir(parents=True)
+            packaged_config = '{"source": "package default"}\n'
+            (package / "etc/sing-box/config.json").write_text(packaged_config)
+            deb = root / "fixture.deb"
+            build = subprocess.run(
+                ["dpkg-deb", "--build", "--root-owner-group", str(package), str(deb)],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(build.returncode, 0, build.stderr)
+            for path in (
+                "etc/apt/apt.conf.d", "etc/sing-box", "var/lib/dpkg", "var/lib/apt/lists/partial",
+                "var/cache/apt/archives/partial", "var/log/apt",
+            ):
+                (system / path).mkdir(parents=True)
+            (system / "var/lib/dpkg/status").touch()
+            current_config = '{"source": "existing deployment"}\n'
+            config = system / "etc/sing-box/config.json"
+            config.write_text(current_config)
+            apt_config = root / "apt.conf"
+            # All package state, logs and installation paths stay in this temporary
+            # root. No sources or maintainer scripts are provided; nothing downloads.
+            apt_config.write_text(
+                f'Dir "{system}";\n'
+                f'Dir::State::status "{system}/var/lib/dpkg/status";\n'
+                'Dir::Etc::sourcelist "-";\nDir::Etc::sourceparts "-";\n'
+                f'DPkg::Options {{ "--root={system}"; }};\n'
+                'DPkg::Use-Pty "0";\nAPT::Sandbox::User "root";\n'
+            )
+            result = subprocess.run(
+                ["fakeroot", "bash", "--noprofile", "--norc", "-c", self.library + r'''
+LOG_FILE="$TEST_ROOT/phase.log"
+apt_get install -y "$TEST_DEB"
+'''],
+                capture_output=True, text=True, encoding="utf-8", input="", timeout=20,
+                env={
+                    **os.environ, "APT_CONFIG": str(apt_config), "TEST_ROOT": str(root),
+                    "TEST_DEB": str(deb), "RRB_PROJECT_DIR": str(ROOT), "RRB_VERBOSE": "false",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(config.read_text(), current_config)
+            self.assertEqual(config.with_suffix(".json.dpkg-dist").read_text(), packaged_config)
+            self.assertIn("Status: install ok installed", (system / "var/lib/dpkg/status").read_text())
 
     def test_dpkg_and_legacy_lists_lock_are_retried_then_continue(self):
         for scenario in ("install-lock", "update-lock"):

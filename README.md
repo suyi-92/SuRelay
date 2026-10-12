@@ -20,7 +20,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstr
 
 随后脚本显示一条 SSH 验证命令。**保留当前 SSH 窗口，在新终端执行；看到 `root` 后再确认关闭密码登录。** 提示为 `[Y/n]`，默认 `Y`：回车或输入 `y` 继续，输入 `n` 暂停；输入中断也会暂停。命令使用公钥和本地 SSH agent；有口令的私钥需先在本机用 `ssh-add` 加载。
 
-安装流程以标题和分隔线区分部署准备、SSH 验证、应用配置与最终节点输出。成功后显示 IPv6 节点状态、一个订阅链接及所有本地 `vless://` 节点链接；订阅链接为青色，本地节点为绿色。重定向输出、`TERM=dumb` 或设置 `NO_COLOR=1` 时使用纯文本。常规进度写入日志，告警和错误仍显示。
+安装流程以标题和分隔线区分部署准备、SSH 验证、应用配置与最终节点输出，并显示各阶段的开始、完成或失败。成功后显示 IPv6 节点状态、一个订阅链接及所有本地 `vless://` 节点链接；订阅链接为青色，本地节点为绿色。重定向输出、`TERM=dumb` 或设置 `NO_COLOR=1` 时使用纯文本。命令详细输出写入日志，告警和错误仍显示。
 
 默认值：VLESS TCP 443、Mihomo 订阅、保留 UUID/Reality 密钥、启用 UDP 支持。CF 模式走域名 HTTPS，订阅服务仅监听本机 51040；无域名时使用公网 HTTP 51040。其他选项在 [config.example.env](config.example.env) 中查阅并修改 `config.env`。
 
@@ -223,6 +223,18 @@ sudo CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final
 ```bash
 cd /opt/reality-relay-bootstrap
 sudo bash bootstrap.sh --phase validate --verbose
+```
+
+### 安装停在“应用配置与验证”
+
+安装/升级软件包时会自动保留已有配置文件（例如 `/etc/sing-box/config.json`），不会等待隐藏的覆盖确认，也不会读取当前 SSH 终端的输入。`DEBIAN_FRONTEND=noninteractive` 本身并不能禁用 dpkg 的配置文件确认，因此脚本同时设置了保留旧配置的策略。后续节点生成阶段仍会根据本项目配置更新 sing-box。
+
+如果运行的是旧版脚本，且日志出现 `*** config.json (Y/I/N/O/D/Z) [default=N] ?`，回到原安装窗口输入 `N` 并回车即可继续；不要在该窗口输入 Shell 命令或另外启动安装器。
+
+新版脚本会实时写入 APT 输出。需要查看当前步骤时，保留安装窗口，另开 SSH 窗口执行：
+
+```bash
+tail -f /var/log/reality-relay-bootstrap.log
 ```
 
 ### APT 提示锁被占用

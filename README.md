@@ -225,6 +225,25 @@ cd /opt/reality-relay-bootstrap
 sudo bash bootstrap.sh --phase validate --verbose
 ```
 
+### APT 提示锁被占用
+
+出现 `lock-frontend`、`Could not get lock`，且日志注明锁由 `unattended-upgr` 等进程持有时，表示系统自动更新或另一个包管理进程正在运行。部署阶段会仅针对锁占用自动重试，最多等待 5 分钟；超过时间后停止。不要删除锁文件或强行终止更新进程。
+
+可先查看自动更新状态（只读）：
+
+```bash
+sudo systemctl status apt-daily.service apt-daily-upgrade.service --no-pager
+```
+
+等待更新结束后，从项目目录重跑；已有配置和出口列表会保留：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash install.sh
+```
+
+如需延长每条 APT 命令的锁等待时间，可将最后一行改为 `sudo env RRB_APT_LOCK_TIMEOUT=600 bash install.sh`。网络、软件源、软件包或 dpkg 配置错误不会按锁占用重试；控制台只显示本次失败命令的日志末尾，完整历史仍保留在阶段日志中。
+
 ### 回滚
 
 先阅读 [恢复说明](docs/recovery.md)，保留当前还能登录的 SSH 窗口，再执行：

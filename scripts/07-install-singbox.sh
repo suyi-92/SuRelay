@@ -77,8 +77,7 @@ Components: *
 Enabled: yes
 Signed-By: /etc/apt/keyrings/sagernet.asc
 APT
-  apt-get update -y >>"$LOG_FILE" 2>&1
-  apt-get install -y sing-box >>"$LOG_FILE" 2>&1
+  apt_install sing-box
 }
 
 install_by_233boy() {

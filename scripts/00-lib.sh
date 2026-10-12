@@ -82,6 +82,43 @@ user_home() {
   die "用户不存在，无法获取 home：$user"
 }
 
+apt_get() (
+  # Isolate cleanup from callers' rollback traps. Retry only lock contention;
+  # failed downloads, package errors and dpkg failures must remain visible.
+  local lock_timeout="${RRB_APT_LOCK_TIMEOUT:-300}" deadline delay attempt_log waiting=false
+  [[ "$lock_timeout" =~ ^[0-9]{1,5}$ ]] || die "RRB_APT_LOCK_TIMEOUT 必须是 0–99999 秒。"
+  deadline=$((SECONDS + 10#$lock_timeout))
+  attempt_log="$(mktemp)" || die "无法创建 APT 临时日志。"
+  trap 'rm -f -- "$attempt_log"' EXIT
+  while true; do
+    # Native lock waiting is unavailable in older supported APT versions and
+    # does not cover apt lists locks, so use one bounded policy for both phases.
+    if LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=0 "$@" >"$attempt_log" 2>&1; then
+      cat "$attempt_log" >>"$LOG_FILE"
+      return 0
+    fi
+    cat "$attempt_log" >>"$LOG_FILE"
+    if grep -Eq '^E: Could not get lock .*([Ii]t is held by process|Resource temporarily unavailable)' "$attempt_log"; then
+      if (( SECONDS >= deadline )); then
+        tail -n 8 "$attempt_log" >&2 || true
+        die "APT 锁等待超时（${lock_timeout} 秒）；请等待其他包管理进程结束后重试。完整日志见 $LOG_FILE"
+      fi
+      if [[ "$waiting" == false ]]; then
+        warn "APT 正被其他包管理进程占用，等待释放后继续（最多 ${lock_timeout} 秒）。"
+        waiting=true
+      fi
+      delay=$((deadline - SECONDS))
+      (( delay <= 5 )) || delay=5
+      if (( delay > 0 )); then
+        sleep "$delay" || exit $?
+      fi
+    else
+      tail -n 12 "$attempt_log" >&2 || true
+      die "apt-get $* 失败；完整日志见 $LOG_FILE"
+    fi
+  done
+)
+
 apt_install() {
   require_root
   export DEBIAN_FRONTEND=noninteractive
@@ -89,14 +126,8 @@ apt_install() {
     log "DRY-RUN: apt-get update && apt-get install -y $*"
   else
     info "安装/确认依赖：$*"
-    if ! apt-get update -y >>"$LOG_FILE" 2>&1; then
-      tail -n 40 "$LOG_FILE" >&2 || true
-      die "apt-get update 失败；完整日志见 $LOG_FILE"
-    fi
-    if ! apt-get install -y "$@" >>"$LOG_FILE" 2>&1; then
-      tail -n 60 "$LOG_FILE" >&2 || true
-      die "apt-get install 失败：$*；完整日志见 $LOG_FILE"
-    fi
+    apt_get update -y || exit $?
+    apt_get install -y "$@" || exit $?
   fi
 }
 

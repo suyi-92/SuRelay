@@ -21,8 +21,17 @@ YELLOW=$'\033[33m'
 BLUE=$'\033[34m'
 CYAN=$'\033[36m'
 RESET=$'\033[0m'
+if [[ ! -t 1 || -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]]; then
+  BOLD='' DIM='' RED='' YELLOW='' BLUE='' CYAN='' RESET=''
+fi
 
 line() { printf '%b\n' "${DIM}────────────────────────────────────────────────────────────${RESET}"; }
+section() {
+  printf '\n'
+  line
+  printf '%b\n' "${CYAN}${BOLD}$*${RESET}"
+  line
+}
 info() { printf '%b\n' "${BLUE}INFO${RESET} $*" >&2; }
 warn() { printf '%b\n' "${YELLOW}WARN${RESET} $*" >&2; }
 die() { printf '%b\n' "${RED}ERROR${RESET} $*" >&2; exit 1; }
@@ -183,7 +192,11 @@ read_yes_no() {
   esac
   while true; do
     printf '%b' "${BOLD}${prompt}${RESET} ${DIM}[${suffix}]${RESET}: " >"$INPUT_TTY"
-    IFS= read -r value <"$INPUT_TTY" || true
+    if ! IFS= read -r value <"$INPUT_TTY"; then
+      printf '\n' >"$INPUT_TTY"
+      warn "确认输入已中断，暂停操作。"
+      return 1
+    fi
     if [[ -z "$value" ]]; then
       [[ "$default_value" == "yes" ]]
       return
@@ -478,13 +491,16 @@ run_install_flow() {
     fi
   fi
 
+  section "部署准备"
   info "开始部署；详细日志：$INSTALL_LOG_FILE"
   run_install_phase preflight
   run_install_phase ssh-phase1
 
-  printf '\n另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
+  section "SSH 公钥登录验证"
+  printf '另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
   printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "${SSH_PORT:-22}" "$ssh_host"
-  if read_yes_no "已确认公钥登录成功，继续关闭密码登录？" no; then
+  if read_yes_no "已确认公钥登录成功，继续关闭密码登录？" yes; then
+    section "应用配置与验证"
     CONFIRM_ROOT_KEY_LOGIN=yes run_install_phase ssh-final
   else
     warn "已停在 ssh-phase1；验证后按 README 执行 ssh-final。"
@@ -495,7 +511,6 @@ run_install_flow() {
   run_install_phase singbox
   run_install_phase firewall
   run_install_phase validate
-  printf '\n'
   python3 "$project_dir/scripts/11-output-nodes.py" --config-env "$project_dir/config.env" \
     --generator "$project_dir/scripts/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
 }
@@ -506,11 +521,12 @@ run_ipv6_node_flow() {
   [[ -x "$project_dir/scripts/16-add-ipv6-node.sh" || -f "$project_dir/scripts/16-add-ipv6-node.sh" ]] \
     || die "当前分支缺少 IPv6 节点维护脚本。"
 
+  section "启用 IPv6 节点"
   if [[ -z "$IPV6_NODE_ADDRESS" ]]; then
     detected_ipv6="$(public_ipv6)"
     IPV6_NODE_ADDRESS="$(read_default "SERVER_IP_IPv6" "$detected_ipv6")"
   fi
-  [[ -n "$IPV6_NODE_ADDRESS" ]] || die "IPv6 地址不能为空。"
+  [[ -n "$IPV6_NODE_ADDRESS" ]] || die "未获取到公网 IPv6；请先在 VPS 控制台启用 IPv6，再执行 install.sh -6 <真实公网IPv6地址>。"
   normalized_ipv6="$(normalize_ipv6 "$IPV6_NODE_ADDRESS")" || die "IPv6 地址校验失败。"
 
   local -a command=(bash "$project_dir/scripts/16-add-ipv6-node.sh" --address "$normalized_ipv6")
@@ -532,17 +548,16 @@ configure_install() {
   fi
   default_ip="$(public_ipv4)"
 
-  line
-  printf '%b\n' "${CYAN}${BOLD}基础信息${RESET}"
+  section "基础信息"
   local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey
   local enable_custom_domain custom_domain cloudflare_zone_name le_email cloudflare_api_token
   server_alias="$(read_default "SERVER_ALIAS" "")"
   server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
-  server_ip_ipv6="$(read_default "SERVER_IP_IPv6（可留空）" "$(public_ipv6)")"
+  printf 'IPv6：填写或保留探测到的公网地址即启用；无地址可留空，安装后用 install.sh -6 补充。\n'
+  server_ip_ipv6="$(read_default "SERVER_IP_IPv6（填入即启用）" "$(public_ipv6)")"
   ssh_port="$(read_default "SSH_PORT" "22")"
 
-  line
-  printf '%b\n' "${CYAN}${BOLD}Cloudflare 域名（灰云 DNS）${RESET}"
+  section "Cloudflare 域名（灰云 DNS）"
   enable_custom_domain="$(read_bool_value "ENABLE_CUSTOM_DOMAIN" "false")"
   custom_domain=""
   cloudflare_zone_name=""

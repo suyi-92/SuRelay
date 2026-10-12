@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+if os.name == "posix":
+    import pty
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +25,7 @@ class InstallFlowTest(unittest.TestCase):
             ["bash", "--noprofile", "--norc", "-c", self.functions + "\n" + body, "test", str(directory)],
             capture_output=True, text=True, encoding="utf-8",
             env={**os.environ, "RRB_INSTALL_LOG_FILE": str(directory / "install.log"), **environment},
+            timeout=10,
         )
 
     def test_reinstall_preserves_config_and_both_exit_lists_without_prompting(self):
@@ -39,12 +43,15 @@ class InstallFlowTest(unittest.TestCase):
             self.assertEqual({name: (root / name).read_bytes() for name in originals}, originals)
 
     def test_first_install_only_collects_basics_cloudflare_and_public_keys(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            result = self.run_bash('''
+        for ipv6 in ("", "2001:db8::10"):
+            with self.subTest(ipv6=ipv6), tempfile.TemporaryDirectory() as temporary:
+                self.check_first_install(Path(temporary), ipv6)
+
+    def check_first_install(self, root, ipv6):
+        result = self.run_bash('''
 prompt_log="$1/prompts"
 public_ipv4() { printf '192.0.2.10'; }
-public_ipv6() { :; }
+public_ipv6() { printf '%s' "$TEST_IPV6"; }
 read_default() {
   printf '%s\n' "$1" >>"$prompt_log"
   case "$1" in
@@ -59,32 +66,42 @@ read_secret_default() { printf '%s\n' "$1" >>"$prompt_log"; printf fake-cf-token
 collect_admin_pubkeys() { printf 'ADMIN_PUBKEY\n' >>"$prompt_log"; printf 'ssh-ed25519 AAAA test\n' >"$1"; }
 configure_install "$1"
 source "$1/config.env"
-printf '%s\n' "$DIRECT_PORT" "$NGINX_FALLBACK_PORT" "$RESET_PROXY_KEYS" "$ENABLE_SUBSCRIPTION_SERVER" "$SUBSCRIPTION_TARGET" "$CLIENT_UDP" >"$1/defaults"
-''', root)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / "prompts").read_text().splitlines(), [
-                "SERVER_ALIAS", "SERVER_IP_IPv4", "SERVER_IP_IPv6（可留空）", "SSH_PORT",
-                "ENABLE_CUSTOM_DOMAIN", "CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "LE_EMAIL",
-                "CLOUDFLARE_API_TOKEN", "ADMIN_PUBKEY",
-            ])
-            self.assertEqual((root / "defaults").read_text().splitlines(), ["443", "8443", "false", "true", "ClashMeta", "true"])
-            self.assertNotIn("fake-cf-token", result.stdout + result.stderr)
-            self.assertEqual(len((root / "home-proxies.csv").read_text().splitlines()), 1)
-            self.assertEqual(len((root / "upstream-nodes.txt").read_text().splitlines()), 1)
+printf '%s\n' "$DIRECT_PORT" "$NGINX_FALLBACK_PORT" "$RESET_PROXY_KEYS" "$ENABLE_SUBSCRIPTION_SERVER" "$SUBSCRIPTION_TARGET" "$CLIENT_UDP" "$ENABLE_IPV6_LISTEN" "$SERVER_IP_IPV6" >"$1/defaults"
+''', root, TEST_IPV6=ipv6)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((root / "prompts").read_text().splitlines(), [
+            "SERVER_ALIAS", "SERVER_IP_IPv4", "SERVER_IP_IPv6（填入即启用）", "SSH_PORT",
+            "ENABLE_CUSTOM_DOMAIN", "CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "LE_EMAIL",
+            "CLOUDFLARE_API_TOKEN", "ADMIN_PUBKEY",
+        ])
+        self.assertEqual((root / "defaults").read_text().splitlines(), [
+            "443", "8443", "false", "true", "ClashMeta", "true", "true" if ipv6 else "false", ipv6,
+        ])
+        self.assertNotIn("fake-cf-token", result.stdout + result.stderr)
+        self.assertEqual(len((root / "home-proxies.csv").read_text().splitlines()), 1)
+        self.assertEqual(len((root / "upstream-nodes.txt").read_text().splitlines()), 1)
 
     def test_ssh_confirmation_gates_final_and_summary(self):
-        for confirmed in (False, True):
-            with self.subTest(confirmed=confirmed), tempfile.TemporaryDirectory() as temporary:
+        for reply, confirmed in ((b"\n", True), (b"Y\n", True), (b"n\n", False), (b"\x04", False)):
+            with self.subTest(reply=reply), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / "config.env").write_text('SERVER_IP_IPV4="192.0.2.10"\nSSH_PORT="2222"\n')
-                result = self.run_bash('''
+                master, slave = pty.openpty()
+                try:
+                    os.write(master, reply)
+                    result = self.run_bash('''
+INPUT_TTY="$TEST_TTY"
 phase_log="$1/phases"
 run_install_phase() { printf '%s\n' "$1" >>"$phase_log"; }
-read_yes_no() { [[ "$2" == no ]] || exit 93; [[ "$TEST_CONFIRMED" == true ]]; }
 python3() { printf 'FINAL_NODE_SUMMARY\n'; }
 run_install_flow "$1"
-''', root, TEST_CONFIRMED=str(confirmed).lower(), RRB_RUN_PHASES="true", SSH_CONNECTION="")
+''', root, TEST_TTY=os.ttyname(slave), RRB_RUN_PHASES="true", SSH_CONNECTION="")
+                    prompt = os.read(master, 65536).decode("utf-8")
+                finally:
+                    os.close(master)
+                    os.close(slave)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("[Y/n]", prompt)
                 expected = ["preflight", "ssh-phase1"]
                 if confirmed:
                     expected += ["ssh-final", "fail2ban", "singbox", "firewall", "validate"]
@@ -93,6 +110,9 @@ run_install_flow "$1"
                 self.assertIn("-o BatchMode=yes", result.stdout)
                 self.assertIn("root@192.0.2.10 whoami", result.stdout)
                 self.assertEqual("FINAL_NODE_SUMMARY" in result.stdout, confirmed)
+                self.assertIn("SSH 公钥登录验证", result.stdout)
+                self.assertEqual("应用配置与验证" in result.stdout, confirmed)
+                self.assertNotIn("\033[", result.stdout + result.stderr)
 
     def test_quiet_phase_keeps_warnings_and_failure_status(self):
         with tempfile.TemporaryDirectory() as temporary:

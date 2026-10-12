@@ -7,7 +7,9 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote, urlencode
@@ -158,13 +160,27 @@ def subscription_url(env: Dict[str, str], token: str) -> str:
     return f"{base}/sub/{token}?target=ClashMeta"
 
 
-def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]]) -> None:
+def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]], project_dir: Path) -> None:
+    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
+    bold, cyan, green, reset = ("\033[1m", "\033[36m", "\033[32m", "\033[0m") if color else ("", "", "", "")
+    divider = "─" * 60
+    print(f"\n{divider}\n{bold}节点与订阅{reset}\n{divider}")
+    if any(":" in node["server"] for node in nodes):
+        print("IPv6 节点：已生成（客户端和 VPS 均需 IPv6 可达）。")
+    else:
+        ipv6 = env.get("SERVER_IP_IPV6", "").strip()
+        reason = "未启用监听" if ipv6 else "未配置公网地址"
+        command = f"cd {shlex.quote(str(project_dir))} && sudo bash install.sh -6"
+        if ipv6:
+            command += f" {shlex.quote(ipv6)}"
+        print(f"IPv6 节点：{reason}；VPS 需有可用公网 IPv6。\n开启：{command}")
     url = subscription_url(env, nodes[0]["uuid"])
     if url:
-        print(f"订阅链接（Mihomo / Clash Meta）：\n{url}\n")
-    print("本地节点（复制 vless:// 链接导入）：")
+        print(f"\n{cyan}{bold}订阅链接（Mihomo / Clash Meta）{reset}\n{cyan}{url}{reset}")
+    print(f"\n{divider}\n{green}{bold}本地节点（复制 vless:// 链接导入）{reset}")
     for node in nodes:
-        print(node_to_vless_uri(node))
+        print(f"{green}{node_to_vless_uri(node)}{reset}\n")
+    print(divider)
 
 
 def node_to_text(node: Dict[str, Any]) -> str:
@@ -355,7 +371,7 @@ def main() -> int:
             print(f"已生成 {target} 订阅文件：{args.subscription_out}")
 
     if args.print_summary:
-        print_client_summary(env, nodes)
+        print_client_summary(env, nodes, env_path.parent)
     elif not args.quiet and not args.skip_node_files:
         print(f"已生成节点文件：{args.nodes_out}")
         print(f"已生成 Clash/Mihomo 文件：{args.clash_out}")

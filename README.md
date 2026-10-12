@@ -4,29 +4,43 @@
 
 ## 安装
 
-以 root 执行远程入口，或在已经下载的项目目录执行 `sudo bash install.sh`：
+在 VPS 上以 root 执行远程入口，无需提前进入项目目录：
 
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
 ```
 
+一键脚本默认安装到 `/opt/reality-relay-bootstrap`。下文的服务器操作都按此路径给出；如果使用了 `RRB_INSTALL_DIR` 或手动下载到其他位置，请替换每处 `cd` 的路径。编辑示例使用 `nano`，保存按 `Ctrl+O`、回车，退出按 `Ctrl+X`；未安装时可执行 `sudo apt install nano`。
+
 首次只填写三组信息：
 
-1. **基础信息**：节点名称、服务器公网 IPv4/IPv6（至少一个）、SSH 端口。
+1. **基础信息**：节点名称、服务器公网 IPv4/IPv6（至少一个）、SSH 端口。填写或保留探测到的公网 IPv6 地址，就会自动启用 IPv6 监听和节点；留空则暂不启用。
 2. **Cloudflare（可选）**：域名、Zone、证书邮箱和 API Token；Token 输入显示 `*`。域名应已在 CF 激活，Token 需要对应 Zone 的 DNS 编辑和 Zone 读取权限；[首次配置说明](docs/cloudflare-domain-preflight.md)。
 3. **管理员公钥**：每行一把，空行结束；明确输入 `SKIP` 才会复用服务器已有公钥。
 
-随后脚本显示一条 SSH 验证命令。**保留当前 SSH 窗口，在新终端执行；看到 `root` 后输入 `yes`，才关闭密码登录。** 直接回车会暂停。命令使用公钥和本地 SSH agent；有口令的私钥需先在本机用 `ssh-add` 加载。
+随后脚本显示一条 SSH 验证命令。**保留当前 SSH 窗口，在新终端执行；看到 `root` 后再确认关闭密码登录。** 提示为 `[Y/n]`，默认 `Y`：回车或输入 `y` 继续，输入 `n` 暂停；输入中断也会暂停。命令使用公钥和本地 SSH agent；有口令的私钥需先在本机用 `ssh-add` 加载。
 
-成功后显示一个订阅链接及所有本地 `vless://` 节点链接。常规进度写入日志，告警和错误仍显示；需要详细输出时用 `sudo env RRB_VERBOSE=true bash install.sh`。
+安装流程以标题和分隔线区分部署准备、SSH 验证、应用配置与最终节点输出。成功后显示 IPv6 节点状态、一个订阅链接及所有本地 `vless://` 节点链接；订阅链接为青色，本地节点为绿色。重定向输出、`TERM=dumb` 或设置 `NO_COLOR=1` 时使用纯文本。常规进度写入日志，告警和错误仍显示。
 
 默认值：VLESS TCP 443、Mihomo 订阅、保留 UUID/Reality 密钥、启用 UDP 支持。CF 模式走域名 HTTPS，订阅服务仅监听本机 51040；无域名时使用公网 HTTP 51040。其他选项在 [config.example.env](config.example.env) 中查阅并修改 `config.env`。
 
-**重跑安装会沿用已有 `config.env` 和出口列表，不重新提问或覆盖它们。** 新增/删除出口按下文操作。首次只生成配置、不部署可用：
+**重跑安装会沿用已有 `config.env` 和出口列表，不重新提问或覆盖它们。** 已安装后，需要修改配置并重新运行安装流程：
 
 ```bash
-sudo env RRB_RUN_PHASES=false bash install.sh
+cd /opt/reality-relay-bootstrap
+sudo nano config.env
+sudo bash install.sh
 ```
+
+不改配置时跳过编辑命令；需要详细输出时，将最后一行换成 `sudo env RRB_VERBOSE=true bash install.sh`。只增删出口无需重跑完整安装，按下文对应步骤操作。
+
+首次只下载项目、生成配置而不部署，可在 VPS 上以 root 执行：
+
+```bash
+RRB_RUN_PHASES=false bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
+```
+
+生成后，按上面的“进入目录 → 编辑 `config.env` → 运行安装”步骤继续部署。
 
 ## IPv6、CF 域名与 IPv4 不通
 
@@ -37,16 +51,23 @@ CF 在这里提供 DNS 和证书验证，记录必须为**灰云 / DNS only**。
 - 订阅和本地链接使用同一套节点：保留原域名/IPv4 节点，并为每个出口增加 `-IPv6` 节点。备用节点直接连接 IPv6，SNI 仍是原 Reality 域名。IPv4 失败时可手动选 `-IPv6`。
 - `PROXY_IP_VERSION` 控制 VPS 出站/DNS 偏好，不等于客户端连接 VPS 时使用的地址族。
 
-已部署的服务器补充 IPv6：
+首次安装留空 IPv6 的服务器，可先在 VPS 控制台确认已分配公网 IPv6，再执行以下命令自动探测并确认：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash install.sh -6
+```
+
+也可直接填写 VPS 的真实公网 IPv6（替换下面的示例地址；脚本会修改 `config.env` 并应用，无需手工编辑）：
 
 ```bash
 cd /opt/reality-relay-bootstrap
 sudo bash install.sh -6 2001:db8::10
 ```
 
-省略地址可自动探测后确认。该模式复用现有 UUID、Reality keypair、short-id 和端口，不重跑 SSH；验证双栈监听后刷新已启用的订阅，并在 CF 模式更新 A/AAAA。若订阅或 DNS 发布失败，已验证的本地 IPv6 配置会保留，可分别重跑 `subscription` 或 `cloudflare-dns` 阶段。同时保留 `/root/reality-relay-bootstrap-v6-vless.txt`、`/root/reality-relay-bootstrap-v6-nodes.txt` 和 `/root/reality-relay-bootstrap-v6-clash.yaml` 三份本地 v6 文件。
+该模式复用现有 UUID、Reality keypair、short-id 和端口，不重跑 SSH；验证双栈监听后刷新已启用的订阅，并在 CF 模式更新 A/AAAA。若订阅或 DNS 发布失败，已验证的本地 IPv6 配置会保留，按下方“常用维护”中的对应步骤重试。同时保留 `/root/reality-relay-bootstrap-v6-vless.txt`、`/root/reality-relay-bootstrap-v6-nodes.txt` 和 `/root/reality-relay-bootstrap-v6-clash.yaml` 三份本地 v6 文件。
 
-如果客户端通过域名拉取订阅时仍卡在 IPv4，可先导入输出的本地 IPv6 节点，或在支持 IPv6 的电脑上强制经 IPv6 下载 YAML 后导入：
+如果客户端通过域名拉取订阅时仍卡在 IPv4，可先导入输出的本地 IPv6 节点，或在支持 IPv6 的**客户端电脑**上强制经 IPv6 下载 YAML 后导入（无需进入 VPS 项目目录，文件保存到当前目录）：
 
 ```bash
 curl -6 --fail --show-error 'https://你的域名/sub/你的token?target=ClashMeta' -o relay.yaml
@@ -69,6 +90,7 @@ https://edge.example.com/sub/<token>?target=ClashMeta
 重新显示并导出本地文件：
 
 ```bash
+cd /opt/reality-relay-bootstrap
 sudo bash bootstrap.sh --phase output-nodes
 ```
 
@@ -76,16 +98,45 @@ sudo bash bootstrap.sh --phase output-nodes
 
 ## 新增或删除出口
 
-在 `/opt/reality-relay-bootstrap`（或实际项目目录）修改下列文件；安装时只为缺失的列表创建空表头。保持 `config.env` 中 `RESET_PROXY_KEYS="false"`，已有节点的 `tag` 和 `listen_port` 尽量不改。
+安装时只为缺失的出口列表创建空表头。下面分别给出两种出口的完整操作，按需要选择；保持 `config.env` 中 `RESET_PROXY_KEYS="false"`，已有节点的 `tag` 和 `listen_port` 尽量不改。
 
-**家宽 HTTP/SOCKS 出口**：编辑 `home-proxies.csv`。
+### 家宽 HTTP/SOCKS 出口
+
+先进入目录，检查密钥保留设置，再编辑出口列表：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo nano config.env
+sudo nano home-proxies.csv
+```
+
+在 `config.env` 中保持 `RESET_PROXY_KEYS="false"`。在 `home-proxies.csv` 中保留表头，新增或修改真实出口；删除出口就删除对应数据行：
 
 ```csv
 tag,type,server,server_port,username,password,network,listen_port
 home-01,socks5,proxy.example.com,1080,user,password,tcp,51043
 ```
 
-**上游 VLESS 出口**：编辑 `upstream-nodes.txt`。
+保存退出后，应用配置并验证：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash bootstrap.sh --phase singbox
+sudo bash bootstrap.sh --phase firewall
+sudo bash bootstrap.sh --phase validate
+```
+
+### 上游 VLESS 出口
+
+先进入目录，检查密钥保留设置，再编辑上游列表：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo nano config.env
+sudo nano upstream-nodes.txt
+```
+
+在 `config.env` 中保持 `RESET_PROXY_KEYS="false"`。在 `upstream-nodes.txt` 中保留表头，新增或修改真实上游；删除出口就删除对应数据行：
 
 ```csv
 tag,node_url,listen_port
@@ -94,27 +145,94 @@ relay-01,vless://11111111-2222-4333-8444-555555555555@upstream.example.com:443?s
 
 替换为真实上游链接；支持 TCP transport 的普通 VLESS（`security=none`）和 VLESS Reality。也可每行只放一条 `vless://` 链接，让脚本分配名称和端口。`listen_port` 留空从 51043 起分配；为了增删时不改变旧入口，推荐固定端口。CSV 中含逗号的字段需用双引号包裹。
 
-删除出口就删除对应行，然后应用：
+保存退出后，应用配置并验证：
 
 ```bash
+cd /opt/reality-relay-bootstrap
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase firewall
 sudo bash bootstrap.sh --phase validate
 ```
 
-`singbox` 会重新生成配置、检查并重启、刷新订阅，最后显示订阅与本地节点；`firewall` 只调整带本项目注释的规则。上游连通性失败会告警，不代表已经验证出口可用。不要为增删出口删除密钥文件或打开 `RESET_PROXY_KEYS`。
+两种出口的应用步骤相同：`singbox` 会重新生成配置、检查并重启、刷新订阅，最后显示订阅与本地节点；`firewall` 只调整带本项目注释的规则。上游连通性失败会告警，不代表已经验证出口可用。不要为增删出口删除密钥文件或打开 `RESET_PROXY_KEYS`。
 
 ## 常用维护
 
-| 需求 | 命令 / 配置 |
-| --- | --- |
-| 更新订阅内容 | `sudo bash bootstrap.sh --phase subscription` |
-| 更新 CF A/AAAA | `sudo bash bootstrap.sh --phase cloudflare-dns` |
-| 更新证书和 Nginx fallback | `sudo bash bootstrap.sh --phase custom-domain` |
-| 继续已暂停的 SSH final | 验证公钥登录后，`sudo CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final` |
-| 修改端口、SFTP、安装方式等 | 编辑 `config.env`，参照 [示例配置](config.example.env) 和 [分阶段流程](docs/install-flow.md) |
-| 详细校验输出 | `sudo bash bootstrap.sh --phase validate --verbose` |
-| 回滚 | `sudo CONFIRM_ROLLBACK=yes bash bootstrap.sh --phase rollback`；[恢复说明](docs/recovery.md) |
+### 修改节点参数、入口端口或 sing-box 安装方式
+
+参照 [示例配置](config.example.env) 修改 `DIRECT_PORT`、`PROXY_IP_VERSION`、`INSTALL_SINGBOX_METHOD` 等，保存后应用：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo nano config.env
+sudo bash bootstrap.sh --phase singbox
+sudo bash bootstrap.sh --phase firewall
+sudo bash bootstrap.sh --phase validate
+```
+
+SSH、SFTP 参数由 SSH 阶段处理，不属于上述节点配置；修改它们时按前面的完整安装流程或 [分阶段流程](docs/install-flow.md) 执行，并保留公钥登录确认步骤。
+
+### 刷新订阅内容
+
+沿用已保存的配置重新生成订阅，无需编辑文件。新增或删除出口请先完成上面的出口应用步骤。
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash bootstrap.sh --phase subscription
+```
+
+### 重试发布 CF A/AAAA
+
+沿用已保存的地址和域名配置，无需编辑文件：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash bootstrap.sh --phase cloudflare-dns
+```
+
+### 修改域名、CF 或证书配置
+
+在 `config.env` 中调整 `CUSTOM_DOMAIN`、`CLOUDFLARE_*`、`LE_EMAIL` 等，再应用；`singbox` 阶段会同时更新节点、订阅、CF DNS、证书和 Nginx fallback：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo nano config.env
+sudo bash bootstrap.sh --phase singbox
+sudo bash bootstrap.sh --phase firewall
+sudo bash bootstrap.sh --phase validate
+```
+
+配置未变、只需重试证书与 Nginx fallback 时，无需编辑文件：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash bootstrap.sh --phase custom-domain
+```
+
+### 继续已暂停的 SSH final
+
+保留当前 SSH 窗口，在新终端验证公钥登录成功后执行，无需编辑配置：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final
+```
+
+### 查看详细校验结果
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo bash bootstrap.sh --phase validate --verbose
+```
+
+### 回滚
+
+先阅读 [恢复说明](docs/recovery.md)，保留当前还能登录的 SSH 窗口，再执行：
+
+```bash
+cd /opt/reality-relay-bootstrap
+sudo CONFIRM_ROLLBACK=yes bash bootstrap.sh --phase rollback
+```
 
 云厂商安全组必须放行 SSH、443 和实际出口入口的 **TCP** 端口，IPv4/IPv6 分别检查。无 CF 时还需订阅 HTTP 端口；CF 模式且 `SUBSCRIPTION_PORT` 留空时无需公网开放 51040。VLESS 的 UDP 封装在 TCP/Reality 中，不需要额外放行同号 UDP。
 

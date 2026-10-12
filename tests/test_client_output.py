@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
+import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 
@@ -60,6 +66,7 @@ class ClientOutputTest(unittest.TestCase):
             self.assertIn("ipv6: true", yaml)
             self.assertEqual(sum(line.startswith("https://") for line in output.splitlines()), 1)
             self.assertIn("https://edge.example.com/sub/11111111-2222-4333-8444-555555555555?target=ClashMeta", output)
+            self.assertIn("IPv6 节点：已生成", output)
 
     def test_ipv4_only_keeps_names_and_does_not_advertise_ipv6(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -68,6 +75,8 @@ class ClientOutputTest(unittest.TestCase):
             self.assertEqual([link.fragment for link in links], ["edge", "home-01", "relay-01"])
             self.assertIn("ipv6: false", yaml)
             self.assertIn("http://192.0.2.10:51040/sub/", output)
+            self.assertIn("IPv6 节点：未配置公网地址", output)
+            self.assertIn(f"cd {shlex.quote(directory)} && sudo bash install.sh -6", output)
 
     def test_ipv6_only_brackets_subscription_and_local_addresses(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,6 +91,38 @@ class ClientOutputTest(unittest.TestCase):
             output, _, links = self.generate(directory, ENABLE_IPV6_LISTEN="false", ENABLE_SUBSCRIPTION_SERVER="false")
             self.assertEqual([link.hostname for link in links], ["edge.example.com"] * 3)
             self.assertFalse(any(line.startswith(("https://", "http://")) for line in output.splitlines()))
+            self.assertIn("IPv6 节点：未启用监听", output)
+            self.assertIn("sudo bash install.sh -6 2001:db8::10", output)
+
+    def test_summary_colors_only_interactive_terminal_and_preserves_link_text(self):
+        spec = importlib.util.spec_from_file_location("node_output", ROOT / "scripts/11-output-nodes.py")
+        output_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(output_module)
+        with tempfile.TemporaryDirectory() as directory:
+            plain, _, _ = self.generate(directory)
+            root = Path(directory)
+            gen = output_module.load_generator(ROOT / "scripts/08-generate-singbox-config.py")
+            env = gen.defaults(gen.parse_env_file(root / "config.env"))
+            nodes = output_module.build_client_nodes(env, gen.load_rows(env, root, allow_empty=True), gen)
+            for tty, term, no_color, colored in (
+                (True, "xterm-256color", "", True),
+                (False, "xterm-256color", "", False),
+                (True, "dumb", "", False),
+                (True, "xterm-256color", "1", False),
+            ):
+                with self.subTest(tty=tty, term=term, no_color=no_color):
+                    stream = io.StringIO()
+                    with patch("sys.stdout", stream), patch.object(stream, "isatty", return_value=tty), patch.dict(
+                        os.environ, {"TERM": term, "NO_COLOR": no_color}
+                    ):
+                        output_module.print_client_summary(env, nodes, root)
+                    rendered = stream.getvalue()
+                    self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", rendered), plain)
+                    if colored:
+                        self.assertIn("\033[36mhttps://", rendered)
+                        self.assertIn("\033[32mvless://", rendered)
+                    else:
+                        self.assertNotIn("\033[", rendered)
 
 
 if __name__ == "__main__":

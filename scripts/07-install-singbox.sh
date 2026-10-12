@@ -7,7 +7,7 @@ require_root
 load_config
 require_supported_os
 
-apt_install ca-certificates curl gnupg openssl python3 iproute2
+pkg_install ca-certificates curl gnupg openssl python3 iproute2
 
 backup_path /etc/sing-box/config.json || true
 [[ -d /etc/sing-box/conf ]] && backup_path /etc/sing-box/conf || true
@@ -105,7 +105,10 @@ install_by_233boy() {
   fi
 }
 
-if [[ "$USE_233BOY_INSTALLER" == "true" || "$INSTALL_SINGBOX_METHOD" == "233boy" ]]; then
+if [[ "$INSTALL_SINGBOX_METHOD" == "release" ]]; then
+  install_singbox_release
+  install_openrc_service sing-box /usr/local/bin/sing-box /etc/sing-box "$SINGBOX_CONFIG_PATH" run -c "$SINGBOX_CONFIG_PATH"
+elif [[ "$USE_233BOY_INSTALLER" == "true" || "$INSTALL_SINGBOX_METHOD" == "233boy" ]]; then
   install_by_233boy
 else
   install_by_apt

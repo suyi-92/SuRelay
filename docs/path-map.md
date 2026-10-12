@@ -2,6 +2,8 @@
 
 本文按默认配置说明脚本会读取、生成或修改哪些路径。若在 `config.env` 中改了 `RRB_STATE_DIR`、`NGINX_FALLBACK_ROOT`、`NGINX_FALLBACK_CONF`、`SINGBOX_CONFIG_PATH` 等变量，以实际配置为准。
 
+Alpine 的平台专用路径（OpenRC、`http.d`、Certbot 虚拟环境、cron 和服务日志）见 [Alpine 部署说明](alpine.md)。下表中的 systemd 和 `sites-available` 路径适用于 Debian/Ubuntu。
+
 ## 总览
 
 | 路径 | 类别 | 阶段 | 默认权限 | 敏感 | 用途与处理建议 |

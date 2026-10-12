@@ -9,9 +9,13 @@ require_supported_os
 
 info "开始 preflight。日志：$LOG_FILE"
 
-apt_install ca-certificates curl gnupg lsb-release openssl python3 sudo openssh-server iproute2
+require_service_manager
+pkg_install ca-certificates curl gnupg openssl python3 sudo openssh-server iproute2
+if is_alpine; then
+  pkg_install coreutils findutils grep sed procps
+  service_enable sshd
+fi
 
-have systemctl || die "找不到 systemctl；本项目仅支持 systemd 环境。"
 have ss || die "找不到 ss；请确认 iproute2 已安装。"
 
 backup_path /etc/ssh/sshd_config

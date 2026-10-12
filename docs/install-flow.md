@@ -1,5 +1,7 @@
 # 安装流程
 
+Alpine 3.19 先按 [Alpine 部署说明](alpine.md) 安装 Bash，并保持 `INSTALL_SINGBOX_METHOD="auto"`。下列阶段在 Alpine 使用 OpenRC，在 Debian/Ubuntu 使用 systemd。
+
 ## 1. 准备配置
 
 ```bash

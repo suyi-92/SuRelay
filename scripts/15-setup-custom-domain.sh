@@ -12,7 +12,8 @@ if ! custom_domain_enabled; then
   exit 0
 fi
 
-apt_install ca-certificates curl nginx certbot python3-certbot-dns-cloudflare openssl
+pkg_install ca-certificates curl nginx openssl
+install_certbot
 
 backup_path "$CLOUDFLARE_API_TOKEN_FILE" || true
 backup_path "$NGINX_FALLBACK_CONF" || true
@@ -58,7 +59,7 @@ request_certificate() {
   if [[ "$LE_STAGING" == "true" ]]; then
     certbot_args+=(--staging)
   fi
-  run certbot "${certbot_args[@]}"
+  run "$CERTBOT_BIN" "${certbot_args[@]}"
 }
 
 write_fallback_site() {
@@ -163,7 +164,13 @@ $subscription_block
 }
 EOF
 
-  if [[ -d /etc/nginx/sites-enabled ]]; then
+  if is_alpine; then
+    enabled_name="/etc/nginx/http.d/$(basename "$NGINX_FALLBACK_CONF")"
+    if [[ "$NGINX_FALLBACK_CONF" != "$enabled_name" ]]; then
+      run mkdir -p /etc/nginx/http.d
+      run ln -sf "$NGINX_FALLBACK_CONF" "$enabled_name"
+    fi
+  elif [[ -d /etc/nginx/sites-enabled ]]; then
     enabled_name="/etc/nginx/sites-enabled/$(basename "$NGINX_FALLBACK_CONF")"
     if is_dry_run; then
       log "DRY-RUN: ln -sf $NGINX_FALLBACK_CONF $enabled_name"
@@ -179,18 +186,30 @@ write_renew_hook() {
   write_root_file "$hook" 0755 <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+if [[ -x /sbin/openrc-run ]]; then
+  rc-service nginx reload || rc-service nginx restart
+else
+  systemctl reload nginx || systemctl restart nginx
+fi
 EOF
+  if is_alpine; then
+    pkg_install busybox-openrc
+    run mkdir -p /etc/periodic/daily
+    write_root_file /etc/periodic/daily/reality-relay-certbot 0755 <<'EOF'
+#!/bin/sh
+exec /opt/reality-relay-certbot/bin/certbot renew --quiet
+EOF
+    service_enable crond
+    if ! service_active crond; then service_restart crond; fi
+  fi
 }
 
 reload_nginx() {
   run nginx -t
-  if is_dry_run; then
-    log "DRY-RUN: systemctl enable nginx && systemctl reload nginx || systemctl restart nginx"
-  else
-    systemctl enable nginx >>"$LOG_FILE" 2>&1 || true
-    systemctl reload nginx >>"$LOG_FILE" 2>&1 || systemctl restart nginx >>"$LOG_FILE" 2>&1
-    systemctl is-active --quiet nginx && info "Nginx fallback 已运行：$NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT" || die "Nginx 未运行"
+  service_enable nginx
+  service_reload nginx
+  if ! is_dry_run; then
+    service_wait_active nginx && info "Nginx fallback 已运行：$NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT" || die "Nginx 未运行"
   fi
 }
 

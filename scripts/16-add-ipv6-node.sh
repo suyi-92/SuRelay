@@ -96,7 +96,7 @@ rollback_ipv6_node_on_exit() {
       ufw --force reload >>"$LOG_FILE" 2>&1 || true
     fi
     if [[ -e "$SINGBOX_BACKUP" ]]; then
-      systemctl restart sing-box >>"$LOG_FILE" 2>&1 || true
+      service_restart sing-box || true
     fi
     warn "已尝试恢复；备份保留在：$BACKUP_DIR"
   fi

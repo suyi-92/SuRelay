@@ -16,7 +16,7 @@ if [[ "$CLOUDFLARE_ENSURE_DNS_RECORDS" != "true" ]]; then
   exit 0
 fi
 
-apt_install ca-certificates python3
+pkg_install ca-certificates python3
 
 args=(
   python3 "$SCRIPT_DIR/14-setup-cloudflare-dns.py"

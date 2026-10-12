@@ -1,16 +1,26 @@
 # Reality Relay Bootstrap
 
-在 Ubuntu 22.04/24.04、Debian 10–13 VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box VLESS + Reality。默认保留现有节点身份，SSH 分两阶段加固。
+在 Ubuntu 22.04/24.04、Debian 10–13 和 Alpine 3.19（OpenRC，x86_64/aarch64）VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box VLESS + Reality。默认保留现有节点身份，SSH 分两阶段加固。
 
 ## 安装
 
-在 VPS 上以 root 执行远程入口，无需提前进入项目目录：
+Ubuntu/Debian 在 VPS 上以 root 执行远程入口，无需提前进入项目目录：
 
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
 ```
 
-一键脚本默认安装到 `/opt/reality-relay-bootstrap`。下文的服务器操作都按此路径给出；如果使用了 `RRB_INSTALL_DIR` 或手动下载到其他位置，请替换每处 `cd` 的路径。编辑示例使用 `nano`，保存按 `Ctrl+O`、回车，退出按 `Ctrl+X`；未安装时可执行 `sudo apt install nano`。
+Alpine 3.19 默认 shell 是 ash，需要先安装 Bash。以 root 执行：
+
+```sh
+apk add --no-cache bash curl ca-certificates
+curl -fsSL https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh -o /tmp/reality-relay-install.sh
+bash /tmp/reality-relay-install.sh
+```
+
+Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以及可用的 IPv4/IPv6 netfilter 权限。`INSTALL_SINGBOX_METHOD="auto"` 会选择固定版本的官方二进制；服务通过 OpenRC 管理。已有配置若写死 `apt`，先改为 `auto`。详细差异、日志和验证范围见 [Alpine 部署说明](docs/alpine.md)。
+
+一键脚本默认安装到 `/opt/reality-relay-bootstrap`。下文的服务器操作都按此路径给出；如果使用了 `RRB_INSTALL_DIR` 或手动下载到其他位置，请替换每处 `cd` 的路径。编辑示例使用 `nano`，保存按 `Ctrl+O`、回车，退出按 `Ctrl+X`；未安装时 Debian/Ubuntu 执行 `sudo apt install nano`，Alpine 以 root 执行 `apk add nano`。
 
 首次只填写三组信息：
 

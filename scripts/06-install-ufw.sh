@@ -13,7 +13,8 @@ if [[ "$ENABLE_UFW" != "true" ]]; then
 fi
 
 backup_path /etc/ufw || true
-apt_install ufw
+pkg_install ufw
+ensure_ufw_ipv6
 
 run ufw allow "${SSH_PORT}/tcp" comment "reality-relay-bootstrap SSH current port"
 info "已先放行当前 SSH 端口 $SSH_PORT/tcp。启用 UFW 后必须另开窗口测试 SSH。"

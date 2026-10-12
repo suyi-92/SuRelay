@@ -63,6 +63,8 @@ run() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+source "$SCRIPT_DIR/00-platform.sh"
+
 user_home() {
   local user="$1" entry home
   entry="$(getent passwd "$user" || true)"
@@ -182,7 +184,7 @@ load_config() {
   : "${SFTP_USER:=sftpuser}"
   : "${SFTP_PUBKEY:=}"
   : "${USE_233BOY_INSTALLER:=false}"
-  : "${INSTALL_SINGBOX_METHOD:=apt}"
+  : "${INSTALL_SINGBOX_METHOD:=auto}"
   : "${PROXY_PROTOCOL:=vless-reality}"
   : "${PROXY_IP_VERSION:=ipv4}"
   : "${MODE_443:=direct}"
@@ -195,6 +197,7 @@ load_config() {
   : "${HOME_PORT_END:=65535}"
   : "${ENABLE_UFW:=true}"
   : "${ENABLE_FAIL2BAN:=true}"
+  : "${FAIL2BAN_SSH_LOG:=/var/log/messages}"
   : "${ENABLE_IPV6_LISTEN:=false}"
   : "${CSV_PATH:=./home-proxies.csv}"
   : "${UPSTREAM_NODES_PATH:=./upstream-nodes.txt}"
@@ -218,7 +221,8 @@ load_config() {
   : "${NGINX_FALLBACK_HOST:=127.0.0.1}"
   : "${NGINX_FALLBACK_PORT:=8443}"
   : "${NGINX_FALLBACK_ROOT:=/var/www/reality-fallback}"
-  : "${NGINX_FALLBACK_CONF:=/etc/nginx/sites-available/reality-relay-bootstrap.conf}"
+  : "${NGINX_FALLBACK_CONF:=auto}"
+  resolve_platform_config
   : "${SINGBOX_CONFIG_PATH:=/etc/sing-box/config.json}"
   : "${VLESS_UUID_PATH:=$RRB_STATE_DIR/vless-uuid.txt}"
   : "${VLESS_FLOW:=xtls-rprx-vision}"
@@ -448,10 +452,13 @@ validate_config_basics() {
   validate_nonnegative_int CLOUDFLARE_DNS_PROPAGATION_SECONDS
   validate_user_name ADMIN_USER
   validate_user_name SFTP_USER
+  [[ "$ENABLE_SFTP_USER" != true || "$SFTP_USER" != root ]] || die "SFTP_USER 不能是 root"
   normalize_subscription_target "$SUBSCRIPTION_TARGET" >/dev/null || die "SUBSCRIPTION_TARGET 不支持：$SUBSCRIPTION_TARGET"
   (( HOME_PORT_START <= HOME_PORT_END )) || die "HOME_PORT_START 不能大于 HOME_PORT_END"
   [[ "$MODE_443" == "direct" ]] || die "MODE_443 当前只支持 direct"
-  [[ "$INSTALL_SINGBOX_METHOD" == "apt" || "$INSTALL_SINGBOX_METHOD" == "233boy" ]] || die "INSTALL_SINGBOX_METHOD 只能是 apt 或 233boy"
+  [[ "$INSTALL_SINGBOX_METHOD" == "apt" || "$INSTALL_SINGBOX_METHOD" == "233boy" || "$INSTALL_SINGBOX_METHOD" == "release" ]] || die "INSTALL_SINGBOX_METHOD 只能是 auto、apt、release 或 233boy"
+  check_platform_install_method
+  [[ "$FAIL2BAN_SSH_LOG" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "FAIL2BAN_SSH_LOG 必须是无空格的绝对路径"
   [[ "$PROXY_PROTOCOL" == "vless-reality" ]] || die "PROXY_PROTOCOL 当前只支持 vless-reality"
   [[ "$PROXY_IP_VERSION" == "ipv4" || "$PROXY_IP_VERSION" == "ipv6" || "$PROXY_IP_VERSION" == "dual" ]] || die "PROXY_IP_VERSION 只能是 ipv4、ipv6 或 dual"
   validate_port REALITY_HANDSHAKE_PORT
@@ -520,11 +527,11 @@ require_supported_os() {
   source "$os_release"
   local os_id="${ID:-}" ver="${VERSION_ID:-}"
   case "$os_id:$ver" in
-    ubuntu:22.04|ubuntu:24.04|debian:10|debian:10.*|debian:11|debian:11.*|debian:12|debian:12.*|debian:13|debian:13.*)
+    ubuntu:22.04|ubuntu:24.04|debian:10|debian:10.*|debian:11|debian:11.*|debian:12|debian:12.*|debian:13|debian:13.*|alpine:3.19|alpine:3.19.*)
       info "系统受支持：$PRETTY_NAME"
       ;;
     *)
-      die "当前系统不在默认支持范围：${PRETTY_NAME:-unknown}。本项目优先支持 Ubuntu 22.04/24.04 和 Debian 10-13，为防锁机已停止。"
+      die "当前系统不在默认支持范围：${PRETTY_NAME:-unknown}。支持 Ubuntu 22.04/24.04、Debian 10-13 和 Alpine 3.19，为防锁机已停止。"
       ;;
   esac
 }
@@ -550,6 +557,12 @@ backup_path() {
   init_backup_dir
   local rel="${path#/}"
   local dest="$BACKUP_DIR/$rel"
+  # Nested phases share BACKUP_DIR. Keep the original snapshot, particularly
+  # /etc/default/ufw before -6 changes it, rather than overwriting it in firewall.
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    log "保留本阶段首次备份：$dest"
+    return 0
+  fi
   if is_dry_run; then
     log "DRY-RUN: cp -a $path $dest"
   else
@@ -560,6 +573,7 @@ backup_path() {
 }
 
 ssh_service_name() {
+  if is_alpine; then printf 'sshd\n'; return; fi
   local units
   units="$(systemctl list-unit-files 2>/dev/null || true)"
   if grep -q '^ssh\.service' <<<"$units"; then
@@ -623,11 +637,9 @@ test_sshd_config() {
 reload_ssh() {
   local svc
   svc="$(ssh_service_name)"
-  if is_dry_run; then
-    log "DRY-RUN: systemctl reload $svc || systemctl restart $svc"
-  else
-    systemctl reload "$svc" >>"$LOG_FILE" 2>&1 || systemctl restart "$svc" >>"$LOG_FILE" 2>&1
-    systemctl is-active --quiet "$svc" && info "SSH 服务已重载：$svc" || warn "无法确认 SSH 服务状态：$svc"
+  service_reload "$svc"
+  if ! is_dry_run; then
+    service_wait_active "$svc" && info "SSH 服务已重载：$svc" || die "无法确认 SSH 服务状态：$svc"
   fi
 }
 
@@ -664,7 +676,9 @@ ensure_sshd_dropin_include() {
 }
 
 singbox_bin() {
-  if [[ -x /etc/sing-box/bin/sing-box ]]; then
+  if is_alpine && [[ -x /usr/local/bin/sing-box ]]; then
+    echo /usr/local/bin/sing-box
+  elif [[ -x /etc/sing-box/bin/sing-box ]]; then
     echo /etc/sing-box/bin/sing-box
   elif command -v sing-box >/dev/null 2>&1; then
     command -v sing-box
@@ -688,12 +702,10 @@ singbox_check() {
 }
 
 restart_singbox() {
-  if is_dry_run; then
-    log "DRY-RUN: systemctl enable --now sing-box && systemctl restart sing-box"
-  else
-    systemctl enable sing-box >>"$LOG_FILE" 2>&1 || true
-    systemctl restart sing-box >>"$LOG_FILE" 2>&1
-    systemctl is-active --quiet sing-box && info "sing-box 服务已启动。" || warn "无法确认 sing-box 服务状态。"
+  service_enable sing-box
+  service_restart sing-box
+  if ! is_dry_run; then
+    service_wait_active sing-box && info "sing-box 服务已启动。" || die "无法确认 sing-box 服务状态。"
   fi
 }
 
@@ -765,6 +777,11 @@ wait_for_local_tcp_family() {
 diagnose_singbox_listeners() {
   warn "当前 TCP 监听端口如下（用于排查 sing-box 未监听问题）："
   (ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null || true) | tee -a "$LOG_FILE" >&2
+  if is_alpine; then
+    rc-service sing-box status 2>&1 | tee -a "$LOG_FILE" >&2 || true
+    tail -n 80 /var/log/reality-relay/sing-box.log 2>/dev/null | tee -a "$LOG_FILE" >&2 || true
+    return
+  fi
   if command -v systemctl >/dev/null 2>&1; then
     warn "sing-box systemd 状态摘要："
     systemctl --no-pager --full status sing-box 2>&1 | tail -n 40 | tee -a "$LOG_FILE" >&2 || true

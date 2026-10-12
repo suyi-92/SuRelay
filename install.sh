@@ -291,7 +291,7 @@ public_ipv4() {
     ip="$(curl -4fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
   fi
   if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}')"
+    ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
   fi
   printf '%s\n' "$ip"
 }
@@ -324,6 +324,32 @@ print(address.compressed)
 PY
 }
 
+ensure_entry_dependencies() {
+  local ID="" dependency missing=false
+  for dependency in git curl python3; do
+    command -v "$dependency" >/dev/null 2>&1 || missing=true
+  done
+  [[ "$missing" == true ]] || return 0
+  # This runs before the checkout exists, so it cannot use scripts/00-lib.sh.
+  # shellcheck disable=SC1090
+  source "${RRB_OS_RELEASE_FILE:-/etc/os-release}"
+  info "安装 git/curl/python3 基础依赖。"
+  local package_log="/tmp/reality-relay-bootstrap-install-packages.log"
+  case "$ID" in
+    alpine)
+      apk add --no-cache --wait 60 bash git curl ca-certificates python3 >"$package_log" 2>&1 </dev/null \
+        || { tail -n 40 "$package_log" >&2; die "APK 基础依赖安装失败；请检查 main/community 软件源。"; }
+      ;;
+    ubuntu|debian)
+      apt-get update -y >"$package_log" 2>&1 </dev/null \
+        || { tail -n 40 "$package_log" >&2; die "apt-get update 失败。"; }
+      DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install -y git curl ca-certificates python3 >>"$package_log" 2>&1 </dev/null \
+        || { tail -n 60 "$package_log" >&2; die "安装基础依赖失败。"; }
+      ;;
+    *) die "安装入口不支持当前系统：$ID" ;;
+  esac
+}
+
 ensure_project() {
   local self_dir
   self_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
@@ -333,13 +359,6 @@ ensure_project() {
   fi
 
   info "当前是一键远程执行模式，将项目安装到：$INSTALL_DIR"
-  if ! command -v git >/dev/null 2>&1; then
-    info "安装 git/curl 基础依赖。"
-    local apt_log="/tmp/reality-relay-bootstrap-install-apt.log"
-    apt-get update -y >"$apt_log" 2>&1 || { tail -n 40 "$apt_log" >&2 || true; die "apt-get update 失败。"; }
-    DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates >>"$apt_log" 2>&1 || { tail -n 60 "$apt_log" >&2 || true; die "安装 git/curl 失败。"; }
-  fi
-
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     info "检测到已有项目目录，拉取最新代码。"
     run_logged git -C "$INSTALL_DIR" fetch --all --prune
@@ -388,7 +407,7 @@ ADMIN_PUBKEYS=""
 ENABLE_SFTP_USER="false"
 SFTP_USER="sftpuser"
 USE_233BOY_INSTALLER="false"
-INSTALL_SINGBOX_METHOD="apt"
+INSTALL_SINGBOX_METHOD="auto"
 MODE_443="direct"
 DIRECT_PORT=$(shell_quote "$direct_port")
 HOME_PORT_START=$(shell_quote "$home_port_start")
@@ -419,7 +438,7 @@ CLOUDFLARE_DNS_PROPAGATION_SECONDS="60"
 NGINX_FALLBACK_HOST="127.0.0.1"
 NGINX_FALLBACK_PORT=$(shell_quote "$nginx_fallback_port")
 NGINX_FALLBACK_ROOT="/var/www/reality-fallback"
-NGINX_FALLBACK_CONF="/etc/nginx/sites-available/reality-relay-bootstrap.conf"
+NGINX_FALLBACK_CONF="auto"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 
 PROXY_PROTOCOL="vless-reality"
@@ -613,7 +632,9 @@ main() {
   fi
   info "Reality Relay Bootstrap"
   local project_dir
+  ensure_entry_dependencies
   project_dir="$(ensure_project)"
+  (export RRB_PROJECT_DIR="$project_dir"; source "$project_dir/scripts/00-lib.sh"; require_supported_os)
   if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
     run_ipv6_node_flow "$project_dir"
     return 0

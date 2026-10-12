@@ -106,6 +106,8 @@ else
   fi
 fi
 
+if is_alpine; then service_enable ufw; fi
+
 cat <<EOF
 
 UFW 已按最小端口开放。服务商安全组/云防火墙也必须手动放行：

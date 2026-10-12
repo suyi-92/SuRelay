@@ -98,7 +98,7 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         "ENABLE_SFTP_USER": "false",
         "SFTP_USER": "sftpuser",
         "USE_233BOY_INSTALLER": "false",
-        "INSTALL_SINGBOX_METHOD": "apt",
+        "INSTALL_SINGBOX_METHOD": "auto",
         "PROXY_PROTOCOL": "vless-reality",
         "PROXY_IP_VERSION": "ipv4",
         "MODE_443": "direct",
@@ -129,7 +129,7 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         "NGINX_FALLBACK_HOST": "127.0.0.1",
         "NGINX_FALLBACK_PORT": "8443",
         "NGINX_FALLBACK_ROOT": "/var/www/reality-fallback",
-        "NGINX_FALLBACK_CONF": "/etc/nginx/sites-available/reality-relay-bootstrap.conf",
+        "NGINX_FALLBACK_CONF": "auto",
         "SINGBOX_CONFIG_PATH": "/etc/sing-box/config.json",
         "VLESS_UUID_PATH": f"{state_dir}/vless-uuid.txt",
         "VLESS_FLOW": "xtls-rprx-vision",
@@ -316,8 +316,8 @@ def validate_env(env: Dict[str, str]) -> None:
         raise ConfigError("MODE_443 当前只支持 direct")
     if not env["SERVER_ALIAS"].strip():
         raise ConfigError("SERVER_ALIAS 不能为空；它会作为 443 节点名称")
-    if env["INSTALL_SINGBOX_METHOD"] not in {"apt", "233boy"}:
-        raise ConfigError("INSTALL_SINGBOX_METHOD 只能是 apt 或 233boy")
+    if env["INSTALL_SINGBOX_METHOD"] not in {"auto", "apt", "release", "233boy"}:
+        raise ConfigError("INSTALL_SINGBOX_METHOD 只能是 auto、apt、release 或 233boy")
     if env.get("VLESS_FLOW", "") not in {"", "xtls-rprx-vision"}:
         raise ConfigError("VLESS_FLOW 目前建议为空或 xtls-rprx-vision")
     for key in ["REALITY_SERVER_NAME", "REALITY_HANDSHAKE_SERVER"]:
@@ -344,6 +344,8 @@ def validate_env(env: Dict[str, str]) -> None:
     if env["CUSTOM_DOMAIN_PROVIDER"] != "cloudflare":
         raise ConfigError("CUSTOM_DOMAIN_PROVIDER 当前只支持 cloudflare")
     for key in ["CLOUDFLARE_API_TOKEN_FILE", "NGINX_FALLBACK_ROOT", "NGINX_FALLBACK_CONF"]:
+        if key == "NGINX_FALLBACK_CONF" and env[key] == "auto":
+            continue
         if not is_posix_absolute(env[key]):
             raise ConfigError(f"{key} 必须是绝对路径")
     if env["ENABLE_SUBSCRIPTION_SERVER"] == "true":

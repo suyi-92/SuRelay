@@ -53,6 +53,7 @@ backup_path /etc/ssh/sshd_config || true
 [[ -d /etc/ssh/sshd_config.d ]] && backup_path /etc/ssh/sshd_config.d || true
 backup_path /etc/sing-box/config.json || true
 backup_path /etc/ufw || true
+backup_path /etc/default/ufw || true
 
 info "移除本项目 SSH 策略块和旧版 drop-in。"
 remove_sshd_policy
@@ -116,6 +117,10 @@ if [[ "${RESTORE_UFW_FROM_BACKUP:-no}" == "yes" && -n "$ROLLBACK_DIR" && -d "$RO
   info "恢复 /etc/ufw。"
   remove_dir_safe /etc/ufw
   copy_safe "$ROLLBACK_DIR/etc/ufw" /etc/ufw
+  if [[ -f "$ROLLBACK_DIR/etc/default/ufw" ]]; then
+    copy_safe "$ROLLBACK_DIR/etc/default/ufw" /etc/default/ufw
+  fi
+  run ufw --force reload
 fi
 
 if [[ "${ROLLBACK_DISABLE_UFW:-no}" == "yes" ]]; then
@@ -123,8 +128,9 @@ if [[ "${ROLLBACK_DISABLE_UFW:-no}" == "yes" ]]; then
   if is_dry_run; then
     log "DRY-RUN: ufw disable"
   else
-    ufw disable 2>&1 | tee -a "$LOG_FILE" || true
+    ufw disable 2>&1 | tee -a "$LOG_FILE"
   fi
+  if is_alpine; then service_disable ufw; fi
 fi
 
 cat <<EOF

@@ -7,7 +7,7 @@ require_root
 load_config
 require_supported_os
 
-apt_install openssh-server
+pkg_install openssh-server openssl
 
 get_pubkey_for_root() {
   if [[ -n "$ADMIN_PUBKEY" ]]; then
@@ -30,7 +30,11 @@ create_user_if_needed() {
     info "用户已存在：$user"
     run usermod -s "$shell" "$user"
   else
-    run useradd -m -s "$shell" "$user"
+    if getent group "$user" >/dev/null; then
+      run useradd -m -g "$user" -s "$shell" "$user"
+    else
+      run useradd -m -U -s "$shell" "$user"
+    fi
   fi
 }
 
@@ -70,7 +74,7 @@ if [[ "$ENABLE_SFTP_USER" == "true" ]]; then
   NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
   sftp_keys="${SFTP_PUBKEY:-$root_keys}"
   create_user_if_needed "$SFTP_USER" "$NOLOGIN"
-  run passwd -l "$SFTP_USER" || true
+  prepare_sftp_password
   install_authorized_keys "$SFTP_USER" "$sftp_keys"
   if is_dry_run; then
     log "DRY-RUN: create /sftp/${SFTP_USER}/upload chroot"

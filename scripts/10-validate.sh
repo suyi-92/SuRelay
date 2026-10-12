@@ -40,7 +40,7 @@ if [[ "$SINGBOX_ONLY" != "true" ]]; then
     info "检查 fail2ban。"
     if ! is_dry_run; then
       fail2ban-client -t >>"$LOG_FILE" 2>&1
-      systemctl is-active --quiet fail2ban || die "fail2ban 未运行"
+      service_active fail2ban || die "fail2ban 未运行"
       info "fail2ban 服务运行中。"
       if [[ "$RRB_VERBOSE" == "true" ]]; then
         fail2ban-client status sshd 2>&1 | tee -a "$LOG_FILE" || true
@@ -53,6 +53,7 @@ if [[ "$SINGBOX_ONLY" != "true" ]]; then
   if [[ "$ENABLE_UFW" == "true" ]]; then
     info "检查 UFW。"
     if ! is_dry_run; then
+      LC_ALL=C ufw status | grep -q '^Status: active' || die "UFW 未启用；不能确认防火墙防护。"
       if [[ "$RRB_VERBOSE" == "true" ]]; then
         ufw status verbose 2>&1 | tee -a "$LOG_FILE"
       else
@@ -76,10 +77,10 @@ if [[ "$RESTART_SINGBOX" == "true" ]]; then
 fi
 
 if is_dry_run; then
-  info "DRY-RUN: 跳过 sing-box systemd 状态、监听端口和家宽代理实测。"
+  info "DRY-RUN: 跳过 sing-box 服务状态、监听端口和家宽代理实测。"
 else
-  info "检查 sing-box systemd 状态。"
-  systemctl is-active --quiet sing-box || die "sing-box 未运行"
+  info "检查 sing-box 服务状态。"
+  service_active sing-box || die "sing-box 未运行"
   info "sing-box 服务运行中。"
 fi
 
@@ -105,7 +106,7 @@ if [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" && "$SINGBOX_ONLY" != "true" ]]; t
     info "DRY-RUN: 实际运行后应检查订阅服务监听端口：$SUBSCRIPTION_LISTEN_PORT"
   else
     info "检查订阅服务。"
-    systemctl is-active --quiet reality-relay-subscription || die "订阅服务未运行"
+    service_active reality-relay-subscription || die "订阅服务未运行"
     wait_for_port_listener "$SUBSCRIPTION_LISTEN_PORT" 15 || die "订阅服务未监听端口：$SUBSCRIPTION_LISTEN_PORT"
     info "订阅服务端口正常：$SUBSCRIPTION_LISTEN_PORT"
   fi
@@ -116,7 +117,7 @@ if custom_domain_enabled && [[ "$SINGBOX_ONLY" != "true" ]]; then
     info "DRY-RUN: 实际运行后应检查 Nginx fallback：$NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT"
   else
     info "检查自有域名 Nginx fallback。"
-    systemctl is-active --quiet nginx || die "Nginx 未运行"
+    service_active nginx || die "Nginx 未运行"
     wait_for_port_listener "$NGINX_FALLBACK_PORT" 15 || die "Nginx fallback 未监听端口：$NGINX_FALLBACK_PORT"
     timeout 10 openssl s_client -brief -connect "$NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT" -servername "$CUSTOM_DOMAIN" </dev/null >>"$LOG_FILE" 2>&1 \
       || die "Nginx fallback TLS 验证失败：$NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT"

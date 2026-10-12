@@ -60,7 +60,7 @@ upstream-nodes.txt
 
 ## 3.0 一键安装（推荐给首次使用）
 
-如果你希望尽量少编辑文件，可以直接使用 `install.sh`。它会用漂亮的交互式提示收集少量必要信息，然后自动生成 `config.env`、`home-proxies.csv` 和 `upstream-nodes.txt`：
+如果你希望尽量少编辑文件，可以直接使用 `install.sh`。首次只收集基础信息、Cloudflare 配置和管理员公钥，然后生成 `config.env`、`home-proxies.csv` 和 `upstream-nodes.txt`：
 
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
@@ -100,7 +100,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstr
 5. `net.ipv6.bindv6only=1` 且已有 IPv4 节点时会在修改前停止，避免 `::` 监听导致 v4 节点掉线。重启后还会按每个实际入口端口分别验证 IPv4 和 IPv6 listener。
 6. UFW 启用时会确保 `/etc/default/ufw` 使用 `IPV6=yes`，规则仍只开放实际 VLESS TCP 端口；云厂商 IPv6 安全组需要手动同步。
 7. 即使启用了 `CUSTOM_DOMAIN`，这三份专用文件也会强制使用 IPv6 字面量作为 `server`，但继续复用现有 Reality SNI 与其它参数。
-8. 该模式只生成本地 v6 文件，不主动刷新订阅 systemd 服务；需要时可在确认配置后另行执行 `sudo bash bootstrap.sh --phase subscription`。
+8. 验证监听后刷新已启用的订阅，并在自有域名模式更新 CF A/AAAA；域名订阅也包含每个出口的 IPv6 字面量备用节点。发布失败会保留已验证的本地配置，可重跑 `subscription` 或 `cloudflare-dns` 阶段。
 
 输出文件：
 
@@ -112,41 +112,16 @@ bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstr
 
 VLESS Reality 使用 TCP 作为承载，但客户端的 UDP 数据会封装在该连接里，所以防火墙不需要额外开放同号 UDP 端口。
 
-一键脚本当前只让你填写这些内容，其余变量使用默认值；其中 `ADMIN_PUBKEY` 会逐条询问，可以添加多个：
+首次交互只包含基础信息（名称、IPv4/IPv6、SSH 端口）、可选 CF 配置（域名、Zone、邮箱、Token）和多行管理员公钥。端口、订阅、密钥重置及出口列表均改为在 `config.env` 或对应列表文件中手动维护，具体操作见 [README](README.md)。
 
-| 需要填写 | 默认值/提示 | 说明 |
-|---|---|---|
-| `SERVER_ALIAS` | 空 | 服务器别名，也会作为 443 节点名称 |
-| `SERVER_IP_IPv4` | 自动探测公网 IPv4，失败时为空 | 服务器公网 IPv4 |
-| `SERVER_IP_IPv6` | 空 | 服务器公网 IPv6，可不填 |
-| `SSH_PORT` | `22` | 当前 SSH 端口 |
-| `DIRECT_PORT` | `443` | VLESS+Reality 直连入口端口 |
-| `ENABLE_CUSTOM_DOMAIN` | `false` | 是否启用自有域名、Cloudflare DNS-01 和 Nginx fallback |
-| `CUSTOM_DOMAIN` | 空 | 自有域名；启用后节点 server/servername 使用它 |
-| `CLOUDFLARE_ZONE_NAME` | 自动按域名后两段推断 | Cloudflare zone 名；如 `edge.example.com` 对应 `example.com` |
-| `LE_EMAIL` | 空 | Let's Encrypt 注册邮箱；启用自有域名时必填 |
-| `CLOUDFLARE_API_TOKEN` | 空 | Cloudflare DNS API Token；用于 DNS-01 申请证书 |
-| `RESET_PROXY_KEYS` | `false` | 是否重置 VLESS UUID、Reality keypair 和 short-id；修改家宽/上游落地节点时保持 `false` |
-| `ENABLE_SUBSCRIPTION_SERVER` | `true` | 是否开启简单订阅端口 |
-| `SUBSCRIPTION_PORT` | 自有域名时默认空；非自有域名默认 `51040` | 可选公网直连订阅端口；自有域名留空时只显示域名订阅 |
-| `SUBSCRIPTION_INTERNAL_PORT` | `51040` | 订阅服务本机监听端口，供 Nginx fallback 反代 |
-| `SUBSCRIPTION_TARGET` | `ClashMeta` | 当前只生成 ClashMeta/Mihomo YAML |
-| `HOME_PORT_START` | `51043` | 出口入口端口自动分配起点 |
-| `ADMIN_PUBKEY` | 必填；单独输入大写 `SKIP` 可跳过本次录入 | 支持一次性粘贴多行公钥，每行一把；已有公钥输入后用空行结束 |
-| `home-proxies.csv` | 可逐条提示，也可一次性粘贴多行 CSV | 家宽出口列表；字段顺序同模板 |
-| `upstream-nodes.txt` | 可选，空行结束 | 上游节点分享链接；支持 vless plain 和 vless reality |
+默认使用 TCP 443、Mihomo 订阅和 `RESET_PROXY_KEYS=false`。已有 `config.env` 时整份沿用，同时保留已有家宽/上游出口列表，不重复录入或覆盖。CF Token 显示星号，多行公钥空行结束；只有显式 `SKIP` 才跳过公钥录入。
 
-注意事项：
+安装过程保留 SSH 二阶段确认：另开终端执行输出的公钥验证命令，看到 `root` 后输入 `yes`，才执行 final；默认不继续。完成后只显示一个首选订阅链接和全部可复制的本地 `vless://` 链接，必要告警与错误仍显示。
 
-1. 脚本会把远程一键模式的项目目录放在 `/opt/reality-relay-bootstrap`；可通过 `RRB_INSTALL_DIR=/path bash <(wget ...)` 覆盖。
-2. 写出的 `config.env`、`home-proxies.csv` 和 `upstream-nodes.txt` 权限会设置为 `600`，不要公开。
-3. 选择一次性粘贴家宽代理时，可以带 `tag,type,server,server_port,username,password,network,listen_port` 表头；`listen_port` 可留空，粘贴完成后输入空行结束。
-4. 选择粘贴上游节点时，可以直接逐行粘贴普通 `vless://` 或 VLESS Reality 链接；也可以带 `tag,node_url,listen_port` 表头。
-5. 执行到 `ssh-phase1` 后，脚本会停下来提示你另开窗口测试 root key 登录；只有你确认成功后，才继续执行 `ssh-final`、fail2ban、sing-box、UFW、验证和节点输出。
-6. 如果只想生成配置、不自动跑部署阶段，可使用：
+只生成配置、不执行部署：
 
 ```bash
-RRB_RUN_PHASES=false sudo bash install.sh
+sudo env RRB_RUN_PHASES=false bash install.sh
 ```
 
 ---
@@ -892,6 +867,7 @@ sudo bash bootstrap.sh --phase output-nodes
 ```bash
 sudo cat /root/reality-relay-bootstrap-nodes.txt
 sudo cat /root/reality-relay-bootstrap-clash.yaml
+sudo cat /root/reality-relay-bootstrap-vless.txt
 ```
 
 默认订阅端口配置：
@@ -926,13 +902,13 @@ https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta
 ```
 
 `<VLESS_UUID>` 来自 `/etc/reality-relay-bootstrap/vless-uuid.txt`。内置订阅服务是 HTTP；未启用自有域名时如需 HTTPS，请在外层接入带证书的反向代理，并把 `SUBSCRIPTION_BASE_URL` 设置为反代外部地址。启用自有域名时，订阅服务默认只监听本机 `SUBSCRIPTION_INTERNAL_PORT`，外部 HTTPS 由 sing-box Reality fallback 到 Nginx 后反代。
-启用自有域名时，`SUBSCRIPTION_PORT` 默认留空；只有显式填写它时，才会额外开放并显示 `http://SERVER_IP:SUBSCRIPTION_PORT/sub/...` 直连订阅链接。
+启用自有域名时，`SUBSCRIPTION_PORT` 默认留空；显式填写它时会额外开放 `http://SERVER_IP:SUBSCRIPTION_PORT/sub/...` 直连订阅；简洁输出仍只显示首选域名链接。
 
 `SUBSCRIPTION_TARGET` 当前只生成 ClashMeta/Mihomo YAML；旧配置里的其它 target 会警告并按 ClashMeta 处理，旧 URL target 不再兼容。
 
 如果同时配置了 IPv4 和 IPv6，两个订阅链接都返回同一份完整节点；IPv4 节点名称保持不变，IPv6 节点名称追加 `-IPv6`。
 如果 Clash Verge 或浏览器无法导入 IPv6 字面量订阅地址，有 IPv4 时直接用 IPv4 订阅地址即可，它会返回同一份完整节点。
-启用自有域名时，节点 `server` 使用域名，不再生成 IPv6 字面量副本。
+启用自有域名时保留域名节点；已配置 IPv6 且开启监听时，每个出口还提供 `-IPv6` 字面量备用节点，保留相同 Reality SNI。生成配置会启用客户端 IPv6，与 VPS 的 `PROXY_IP_VERSION` 出站策略分别处理。CF 灰云不会绕过 IPv4 封锁，客户端仍需可达的 IPv6。
 
 ---
 

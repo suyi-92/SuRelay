@@ -17,18 +17,12 @@ args=(
   --generator "$SCRIPT_DIR/08-generate-singbox-config.py"
   --nodes-out /root/reality-relay-bootstrap-nodes.txt
   --clash-out /root/reality-relay-bootstrap-clash.yaml
+  --vless-out /root/reality-relay-bootstrap-vless.txt
+  --print-summary
+  --quiet
 )
-if custom_domain_enabled; then
-  args+=(--clash-ipv6 auto)
-elif [[ -n "$SERVER_IP_IPV4" && -n "$SERVER_IP_IPV6" ]]; then
-  args+=(--server-override "$SERVER_IP_IPV4" --extra-server "$SERVER_IP_IPV6" --extra-name-suffix=-IPv6 --clash-ipv6 true)
-elif [[ -n "$SERVER_IP_IPV4" ]]; then
-  args+=(--server-override "$SERVER_IP_IPV4" --clash-ipv6 false)
-elif [[ -n "$SERVER_IP_IPV6" ]]; then
-  args+=(--server-override "$SERVER_IP_IPV6" --name-suffix=-IPv6 --clash-ipv6 true)
-fi
-"${args[@]}"
 
 if [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" ]]; then
-  bash "$SCRIPT_DIR/13-setup-subscription.sh"
+  RRB_SHOW_RESULT=false bash "$SCRIPT_DIR/13-setup-subscription.sh"
 fi
+"${args[@]}"

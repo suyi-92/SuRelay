@@ -154,22 +154,20 @@ python3 "$SCRIPT_DIR/11-output-nodes.py" \
   --clash-ipv6 true \
   --nodes-out "$V6_NODES_OUT" \
   --clash-out "$V6_CLASH_OUT" \
-  --vless-out "$V6_VLESS_OUT"
+  --vless-out "$V6_VLESS_OUT" \
+  --quiet
 
 ROLLBACK_ARMED="false"
 
-cat <<EOF
-
-IPv6 VLESS 本地节点已生成：
-
-  VLESS 分享链接： $V6_VLESS_OUT
-  VLESS 字段文本： $V6_NODES_OUT
-  Mihomo/Clash：    $V6_CLASH_OUT
-
-对齐项：复用现有 UUID、Reality public key、short-id、flow、SNI、指纹、ALPN 和全部入口端口；
-Mihomo/Clash 节点显式设置 udp: true、ipv6: true。VLESS 的 UDP 流量封装在现有 TCP/Reality 入口内，
-因此 UFW 只需开放对应 tcp 端口，不需要额外暴露同号 udp 端口。
-
-请另外确认云厂商 IPv6 安全组已放行上面这些 VLESS TCP 端口。
-配置备份目录：${BACKUP_DIR:-未创建}
-EOF
+# Listener validation has committed the local change. A publication failure must
+# leave that working configuration in place; retry the named publication phase.
+if [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" ]]; then
+  RRB_SHOW_RESULT=false bash "$SCRIPT_DIR/13-setup-subscription.sh"
+fi
+if custom_domain_enabled; then
+  bash "$SCRIPT_DIR/14-setup-cloudflare-dns.sh"
+fi
+if [[ "${RRB_SHOW_RESULT:-true}" == "true" ]]; then
+  python3 "$SCRIPT_DIR/11-output-nodes.py" --config-env "$RRB_CONFIG_FILE" \
+    --generator "$SCRIPT_DIR/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
+fi

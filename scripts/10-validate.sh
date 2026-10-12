@@ -323,6 +323,11 @@ PY
   fi
 fi
 
+if [[ "$RRB_VERBOSE" != "true" ]]; then
+  printf '验证完成。\n'
+  exit 0
+fi
+
 cat <<EOF
 
 验证完成。建议从外部 Debian/Linux 继续测试：

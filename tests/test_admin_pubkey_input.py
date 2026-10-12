@@ -119,8 +119,8 @@ class AdminPubkeyInputTest(unittest.TestCase):
 
         cls.functions = "\n".join([
             function("collect_admin_pubkeys", "read_bool_value"),
-            function("shell_quote", "config_env_value"),
-            function("write_config", "write_home_proxies"),
+            function("shell_quote", "collect_admin_pubkeys"),
+            function("write_config", "ensure_proxy_lists"),
         ])
 
     def assert_keys(self, session, expected):

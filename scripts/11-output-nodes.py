@@ -136,6 +136,37 @@ def interleave_nodes(primary: List[Dict[str, Any]], secondary: List[Dict[str, An
     return nodes
 
 
+def build_client_nodes(env: Dict[str, str], rows: List[Dict[str, Any]], gen) -> List[Dict[str, Any]]:
+    """Use the same endpoints for online subscriptions and locally imported nodes."""
+    server = get_server_ip(env)
+    primary = build_nodes(env, rows, gen, name_suffix="-IPv6" if ":" in server else "")
+    ipv6 = env.get("SERVER_IP_IPV6", "").strip()
+    if ipv6 and ipv6 != server and gen.as_bool(env, "ENABLE_IPV6_LISTEN"):
+        secondary = build_nodes(env, rows, gen, ipv6, "-IPv6", force_server_override=True)
+        return interleave_nodes(primary, secondary)
+    return primary
+
+
+def subscription_url(env: Dict[str, str], token: str) -> str:
+    if env.get("ENABLE_SUBSCRIPTION_SERVER", "true") != "true":
+        return ""
+    base = env.get("SUBSCRIPTION_BASE_URL", "").rstrip("/")
+    if not base:
+        host = env.get("SERVER_IP_IPV4") or env.get("SERVER_IP_IPV6") or env.get("SERVER_IP", "")
+        host = f"[{host.strip('[]')}]" if ":" in host else host
+        base = f"http://{host}:{env['SUBSCRIPTION_LISTEN_PORT']}"
+    return f"{base}/sub/{token}?target=ClashMeta"
+
+
+def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]]) -> None:
+    url = subscription_url(env, nodes[0]["uuid"])
+    if url:
+        print(f"订阅链接（Mihomo / Clash Meta）：\n{url}\n")
+    print("本地节点（复制 vless:// 链接导入）：")
+    for node in nodes:
+        print(node_to_vless_uri(node))
+
+
 def node_to_text(node: Dict[str, Any]) -> str:
     alpn = ",".join(node["alpn"])
     lines = [
@@ -199,7 +230,9 @@ def write_private_file(path_value: str, text: str) -> None:
 
 def build_clash_yaml(env: Dict[str, str], nodes: List[Dict[str, Any]], clash_ipv6: str = "auto") -> str:
     names = [node["name"] for node in nodes]
-    ipv6_enabled = env["PROXY_IP_VERSION"] in {"ipv6", "dual"} if clash_ipv6 == "auto" else clash_ipv6 == "true"
+    ipv6_enabled = (
+        env["PROXY_IP_VERSION"] in {"ipv6", "dual"} or any(":" in node["server"] for node in nodes)
+    ) if clash_ipv6 == "auto" else clash_ipv6 == "true"
     lines = [
         f"mixed-port: {env['CLASH_MIXED_PORT']}",
         "allow-lan: false",
@@ -280,6 +313,7 @@ def main() -> int:
     ap.add_argument("--subscription-target", default="")
     ap.add_argument("--subscription-out", default="")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--print-summary", action="store_true", help="Print one subscription URL and all VLESS import links")
     ap.add_argument("--skip-node-files", action="store_true")
     args = ap.parse_args()
 
@@ -288,14 +322,10 @@ def main() -> int:
     env = gen.defaults(gen.parse_env_file(env_path))
     gen.validate_env(env)
     rows = gen.load_rows(env, env_path.parent, allow_empty=True)
-    nodes = build_nodes(
-        env,
-        rows,
-        gen,
-        args.server_override,
-        args.name_suffix,
-        args.force_server_override,
-    )
+    if args.server_override or args.name_suffix or args.extra_server or args.force_server_override:
+        nodes = build_nodes(env, rows, gen, args.server_override, args.name_suffix, args.force_server_override)
+    else:
+        nodes = build_client_nodes(env, rows, gen)
     if args.extra_server:
         extra_nodes = build_nodes(
             env,
@@ -324,7 +354,9 @@ def main() -> int:
         if not args.quiet:
             print(f"已生成 {target} 订阅文件：{args.subscription_out}")
 
-    if not args.quiet and not args.skip_node_files:
+    if args.print_summary:
+        print_client_summary(env, nodes)
+    elif not args.quiet and not args.skip_node_files:
         print(f"已生成节点文件：{args.nodes_out}")
         print(f"已生成 Clash/Mihomo 文件：{args.clash_out}")
         if args.vless_out:

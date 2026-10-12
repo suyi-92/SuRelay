@@ -1,18 +1,7 @@
 #!/usr/bin/env bash
 # 一键交互式安装入口：下载/定位项目、生成默认配置，并按安全阶段执行部署。
 set -Eeuo pipefail
-
-clear_screen() {
-  if [[ -t 1 ]]; then
-    if command -v clear >/dev/null 2>&1; then
-      clear 2>/dev/null || printf '\033[2J\033[H'
-    else
-      printf '\033[2J\033[H'
-    fi
-  fi
-}
-
-clear_screen
+umask 077
 
 REPO_URL="${RRB_REPO_URL:-https://github.com/suyi-92/reality-relay-bootstrap.git}"
 INSTALL_DIR="${RRB_INSTALL_DIR:-/opt/reality-relay-bootstrap}"
@@ -28,7 +17,6 @@ export RRB_VERBOSE RUN_PHASES
 BOLD=$'\033[1m'
 DIM=$'\033[2m'
 RED=$'\033[31m'
-GREEN=$'\033[32m'
 YELLOW=$'\033[33m'
 BLUE=$'\033[34m'
 CYAN=$'\033[36m'
@@ -107,19 +95,6 @@ run_logged() {
   else
     "$@" >>"$INSTALL_LOG_FILE" 2>&1
   fi
-}
-
-banner() {
-  clear_screen
-  printf '%b\n' "${CYAN}${BOLD}"
-  cat <<'BANNER'
-╭────────────────────────────────────────────────╮
-│            Reality Relay Bootstrap             │
-│              One-click installer               │
-│        Server, SSH key, and relay exits        │
-╰────────────────────────────────────────────────╯
-BANNER
-  printf '%b' "${RESET}"
 }
 
 read_default() {
@@ -225,44 +200,6 @@ shell_quote() {
   printf '%q' "$1"
 }
 
-config_env_value() {
-  local config_file="$1" key="$2" fallback="$3" raw value
-  if [[ ! -f "$config_file" ]]; then
-    printf '%s\n' "$fallback"
-    return 0
-  fi
-  raw="$(awk -v key="$key" '
-    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
-      sub(/^[[:space:]]*(export[[:space:]]+)?[^=]+=/, "")
-      print
-      exit
-    }
-  ' "$config_file")"
-  if [[ -z "$raw" ]]; then
-    printf '%s\n' "$fallback"
-    return 0
-  fi
-  value="$(printf '%s' "$raw" | sed -E "s/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^[\"']//; s/[\"']$//")"
-  case "$value" in
-    true|false) printf '%s\n' "$value" ;;
-    *) printf '%s\n' "$fallback" ;;
-  esac
-}
-
-csv_escape() {
-  local value="$1"
-  if [[ "$value" == *","* || "$value" == *"\""* || "$value" == *$'\n'* ]]; then
-    value="${value//\"/\"\"}"
-    printf '"%s"' "$value"
-  else
-    printf '%s' "$value"
-  fi
-}
-
-default_authorized_keys() {
-  awk 'NF && $1 !~ /^#/ { print }' /root/.ssh/authorized_keys 2>/dev/null || true
-}
-
 collect_admin_pubkeys() {
   local keys_file="$1" count=0 key keys_fd
   local key_pattern='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+[A-Za-z0-9+/]+={0,2}([[:space:]].*)?$'
@@ -324,15 +261,6 @@ read_bool_value() {
   done
 }
 
-url_host() {
-  local host="$1"
-  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
-    printf '[%s]\n' "$host"
-  else
-    printf '%s\n' "$host"
-  fi
-}
-
 infer_cloudflare_zone_name() {
   local domain="$1" parts count
   IFS='.' read -r -a parts <<<"$domain"
@@ -341,33 +269,6 @@ infer_cloudflare_zone_name() {
     printf '%s.%s\n' "${parts[count-2]}" "${parts[count-1]}"
   else
     printf '%s\n' "$domain"
-  fi
-}
-
-normalize_subscription_target() {
-  local raw="${1:-ClashMeta}" lower compact
-  lower="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
-  compact="$(printf '%s' "$lower" | tr -d ' _-')"
-  case "$compact" in
-    mihomo|clash|clashmeta) printf 'ClashMeta\n' ;;
-    vless|vlessreality|reality|v2ray|v2rayn|v2rayng|quantumultx|quanx|quantumult|qx|shadowrocket) printf 'ClashMeta\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-subscription_target_label() {
-  case "$1" in
-    ClashMeta) printf 'ClashMeta\n' ;;
-    *) printf '%s\n' "$1" ;;
-  esac
-}
-
-subscription_token() {
-  local token_path="/etc/reality-relay-bootstrap/vless-uuid.txt"
-  if [[ -r "$token_path" ]]; then
-    tr -d '\r\n' < "$token_path"
-  else
-    printf '<token>'
   fi
 }
 
@@ -536,238 +437,67 @@ EOF_CONFIG
   chmod 600 "$project_dir/config.env"
 }
 
-write_home_proxies() {
-  local project_dir="$1" rows_file="$2"
-  {
-    printf 'tag,type,server,server_port,username,password,network,listen_port\n'
-    cat "$rows_file"
-  } >"$project_dir/home-proxies.csv"
-  chmod 600 "$project_dir/home-proxies.csv"
-}
-
-write_upstream_nodes() {
-  local project_dir="$1" rows_file="$2"
-  {
-    printf 'tag,node_url,listen_port\n'
-    cat "$rows_file"
-  } >"$project_dir/upstream-nodes.txt"
-  chmod 600 "$project_dir/upstream-nodes.txt"
-}
-
-tag_from_upstream_url() {
-  local url="$1" fallback="$2" tag=""
-  if [[ "$url" == *"#"* ]]; then
-    tag="${url##*#}"
+ensure_proxy_lists() {
+  local project_dir="$1"
+  if [[ ! -e "$project_dir/home-proxies.csv" ]]; then
+    printf 'tag,type,server,server_port,username,password,network,listen_port\n' >"$project_dir/home-proxies.csv"
+    chmod 600 "$project_dir/home-proxies.csv"
   fi
-  tag="$(printf '%s' "${tag:-$fallback}" | sed 's/%20/-/g; s/[^A-Za-z0-9_-]/-/g; s/^-*//; s/-*$//')"
-  [[ -n "$tag" ]] || tag="$fallback"
-  printf '%s\n' "$tag"
-}
-
-port_used_in_file() {
-  local port="$1" file="$2"
-  [[ -s "$file" ]] || return 1
-  awk -F',' -v port="$port" 'NF >= 2 && $2 == port { found=1 } END { exit found ? 0 : 1 }' "$file"
-}
-
-next_available_relay_port() {
-  local start="$1" end="$2" home_rows_file="$3" upstream_rows_file="$4" port
-  for (( port=start; port<=end; port++ )); do
-    port_used_in_file "$port" "$home_rows_file" && continue
-    port_used_in_file "$port" "$upstream_rows_file" && continue
-    printf '%s\n' "$port"
-    return 0
-  done
-  die "HOME_PORT_START/HOME_PORT_END 范围内没有可用端口；请扩大端口范围。"
-}
-
-collect_home_proxies_bulk() {
-  local rows_file="$1" line_value any=false
-  printf '%b\n' "${DIM}可直接粘贴多行 CSV，字段为：tag,type,server,server_port,username,password,network,listen_port${RESET}"
-  printf '%b\n' "${DIM}支持带表头；粘贴完成后输入空行结束。listen_port 可留空自动分配，例如：home-01,socks5,1.2.3.4,1080,,secret,tcp,${RESET}"
-  while true; do
-    printf '%b' "> " >"$INPUT_TTY"
-    IFS= read -r line_value <"$INPUT_TTY" || true
-    [[ -n "$line_value" ]] || break
-    [[ "$line_value" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$line_value" =~ ^[[:space:]]*tag[[:space:]]*,[[:space:]]*listen_port[[:space:]]*, ]]; then
-      continue
-    fi
-    printf '%s\n' "$line_value" >>"$rows_file"
-    any=true
-  done
-  [[ "$any" == "true" ]]
-}
-
-collect_home_proxies_one_by_one() {
-  local rows_file="$1" index=1
-  while read_yes_no "是否添加第 ${index} 个家宽代理出口？" "$([[ $index -eq 1 ]] && echo yes || echo no)"; do
-    local tag listen_port type server server_port username password network
-    tag="$(read_default "  tag" "home-$(printf '%02d' "$index")")"
-    type="$(read_default "  type (socks5/http)" "socks5")"
-    server="$(read_default "  server" "")"
-    server_port="$(read_default "  server_port" "1080")"
-    username="$(read_default "  username" "")"
-    password="$(read_secret_default "  password" "")"
-    network="$(read_default "  network" "tcp")"
-    listen_port="$(read_default "  listen_port (留空自动分配)" "")"
-    [[ -n "$server" ]] || die "家宽代理 server 不能为空；如没有代理，请重新运行并选择不添加。"
-    printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
-      "$(csv_escape "$tag")" \
-      "$(csv_escape "$type")" \
-      "$(csv_escape "$server")" \
-      "$(csv_escape "$server_port")" \
-      "$(csv_escape "$username")" \
-      "$(csv_escape "$password")" \
-      "$(csv_escape "$network")" \
-      "$(csv_escape "$listen_port")" >>"$rows_file"
-    index=$((index + 1))
-  done
-}
-
-collect_home_proxies() {
-  local rows_file="$1"
-  : >"$rows_file"
-  line
-  printf '%b\n' "${CYAN}${BOLD}家宽代理配置${RESET}"
-  printf '%b\n' "${DIM}每一行会生成一个 VLESS+Reality 入口端口；如暂时没有家宽代理，可以不添加。${RESET}"
-  if read_yes_no "是否一次性粘贴多行家宽代理 CSV？" yes; then
-    collect_home_proxies_bulk "$rows_file" || warn "没有粘贴任何家宽代理行。"
-  fi
-  if [[ ! -s "$rows_file" ]]; then
-    if read_yes_no "未添加家宽代理，是否跳过家宽代理配置？" yes; then
-      return 0
-    fi
-    collect_home_proxies_one_by_one "$rows_file"
+  if [[ ! -e "$project_dir/upstream-nodes.txt" ]]; then
+    printf 'tag,node_url,listen_port\n' >"$project_dir/upstream-nodes.txt"
+    chmod 600 "$project_dir/upstream-nodes.txt"
   fi
 }
 
-collect_upstream_nodes() {
-  local rows_file="$1" home_rows_file="$2" port_start="$3" port_end="$4"
-  local line_value any=false index=1
-  : >"$rows_file"
-
-  line
-  printf '%b\n' "${CYAN}${BOLD}上游节点配置${RESET}"
-  printf '%b\n' "${DIM}可选：把别人给你的普通 vless:// 或 VLESS Reality 节点接到新的入口端口。${RESET}"
-  if ! read_yes_no "是否粘贴上游节点分享链接或 CSV？" yes; then
-    return 0
+run_install_phase() {
+  local phase="$1"
+  if [[ "$RRB_VERBOSE" == "true" ]]; then
+    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase"
+  else
+    # Routine stdout goes to the log; warnings and failures stay visible on stderr.
+    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" >>"$INSTALL_LOG_FILE"
   fi
-
-  printf '%b\n' "${DIM}每行一个 vless:// 节点链接，脚本会自动分配端口；也支持 CSV：tag,node_url,listen_port。空行结束。${RESET}"
-  printf '%b\n' "${DIM}示例：vless://uuid@example.com:443?type=tcp&security=reality&flow=xtls-rprx-vision&fp=chrome&sni=www.microsoft.com&pbk=xxx&sid=abcd&spx=%2F#relay${RESET}"
-  while true; do
-    printf '%b' "> " >"$INPUT_TTY"
-    IFS= read -r line_value <"$INPUT_TTY" || true
-    [[ -n "$line_value" ]] || break
-    [[ "$line_value" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$line_value" =~ ^[[:space:]]*tag[[:space:]]*, ]]; then
-      continue
-    fi
-    if [[ "$line_value" =~ ^[^,]+,[[:space:]]*vless:// || "$line_value" =~ ^[^,]+,[[:space:]]*[0-9]+,[[:space:]]*vless:// ]]; then
-      printf '%s\n' "$line_value" >>"$rows_file"
-      any=true
-      index=$((index + 1))
-      continue
-    fi
-    case "$line_value" in
-      vless://*)
-        local tag
-        tag="$(tag_from_upstream_url "$line_value" "upstream-$(printf '%02d' "$index")")"
-        printf '%s,%s,\n' "$(csv_escape "$tag")" "$(csv_escape "$line_value")" >>"$rows_file"
-        any=true
-        index=$((index + 1))
-        ;;
-      *)
-        warn "暂不支持这一行；请粘贴 vless://，或 tag,node_url,listen_port CSV。"
-        ;;
-    esac
-  done
-  [[ "$any" == "true" ]] || warn "未添加上游节点。"
 }
 
 run_install_flow() {
-  local project_dir="$1" server_ip_ipv4="$2" server_ip_ipv6="$3" ssh_port="$4" enable_subscription_server="$5" subscription_port="$6" subscription_target="$7" enable_custom_domain="$8" custom_domain="$9"
+  local project_dir="$1" ssh_host
   cd "$project_dir"
-  line
-  printf '%b\n' "${GREEN}${BOLD}配置文件已生成：${RESET}"
-  printf '  %s\n' "$project_dir/config.env" "$project_dir/home-proxies.csv" "$project_dir/upstream-nodes.txt"
-
   if [[ "$RUN_PHASES" != "true" ]]; then
-    warn "RRB_RUN_PHASES=$RUN_PHASES，仅生成配置，不执行部署阶段。"
+    info "配置已就绪：$project_dir/config.env；未执行部署。"
+    return 0
+  fi
+  # Use the saved settings, including ports and file paths customized through config.env.
+  source "$project_dir/config.env"
+  ssh_host="${SERVER_IP_IPV4:-${SERVER_IP_IPV6:-${SERVER_IP:-}}}"
+  # Prefer the already working SSH address when it is one of the configured endpoints.
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    local _client_ip _client_port connected_host _connected_port
+    read -r _client_ip _client_port connected_host _connected_port <<<"$SSH_CONNECTION"
+    if [[ "$connected_host" == "${SERVER_IP_IPV4:-}" || "$connected_host" == "${SERVER_IP_IPV6:-}" ]]; then
+      ssh_host="$connected_host"
+    fi
+  fi
+
+  info "开始部署；详细日志：$INSTALL_LOG_FILE"
+  run_install_phase preflight
+  run_install_phase ssh-phase1
+
+  printf '\n另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
+  printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "${SSH_PORT:-22}" "$ssh_host"
+  if read_yes_no "已确认公钥登录成功，继续关闭密码登录？" no; then
+    CONFIRM_ROOT_KEY_LOGIN=yes run_install_phase ssh-final
+  else
+    warn "已停在 ssh-phase1；验证后按 README 执行 ssh-final。"
     return 0
   fi
 
-  line
-  printf '%b\n' "${CYAN}${BOLD}开始分阶段部署${RESET}"
-  bash bootstrap.sh --phase preflight
-  bash bootstrap.sh --phase ssh-phase1
-
-  line
-  printf '%b\n\n' "${YELLOW}${BOLD}安全确认：不要关闭当前 SSH 窗口。${RESET}"
-  printf '请另开一个终端，确认下面命令可以通过 root 公钥登录：\n\n'
-  if [[ -n "$server_ip_ipv4" ]]; then
-    printf 'IPv4:\n'
-    printf '  ssh -p %q -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@%q\n' "$ssh_port" "$server_ip_ipv4"
-  fi
-  if [[ -n "$server_ip_ipv6" ]]; then
-    printf '\nIPv6:\n'
-    printf '  ssh -p %q -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@%q\n' "$ssh_port" "$server_ip_ipv6"
-  fi
-  printf '\n  whoami\n\n'
-  printf '确认输出为 root 后，再回到这里继续。\n'
-  if read_yes_no "我已确认 root 公钥登录正常，继续 SSH final 加固？" yes; then
-    CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final
-  else
-    warn "已暂停在 ssh-phase1。之后可手动执行：sudo CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final"
-    return 0
-  fi
-
-  bash bootstrap.sh --phase fail2ban
-  bash bootstrap.sh --phase singbox
-  bash bootstrap.sh --phase firewall
-  bash bootstrap.sh --phase validate
-
-  line
-  printf '%b\n' "${GREEN}${BOLD}部署完成。${RESET}"
-  if [[ "$enable_subscription_server" == "true" ]]; then
-    local token target_label target_path
-    token="$(subscription_token)"
-    target_label="$(subscription_target_label "$subscription_target")"
-    target_path="/sub/${token}?target=${subscription_target}"
-    printf '\n订阅链接：\n'
-    if [[ "$enable_custom_domain" == "true" ]]; then
-      printf '  %s:  https://%s%s\n' "$target_label" "$custom_domain" "$target_path"
-    fi
-    if [[ -n "$subscription_port" && -n "$server_ip_ipv4" ]]; then
-      local h4
-      h4="$(url_host "$server_ip_ipv4")"
-      printf 'IPv4:\n'
-      printf '  %s:  http://%s:%s%s\n' "$target_label" "$h4" "$subscription_port" "$target_path"
-    fi
-    if [[ -n "$subscription_port" && -n "$server_ip_ipv6" ]]; then
-      local h6
-      h6="$(url_host "$server_ip_ipv6")"
-      printf '\nIPv6:\n'
-      printf '  %s:  http://%s:%s%s\n' "$target_label" "$h6" "$subscription_port" "$target_path"
-    fi
-    if [[ "$enable_custom_domain" == "true" ]]; then
-      printf '\n说明：订阅内容按 CUSTOM_DOMAIN 生成，普通 HTTPS 流量经 sing-box Reality fallback 转到本机 Nginx。\n'
-      if [[ -n "$subscription_port" ]]; then
-        printf '同时启用了直接 HTTP 订阅端口；请确认 UFW 和服务商安全组放行 tcp/%s。\n' "$subscription_port"
-      else
-        printf '未设置 SUBSCRIPTION_PORT，仅显示域名 HTTPS 订阅；内部订阅服务监听本机默认端口。\n'
-      fi
-    else
-      printf '\n说明：订阅内容按 SERVER_IP_IPV4/SERVER_IP_IPV6 生成；如果两者都填写，IPv4/IPv6 链接都返回同一份完整节点，IPv6 节点名称追加 -IPv6。\n'
-      printf '如客户端无法导入 IPv6 字面量订阅地址，有 IPv4 时直接使用 IPv4 订阅地址即可。\n'
-      printf '内置订阅服务是 HTTP；如需 HTTPS，请在外层接入带证书的反向代理。\n'
-    fi
-  else
-    printf '\n订阅服务未启用。\n'
-  fi
-  printf '\n可选：如需在服务器本地生成节点文件，再执行：\n'
-  printf '  sudo bash bootstrap.sh --phase output-nodes\n'
+  run_install_phase fail2ban
+  run_install_phase singbox
+  run_install_phase firewall
+  run_install_phase validate
+  printf '\n'
+  python3 "$project_dir/scripts/11-output-nodes.py" --config-env "$project_dir/config.env" \
+    --generator "$project_dir/scripts/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
 }
 
 run_ipv6_node_flow() {
@@ -783,16 +513,64 @@ run_ipv6_node_flow() {
   [[ -n "$IPV6_NODE_ADDRESS" ]] || die "IPv6 地址不能为空。"
   normalized_ipv6="$(normalize_ipv6 "$IPV6_NODE_ADDRESS")" || die "IPv6 地址校验失败。"
 
-  line
-  printf '%b\n' "${CYAN}${BOLD}IPv6 节点维护模式${RESET}"
-  printf '  项目目录：%s\n' "$project_dir"
-  printf '  IPv6 地址：%s\n' "$normalized_ipv6"
-  printf '%b\n' "${DIM}只复用现有 VLESS/Reality 身份并补充 v6；不会执行 SSH 初始化或重置密钥。${RESET}"
+  local -a command=(bash "$project_dir/scripts/16-add-ipv6-node.sh" --address "$normalized_ipv6")
+  if [[ "$RRB_VERBOSE" == "true" ]]; then
+    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_SHOW_RESULT=false "${command[@]}"
+  else
+    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_SHOW_RESULT=false "${command[@]}" >>"$INSTALL_LOG_FILE"
+  fi
+  python3 "$project_dir/scripts/11-output-nodes.py" --config-env "$project_dir/config.env" \
+    --generator "$project_dir/scripts/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
+}
 
-  RRB_PROJECT_DIR="$project_dir" \
-  RRB_CONFIG_FILE="$project_dir/config.env" \
-  RRB_VERBOSE="$RRB_VERBOSE" \
-    bash "$project_dir/scripts/16-add-ipv6-node.sh" --address "$normalized_ipv6"
+configure_install() {
+  local project_dir="$1" default_ip
+  if [[ -f "$project_dir/config.env" ]]; then
+    info "沿用现有 config.env 和出口列表；修改方法见 README。"
+    ensure_proxy_lists "$project_dir"
+    return 0
+  fi
+  default_ip="$(public_ipv4)"
+
+  line
+  printf '%b\n' "${CYAN}${BOLD}基础信息${RESET}"
+  local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey
+  local enable_custom_domain custom_domain cloudflare_zone_name le_email cloudflare_api_token
+  server_alias="$(read_default "SERVER_ALIAS" "")"
+  server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
+  server_ip_ipv6="$(read_default "SERVER_IP_IPv6（可留空）" "$(public_ipv6)")"
+  ssh_port="$(read_default "SSH_PORT" "22")"
+
+  line
+  printf '%b\n' "${CYAN}${BOLD}Cloudflare 域名（灰云 DNS）${RESET}"
+  enable_custom_domain="$(read_bool_value "ENABLE_CUSTOM_DOMAIN" "false")"
+  custom_domain=""
+  cloudflare_zone_name=""
+  le_email=""
+  cloudflare_api_token=""
+  if [[ "$enable_custom_domain" == "true" ]]; then
+    custom_domain="$(read_default "CUSTOM_DOMAIN" "")"
+    cloudflare_zone_name="$(read_default "CLOUDFLARE_ZONE_NAME" "$(infer_cloudflare_zone_name "$custom_domain")")"
+    le_email="$(read_default "LE_EMAIL" "")"
+    cloudflare_api_token="$(read_secret_default "CLOUDFLARE_API_TOKEN" "")"
+    [[ -n "$custom_domain" && -n "$cloudflare_zone_name" && -n "$le_email" && -n "$cloudflare_api_token" ]] \
+      || die "启用 CF 域名时，请完整填写域名、Zone、邮箱和 Token。"
+  fi
+  [[ -n "$server_alias" ]] || server_alias="$custom_domain"
+  [[ -n "$server_alias" ]] || die "SERVER_ALIAS 不能为空。"
+  [[ -n "$server_ip_ipv4" || -n "$server_ip_ipv6" ]] || die "IPv4 和 IPv6 至少填写一个。"
+  if [[ -n "$server_ip_ipv6" ]]; then
+    server_ip_ipv6="$(normalize_ipv6 "$server_ip_ipv6")"
+  fi
+
+  ADMIN_KEYS_FILE="$(mktemp)"
+  trap 'rm -f "${ADMIN_KEYS_FILE:-}"' EXIT
+  collect_admin_pubkeys "$ADMIN_KEYS_FILE"
+  admin_pubkey="$(cat "$ADMIN_KEYS_FILE")"
+  write_config "$project_dir" "$server_alias" "$server_ip_ipv4" "$server_ip_ipv6" "$ssh_port" "$admin_pubkey" \
+    443 true '' ClashMeta false 51043 65535 "$enable_custom_domain" "$custom_domain" \
+    "$cloudflare_zone_name" "$le_email" "$cloudflare_api_token" 8443
+  ensure_proxy_lists "$project_dir"
 }
 
 main() {
@@ -803,83 +581,15 @@ main() {
   if [[ "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ]]; then
     init_input_tty
   fi
-  banner
-  local project_dir default_ip
+  info "Reality Relay Bootstrap"
+  local project_dir
   project_dir="$(ensure_project)"
   if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
     run_ipv6_node_flow "$project_dir"
     return 0
   fi
-  default_ip="$(public_ipv4)"
-
-  line
-  printf '%b\n' "${CYAN}${BOLD}基础信息${RESET}"
-  local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey direct_port enable_subscription_server subscription_port subscription_target reset_proxy_keys reset_proxy_keys_default home_port_start home_port_end enable_custom_domain custom_domain cloudflare_zone_name le_email cloudflare_api_token nginx_fallback_port
-  reset_proxy_keys_default="$(config_env_value "$project_dir/config.env" "RESET_PROXY_KEYS" "false")"
-  server_alias="$(read_default "SERVER_ALIAS" "")"
-  server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
-  server_ip_ipv6="$(read_default "SERVER_IP_IPv6" "")"
-  ssh_port="$(read_default "SSH_PORT" "22")"
-  direct_port="$(read_default "DIRECT_PORT" "443")"
-
-  line
-  printf '%b\n' "${CYAN}${BOLD}自有域名配置${RESET}"
-  printf '%b\n' "${DIM}默认假设域名托管在 Cloudflare，DNS 记录保持灰云 / DNS only；公网 tcp/443 由 sing-box 监听，本机 8443 给 Nginx fallback。${RESET}"
-  enable_custom_domain="$(read_bool_value "ENABLE_CUSTOM_DOMAIN" "false")"
-  custom_domain=""
-  cloudflare_zone_name=""
-  le_email=""
-  cloudflare_api_token=""
-  nginx_fallback_port="8443"
-  if [[ "$enable_custom_domain" == "true" ]]; then
-    custom_domain="$(read_default "CUSTOM_DOMAIN" "")"
-    cloudflare_zone_name="$(read_default "CLOUDFLARE_ZONE_NAME" "$(infer_cloudflare_zone_name "$custom_domain")")"
-    le_email="$(read_default "LE_EMAIL" "")"
-    cloudflare_api_token="$(read_secret_default "CLOUDFLARE_API_TOKEN" "")"
-    nginx_fallback_port="$(read_default "NGINX_FALLBACK_PORT" "8443")"
-    [[ -n "$custom_domain" ]] || die "CUSTOM_DOMAIN 不能为空。"
-    [[ -n "$cloudflare_zone_name" ]] || die "CLOUDFLARE_ZONE_NAME 不能为空。"
-    [[ -n "$le_email" ]] || die "LE_EMAIL 不能为空。"
-    [[ -n "$cloudflare_api_token" ]] || die "CLOUDFLARE_API_TOKEN 不能为空；需要 Cloudflare DNS-01 申请证书。"
-    [[ "$direct_port" == "443" ]] || die "启用自有域名时 DIRECT_PORT 必须为 443。"
-  fi
-
-  line
-  printf '%b\n' "${CYAN}${BOLD}节点订阅配置${RESET}"
-  printf '%b\n' "${DIM}RESET_PROXY_KEYS=false 会保留现有 VLESS UUID、Reality keypair 和 short-id；修改落地机时通常保持 false。只有需要作废旧节点时才设为 true。${RESET}"
-  reset_proxy_keys="$(read_bool_value "RESET_PROXY_KEYS" "$reset_proxy_keys_default")"
-  enable_subscription_server="$(read_bool_value "ENABLE_SUBSCRIPTION_SERVER" "true")"
-  subscription_port=""
-  subscription_target="ClashMeta"
-  if [[ "$enable_subscription_server" == "true" ]]; then
-    if [[ "$enable_custom_domain" == "true" ]]; then
-      subscription_port="$(read_default "SUBSCRIPTION_PORT（可选公网直连 HTTP 订阅端口；留空则只显示域名订阅）" "")"
-    else
-      subscription_port="$(read_default "SUBSCRIPTION_PORT" "51040")"
-    fi
-  fi
-  home_port_start="$(read_default "HOME_PORT_START" "51043")"
-  home_port_end="65535"
-
-  if [[ -z "$server_alias" && -n "$custom_domain" ]]; then
-    server_alias="$custom_domain"
-  fi
-  [[ -n "$server_alias" ]] || die "SERVER_ALIAS 不能为空。"
-  [[ -n "$server_ip_ipv4" || -n "$server_ip_ipv6" ]] || die "SERVER_IP_IPv4 和 SERVER_IP_IPv6 至少填写一个。"
-
-  ADMIN_KEYS_FILE="$(mktemp)"
-  ROWS_FILE="$(mktemp)"
-  UPSTREAM_ROWS_FILE="$(mktemp)"
-  trap 'rm -f "${ADMIN_KEYS_FILE:-}" "${ROWS_FILE:-}" "${UPSTREAM_ROWS_FILE:-}"' EXIT
-  ADMIN_USER="root" collect_admin_pubkeys "$ADMIN_KEYS_FILE"
-  admin_pubkey="$(cat "$ADMIN_KEYS_FILE")"
-  collect_home_proxies "$ROWS_FILE"
-  collect_upstream_nodes "$UPSTREAM_ROWS_FILE" "$ROWS_FILE" "$home_port_start" "$home_port_end"
-
-  write_config "$project_dir" "$server_alias" "$server_ip_ipv4" "$server_ip_ipv6" "$ssh_port" "$admin_pubkey" "$direct_port" "$enable_subscription_server" "$subscription_port" "$subscription_target" "$reset_proxy_keys" "$home_port_start" "$home_port_end" "$enable_custom_domain" "$custom_domain" "$cloudflare_zone_name" "$le_email" "$cloudflare_api_token" "$nginx_fallback_port"
-  write_home_proxies "$project_dir" "$ROWS_FILE"
-  write_upstream_nodes "$project_dir" "$UPSTREAM_ROWS_FILE"
-  run_install_flow "$project_dir" "$server_ip_ipv4" "$server_ip_ipv6" "$ssh_port" "$enable_subscription_server" "$subscription_port" "$subscription_target" "$enable_custom_domain" "$custom_domain"
+  configure_install "$project_dir"
+  run_install_flow "$project_dir"
 }
 
 main "$@"

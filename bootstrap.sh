@@ -65,9 +65,13 @@ case "$PHASE" in
     run_phase 07-install-singbox.sh
     python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --write --quiet
     run_phase 10-validate.sh --singbox-only --skip-proxy-tests --restart-singbox
-    run_phase 13-setup-subscription.sh
+    RRB_SHOW_RESULT=false run_phase 13-setup-subscription.sh
     run_phase 14-setup-cloudflare-dns.sh
     run_phase 15-setup-custom-domain.sh
+    if [[ "$RRB_DRY_RUN" != "true" && "${RRB_SHOW_RESULT:-true}" == "true" ]]; then
+      python3 "$SCRIPT_DIR/11-output-nodes.py" --config-env "$RRB_CONFIG_FILE" \
+        --generator "$SCRIPT_DIR/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
+    fi
     ;;
   firewall) run_phase 09-apply-firewall.sh ;;
   validate) run_phase 10-validate.sh ;;

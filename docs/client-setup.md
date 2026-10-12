@@ -27,13 +27,13 @@ ENABLE_CUSTOM_DOMAIN="true"
 CUSTOM_DOMAIN="edge.example.com"
 ```
 
-节点和订阅内容里的 `server` 会使用 `CUSTOM_DOMAIN`，Reality `servername` 也会使用该域名。订阅服务只监听本机，外部订阅地址为：
+主节点的 `server` 和 Reality `servername` 使用 `CUSTOM_DOMAIN`；配置 IPv6 并开启监听时，还会为每个出口增加 `-IPv6` 字面量备用节点，其 SNI 保持相同。订阅服务只监听本机，外部订阅地址为：
 
 ```text
 https://edge.example.com/sub/<VLESS_UUID>?target=ClashMeta
 ```
 
-自有域名模式下 `SUBSCRIPTION_PORT` 默认留空，只显示上面的域名 HTTPS 订阅。只有显式填写 `SUBSCRIPTION_PORT` 时，才会额外显示并开放 `http://SERVER_IP:SUBSCRIPTION_PORT/sub/...`。
+自有域名模式下 `SUBSCRIPTION_PORT` 默认留空，只显示上面的域名 HTTPS 订阅。显式填写 `SUBSCRIPTION_PORT` 会额外开放 `http://SERVER_IP:SUBSCRIPTION_PORT/sub/...`，简洁输出仍只显示首选域名订阅。
 
 如需在服务器本地额外生成节点文件：
 
@@ -41,9 +41,10 @@ https://edge.example.com/sub/<VLESS_UUID>?target=ClashMeta
 sudo bash bootstrap.sh --phase output-nodes
 /root/reality-relay-bootstrap-nodes.txt
 /root/reality-relay-bootstrap-clash.yaml
+/root/reality-relay-bootstrap-vless.txt
 ```
 
-这两个文件包含 VLESS UUID、Reality public key、short-id 等节点信息，权限为 600，不要公开。
+这些文件包含 VLESS UUID、Reality public key、short-id 等节点信息，权限为 600，不要公开。
 
 如果机器最初只配置了 IPv4，后来只想补出一套 IPv6 字面量本地节点，可以运行：
 
@@ -51,14 +52,14 @@ sudo bash bootstrap.sh --phase output-nodes
 sudo bash install.sh -6 2001:db8::10
 ```
 
-它会保留现有 UUID、Reality key、端口与出口映射，在 `/root` 生成 `reality-relay-bootstrap-v6-vless.txt`、`reality-relay-bootstrap-v6-nodes.txt` 和 `reality-relay-bootstrap-v6-clash.yaml`。v6 Mihomo/Clash 文件显式启用 `ipv6: true` 与 `udp: true`；VLESS UDP 通过现有 TCP/Reality 会话承载，不需要再开放 UDP 监听端口。
+它会保留现有 UUID、Reality key、端口与出口映射，刷新已启用的订阅并更新 CF A/AAAA，同时在 `/root` 生成 `reality-relay-bootstrap-v6-vless.txt`、`reality-relay-bootstrap-v6-nodes.txt` 和 `reality-relay-bootstrap-v6-clash.yaml`。v6 Mihomo/Clash 文件显式启用 `ipv6: true` 与 `udp: true`；VLESS UDP 通过现有 TCP/Reality 会话承载，不需要再开放 UDP 监听端口。
 
 如果同时配置了 IPv4 和 IPv6，两个订阅链接都返回同一份完整节点；IPv4 节点名称保持不变，IPv6 节点名称追加 `-IPv6`。
 如果 Clash Verge 或浏览器无法导入 IPv6 字面量订阅地址，有 IPv4 时直接用 IPv4 订阅地址即可，它会返回同一份完整节点。
 
 `SUBSCRIPTION_TARGET` 当前只生成 ClashMeta/Mihomo YAML；旧配置里的其它 target 会警告并按 ClashMeta 处理，旧 URL target 不再兼容。
 
-如果 `PROXY_IP_VERSION="ipv6"` 或 `PROXY_IP_VERSION="dual"`，生成的 Clash/Mihomo 配置会启用 `ipv6: true`；默认 `ipv4` 会保持 `ipv6: false`。
+当节点包含 IPv6 地址，或 `PROXY_IP_VERSION` 为 `ipv6`/`dual` 时，生成的 Mihomo 配置启用 `ipv6: true`。客户端 IPv6 入口不依赖 VPS 出站是否优先 IPv4。CF 灰云域名不能绕过被封的 IPv4，客户端必须具备可用 IPv6；必要时选择 `-IPv6` 节点，或通过 `curl -6` 下载域名订阅。参见 [README](../README.md#ipv6cf-域名与-ipv4-不通)。
 
 ## Clash/Mihomo 节点字段
 

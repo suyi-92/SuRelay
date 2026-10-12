@@ -51,22 +51,6 @@ else
     --skip-node-files
     --quiet
   )
-  if custom_domain_enabled; then
-    args+=(--clash-ipv6 auto)
-  elif [[ -n "$SERVER_IP_IPV4" && -n "$SERVER_IP_IPV6" ]]; then
-    args+=(
-      --server-override "$SERVER_IP_IPV4"
-      --extra-server "$SERVER_IP_IPV6"
-      --extra-name-suffix=-IPv6
-      --clash-ipv6 true
-    )
-  elif [[ -n "$SERVER_IP_IPV4" ]]; then
-    args+=(--server-override "$SERVER_IP_IPV4" --clash-ipv6 false)
-  elif [[ -n "$SERVER_IP_IPV6" ]]; then
-    args+=(--server-override "$SERVER_IP_IPV6" --name-suffix=-IPv6 --clash-ipv6 true)
-  else
-    die "SERVER_IP_IPV4 和 SERVER_IP_IPV6 至少需要填写一个。"
-  fi
   "${args[@]}"
   chmod 600 "$SUBSCRIPTION_DIR/all/"*
 fi
@@ -105,44 +89,7 @@ EOF_SERVICE
   systemctl restart "$SERVICE_NAME" >>"$LOG_FILE" 2>&1
 fi
 
-token="$(subscription_token)"
-target_label="$(subscription_target_label "$SUBSCRIPTION_TARGET")"
-target_path="/sub/${token}?target=ClashMeta"
-
-cat <<EOF
-
-订阅服务已配置：
-
-$(if [[ -n "${SUBSCRIPTION_BASE_URL:-}" ]]; then
-  base="${SUBSCRIPTION_BASE_URL%/}"
-  printf '  %s:  %s%s\n' "$target_label" "$base" "$target_path"
-fi)
-$(if subscription_public_enabled && [[ -n "$(server_ipv4_hosts)" ]]; then
-  printf 'IPv4:\n'
-  for host in $(server_ipv4_hosts); do
-    h="$(url_host "$host")"
-    printf '  %s:  http://%s:%s%s\n' "$target_label" "$h" "$SUBSCRIPTION_PORT" "$target_path"
-  done
-fi)
-$(if subscription_public_enabled && [[ -n "$(server_ipv6_hosts)" ]]; then
-  printf '\nIPv6:\n'
-  for host in $(server_ipv6_hosts); do
-    h="$(url_host "$host")"
-    printf '  %s:  http://%s:%s%s\n' "$target_label" "$h" "$SUBSCRIPTION_PORT" "$target_path"
-  done
-fi)
-
-$(if custom_domain_enabled; then
-  printf '说明：订阅内容按 CUSTOM_DOMAIN 生成；HTTPS 订阅经 sing-box Reality fallback 转到本机 Nginx，再反代到内置订阅服务。\n'
-  if subscription_public_enabled; then
-    printf '同时启用了直接 HTTP 订阅端口；请确认 UFW 和服务商安全组放行 tcp/%s。\n' "$SUBSCRIPTION_PORT"
-  else
-    printf '未设置 SUBSCRIPTION_PORT，公网只需要放行 tcp/443；内部订阅服务监听本机 tcp/%s。\n' "$SUBSCRIPTION_LISTEN_PORT"
-  fi
-else
-  printf '说明：订阅内容按 SERVER_IP_IPV4/SERVER_IP_IPV6 生成；如果两者都填写，IPv4/IPv6 链接都返回同一份完整节点，IPv6 节点名称追加 -IPv6。\n'
-  printf '如客户端无法导入 IPv6 字面量订阅地址，有 IPv4 时直接使用 IPv4 订阅地址即可。\n'
-  printf '内置订阅服务是 HTTP；如需 HTTPS，请在外层接入带证书的反向代理。\n\n'
-  printf '请确认 UFW 和服务商安全组放行 tcp/%s。\n' "$SUBSCRIPTION_PORT"
-fi)
-EOF
+if ! is_dry_run && [[ "${RRB_SHOW_RESULT:-true}" == "true" ]]; then
+  python3 "$SCRIPT_DIR/11-output-nodes.py" --config-env "$RRB_CONFIG_FILE" \
+    --generator "$SCRIPT_DIR/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
+fi

@@ -6,3 +6,4 @@ upstream-nodes.txt
 __pycache__/
 reality-relay-bootstrap-nodes.txt
 reality-relay-bootstrap-clash.yaml
+reality-relay-bootstrap-vless.txt

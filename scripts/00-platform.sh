@@ -236,8 +236,13 @@ install_certbot() {
     if [[ ! -x "$CERTBOT_BIN" ]]; then
       run python3 -m virtualenv /opt/reality-relay-certbot
     fi
+    # Version-index parsing can exhaust a 256 MiB VPS before any wheel installs.
+    # Direct hashed artifacts bound resolver memory; native dependencies use musl
+    # wheels. Only the small pure-Python Cloudflare source needs a local build.
     run /opt/reality-relay-certbot/bin/pip install --no-input --disable-pip-version-check \
-      'certbot==4.0.0' 'acme==4.0.0' 'certbot-dns-cloudflare==4.0.0'
+      --no-index --no-deps --no-build-isolation --no-cache-dir --no-compile --require-hashes \
+      -r "$RRB_PROJECT_DIR/requirements/alpine-certbot.txt"
+    run /opt/reality-relay-certbot/bin/pip check
   else
     pkg_install certbot python3-certbot-dns-cloudflare
     CERTBOT_BIN=certbot

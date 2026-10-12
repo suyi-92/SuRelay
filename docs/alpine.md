@@ -32,7 +32,7 @@ bash /tmp/reality-relay-install.sh
 | fail2ban | 使用 `polling` 文件后端。默认检查 `/var/log/messages`，可通过 `FAIL2BAN_SSH_LOG` 指定实际日志。安装前发送一条 authpriv 探针，确认日志确实可读；没有现有 syslog 服务时启动系统自带的 syslog。 |
 | UFW | 安装 OpenRC 服务和 IPv6 iptables 工具；先放行 SSH，再应用实际入口和订阅端口，启用 IPv6 时同步 `IPV6=yes`，添加开机启动。 |
 | Nginx | `NGINX_FALLBACK_CONF=auto` 使用 `/etc/nginx/http.d/reality-relay-bootstrap.conf`。自定义路径会链接到 `http.d`，`nginx -t` 通过后才重载。 |
-| 证书 | `/opt/reality-relay-certbot` 独立 Python 环境安装固定版本的 Certbot、ACME 和 Cloudflare 插件（4.0.0），不修改系统 Python 包。每日 cron 执行续期，成功后通过 OpenRC 重载 Nginx。 |
+| 证书 | `/opt/reality-relay-certbot` 独立 Python 环境安装固定版本的 Certbot、ACME 和 Cloudflare 插件（4.0.0）。`requirements/alpine-certbot.txt` 固定完整依赖的官方文件 URL 和 SHA256，跳过版本索引解析、依赖搜索、缓存和预编译；原生依赖使用 musl wheel，仅 Cloudflare 的小型纯 Python 源码包在本地打包。安装后运行 `pip check`，不修改系统 Python 包。每日 cron 执行续期，成功后通过 OpenRC 重载 Nginx。 |
 
 Debian/Ubuntu 的 `auto` 仍使用原有 APT 和 systemd 流程。`apt`、`233boy` 不能用于 Alpine；从其他机器复制来的旧配置应先修改安装方式。
 
@@ -53,11 +53,29 @@ tail -n 80 /var/log/messages
 
 自有域名模式另检查 `rc-service nginx status`、`rc-service crond status` 和 `/opt/reality-relay-certbot/bin/certbot certificates`。首次签发、实际 Cloudflare DNS 权限和公网端口连通性必须用部署者的真实域名验证。
 
+### 小内存主机从证书安装失败处继续
+
+`Killed` / 退出码 137 表示进程收到 SIGKILL。结合 cgroup 的 `memory.max` 和 `memory.events` 判断是否发生 OOM；进程退出后的 `free` 余量不能代表安装时的峰值。不要仅凭 137 就自动创建 swap，受限容器可能无权启用，且需要先核对磁盘余量。
+
+更新项目中的 `scripts/00-platform.sh` 和 `requirements/alpine-certbot.txt` 后，如果已经完成 sing-box、订阅和 DNS，而失败停在 Certbot 安装，可沿用现有配置继续：
+
+```sh
+cd /opt/reality-relay-bootstrap &&
+bash bootstrap.sh --phase custom-domain --verbose &&
+bash bootstrap.sh --phase firewall --verbose &&
+bash bootstrap.sh --phase validate --verbose &&
+bash bootstrap.sh --phase output-nodes
+```
+
+此流程不重复重置或轮换节点身份。`custom-domain` 会重新核对 DNS，再安装证书依赖、签发证书和配置 Nginx；任一步失败就停止。无需删除现有 Certbot 环境，依赖检查会验证安装是否完整。
+
 增删出口、刷新订阅、增加 IPv6 和回滚仍按 README 对应阶段执行。回滚恢复 UFW 时同步恢复已有的 `/etc/default/ufw` 备份并重载；显式禁用 UFW 时也移除 OpenRC 默认运行级别中的自启。默认回滚范围仍是 SSH、sing-box 配置和可选防火墙，不卸载全部依赖或证书服务。
 
 ## 开发验证
 
 `python3 -m unittest discover -s tests` 覆盖系统识别、平台配置、apk/systemd/OpenRC 分派、参数引用、日志投递检查和现有节点/SSH 回归。
+
+`tests/alpine-certbot-lowmem.sh` 在全新、可丢弃的 Alpine 3.19 容器中验证 Certbot 冷安装、重复安装、Cloudflare 插件发现和 OOM 计数。需要预装 Bash、只读挂载项目，并设置 `RRB_TEST_DISPOSABLE=yes`；使用 cgroup v2，建议限制为 160 MiB 且禁止 swap。该检查不启动系统服务，不修改 DNS，不申请真实证书。更新锁定依赖时必须同时更新对应 URL/哈希并重跑此检查；aarch64 wheel 仍需该架构的实机验证。
 
 `tests/alpine-smoke.sh` 只能在**可丢弃的 Alpine 3.19 系统**中以 root 执行。它修改 SSH、账户、防火墙和服务，不能在正式服务器运行。需要预装 Bash、OpenSSH、Python 3 并启动 OpenRC；项目中不能已有 `config.env`。显式设置 `RRB_TEST_DISPOSABLE=yes` 后，脚本验证两阶段 SSH 公钥登录、实际包安装、节点身份保持、订阅、IPv6 成功/失败恢复，以及本地 VLESS/Reality 完整流量往返。重启后的服务恢复需要另行检查；容器内验证不替代真实 VPS 的外部 IPv6、安全组及 Cloudflare/ACME 验证。
 
@@ -71,5 +89,8 @@ tail -n 80 /var/log/messages
 | Alpine 3.19.9 x86_64，OpenRC 0.52.1，自动化测试 | 96 项：95 通过，仅真实 dpkg 安装测试跳过。包含真实 OpenSSH 配置回归。 |
 | 全新 Alpine 隔离容器，PID 1 为 init/OpenRC | 完整 smoke 通过：真实包安装、两阶段 SSH 公钥登录、VLESS/Reality 流量往返、重复安装身份保持、UFW 双栈规则、订阅、IPv6 修改失败恢复。 |
 | Alpine 维护与重启 | maintenance 和 boot-check 通过：SFTP、普通回滚、订阅停启、Certbot 插件、测试证书 TLS 反代、cron/hook，以及重启后的 8 个服务与双栈订阅恢复。 |
+| Certbot 小内存安装修复 | Alpine 3.19.9 x86_64，160 MiB / 无 swap：实际冷安装、重复安装、`pip check`、插件加载通过；回归运行的 `oom` / `oom_kill` 为 0，环境占约 52 MiB。Ubuntu WSL 的 13 项平台回归及修改脚本的 ShellCheck 通过。未发起真实 DNS-01 签发。 |
+
+小内存修复测试中，旧安装命令在隔离容器内也能完成，但出现内存上限回收事件；未完整复现用户主机上的 137。用户主机的 256 MiB 限额及历史 OOM 计数说明存在内存压力，不能据此把全部历史 OOM 都归因于 Certbot。锁定直接下载地址减少安装时的版本解析和缓存开销，不代表整套服务在任意 256 MiB 主机上都已完成验收。
 
 尚未做 aarch64 实机、真实 VPS 外部 IPv6/云安全组、真实 Cloudflare DNS-01 签发与到期续期测试；Debian/Ubuntu 本次运行既有回归和平台分派测试，未重新进行完整 VPS 安装。

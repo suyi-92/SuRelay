@@ -287,6 +287,9 @@ apply_custom_domain_defaults() {
   fi
   if [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" && -z "${SUBSCRIPTION_BASE_URL:-}" ]]; then
     SUBSCRIPTION_BASE_URL="https://$CUSTOM_DOMAIN"
+    if [[ "$DIRECT_PORT" != "443" ]]; then
+      SUBSCRIPTION_BASE_URL+=":$DIRECT_PORT"
+    fi
   fi
   if [[ -z "${CLOUDFLARE_ZONE_NAME:-}" ]]; then
     CLOUDFLARE_ZONE_NAME="$(infer_cloudflare_zone_name "$CUSTOM_DOMAIN")"
@@ -431,6 +434,7 @@ validate_user_name() {
 validate_config_basics() {
   validate_port SSH_PORT
   validate_port DIRECT_PORT
+  [[ "$DIRECT_PORT" != "$SSH_PORT" ]] || die "DIRECT_PORT 不能与 SSH_PORT 相同"
   validate_port HOME_PORT_START
   validate_port HOME_PORT_END
   validate_bool ENABLE_SFTP_USER
@@ -490,7 +494,6 @@ validate_config_basics() {
     if [[ "$CLOUDFLARE_CREATE_ZONE" == "true" ]]; then
       [[ -n "$CLOUDFLARE_ACCOUNT_ID" ]] || die "CLOUDFLARE_CREATE_ZONE=true 时 CLOUDFLARE_ACCOUNT_ID 不能为空"
     fi
-    [[ "$DIRECT_PORT" == "443" ]] || die "ENABLE_CUSTOM_DOMAIN=true 要求 DIRECT_PORT=443（公网 443 由 sing-box 接管）"
     [[ "$NGINX_FALLBACK_PORT" != "$DIRECT_PORT" ]] || die "NGINX_FALLBACK_PORT 不能与 DIRECT_PORT 相同"
     [[ "$NGINX_FALLBACK_PORT" != "$SSH_PORT" ]] || die "NGINX_FALLBACK_PORT 不能与 SSH_PORT 相同"
     [[ "$NGINX_FALLBACK_PORT" != "$SUBSCRIPTION_LISTEN_PORT" ]] || die "NGINX_FALLBACK_PORT 不能与 SUBSCRIPTION_LISTEN_PORT 相同"

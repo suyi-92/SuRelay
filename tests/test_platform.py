@@ -51,6 +51,28 @@ class PlatformTest(unittest.TestCase):
                 self.assertEqual(result.stdout.splitlines(), [method, f"/etc/nginx/{confdir}/reality-relay-bootstrap.conf"])
                 self.assertEqual(self.config.read_bytes(), original)
 
+    def test_nat_custom_domain_shell_defaults_match_public_port(self):
+        for port, override, expected in (
+            ("443", "", "https://edge.example.com"),
+            ("24037", "", "https://edge.example.com:24037"),
+            ("24037", "https://sub.example.com", "https://sub.example.com"),
+        ):
+            with self.subTest(port=port, override=override):
+                self.config.write_text(
+                    'SERVER_ALIAS="test"\nENABLE_CUSTOM_DOMAIN="true"\n'
+                    'CUSTOM_DOMAIN="edge.example.com"\nLE_EMAIL="admin@example.com"\n'
+                    f'DIRECT_PORT="{port}"\nSUBSCRIPTION_BASE_URL="{override}"\n'
+                )
+                result = self.run_shell('load_config; printf "%s\\n" "$DIRECT_PORT" "$SSH_PORT" "$SUBSCRIPTION_BASE_URL" "$SUBSCRIPTION_LISTEN_PORT" "$REALITY_HANDSHAKE_PORT"; if subscription_public_enabled; then exit 91; fi')
+                self.assert_ok(result)
+                self.assertEqual(result.stdout.splitlines(), [port, "22", expected, "51040", "8443"])
+
+    def test_nat_listener_cannot_take_ssh_port(self):
+        self.config.write_text('DIRECT_PORT="22"\nSSH_PORT="22"\n')
+        result = self.run_shell('load_config')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DIRECT_PORT 不能与 SSH_PORT 相同", result.stderr)
+
     def test_alpine_rejects_apt_and_233boy_before_deployment(self):
         for setting in ['INSTALL_SINGBOX_METHOD="apt"', 'INSTALL_SINGBOX_METHOD="233boy"', 'USE_233BOY_INSTALLER="true"']:
             with self.subTest(setting=setting):

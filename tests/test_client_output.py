@@ -68,6 +68,16 @@ class ClientOutputTest(unittest.TestCase):
             self.assertIn("https://edge.example.com/sub/11111111-2222-4333-8444-555555555555?target=ClashMeta", output)
             self.assertIn("IPv6 节点：已生成", output)
 
+    def test_nat_custom_domain_port_matches_uri_yaml_and_subscription(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, yaml, links = self.generate(directory, DIRECT_PORT="24037", SERVER_IP_IPV6="", ENABLE_IPV6_LISTEN="false")
+            self.assertEqual(links[0].port, 24037)
+            self.assertEqual(links[0].hostname, "edge.example.com")
+            self.assertIn("port: 24037", yaml)
+            self.assertIn("https://edge.example.com:24037/sub/", output)
+            self.assertNotIn("https://edge.example.com/sub/", output)
+            self.assertEqual([link.port for link in links[1:]], [51043, 51044])
+
     def test_ipv4_only_keeps_names_and_does_not_advertise_ipv6(self):
         with tempfile.TemporaryDirectory() as directory:
             output, yaml, links = self.generate(directory, ENABLE_CUSTOM_DOMAIN="false", SERVER_IP_IPV6="", ENABLE_IPV6_LISTEN="false")

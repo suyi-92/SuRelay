@@ -92,7 +92,7 @@ if subscription_public_enabled; then
   info "准备开放订阅 HTTP 端口：$SUBSCRIPTION_PORT"
   run ufw allow "${SUBSCRIPTION_PORT}/tcp" comment "reality-relay-bootstrap subscription ${SUBSCRIPTION_PORT}"
 elif [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" ]]; then
-  info "未设置公网订阅端口；订阅服务仅本机监听 tcp/$SUBSCRIPTION_LISTEN_PORT 并通过 443 fallback 反代。"
+  info "未设置公网订阅端口；订阅服务仅本机监听 tcp/$SUBSCRIPTION_LISTEN_PORT 并通过 $DIRECT_PORT fallback 反代。"
 fi
 
 if is_dry_run; then
@@ -116,6 +116,7 @@ UFW 已按最小端口开放。服务商安全组/云防火墙也必须手动放
 $(printf '  VLESS+Reality:     tcp/%s\n' "${PORTS[@]}")
 $(if subscription_public_enabled; then printf '  Subscription:       tcp/%s\n' "$SUBSCRIPTION_PORT"; fi)
 
+以上为本机监听端口；NAT 主机须确认服务商映射，外部 SSH 命令使用服务商分配的公网 SSH 端口。
 不要无脑开放从 ${HOME_PORT_START} 起的整段端口，除非你确认所有端口都会使用。
 启用 UFW 后请另开窗口测试 SSH：
 $(if [[ -n "$(server_ipv4_hosts)" ]]; then

@@ -206,6 +206,8 @@ def apply_custom_domain_defaults(env: Dict[str, str]) -> None:
         env["REALITY_HANDSHAKE_PORT"] = env.get("NGINX_FALLBACK_PORT", "8443")
     if env.get("ENABLE_SUBSCRIPTION_SERVER", "true").lower() == "true" and not env.get("SUBSCRIPTION_BASE_URL", ""):
         env["SUBSCRIPTION_BASE_URL"] = f"https://{domain}"
+        if env["DIRECT_PORT"] != "443":
+            env["SUBSCRIPTION_BASE_URL"] += f":{env['DIRECT_PORT']}"
     if not env.get("CLOUDFLARE_ZONE_NAME", "").strip():
         env["CLOUDFLARE_ZONE_NAME"] = infer_cloudflare_zone_name(domain)
 
@@ -294,6 +296,8 @@ def is_posix_absolute(value: str) -> bool:
 def validate_env(env: Dict[str, str]) -> None:
     as_port(env, "SSH_PORT")
     direct_port = as_port(env, "DIRECT_PORT")
+    if direct_port == as_port(env, "SSH_PORT"):
+        raise ConfigError("DIRECT_PORT 不能与 SSH_PORT 相同")
     start = as_port(env, "HOME_PORT_START")
     end = as_port(env, "HOME_PORT_END")
     as_port(env, "REALITY_HANDSHAKE_PORT")
@@ -371,8 +375,6 @@ def validate_env(env: Dict[str, str]) -> None:
             raise ConfigError("CLOUDFLARE_CREATE_ZONE=true 时 CLOUDFLARE_ACCOUNT_ID 不能为空")
         if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", env.get("LE_EMAIL", "")):
             raise ConfigError("ENABLE_CUSTOM_DOMAIN=true 时 LE_EMAIL 必须是有效邮箱")
-        if direct_port != 443:
-            raise ConfigError("ENABLE_CUSTOM_DOMAIN=true 要求 DIRECT_PORT=443（公网 443 由 sing-box 接管）")
         occupied_ports = {direct_port, as_port(env, "SSH_PORT")}
         if subscription_listen_port is not None:
             occupied_ports.add(subscription_listen_port)
@@ -958,7 +960,7 @@ def print_summary(env: Dict[str, str], rows: List[Dict[str, Any]]) -> None:
     print("配置检查通过。")
     print("入站协议：VLESS + Reality")
     print(f"代理 IP 版本：{env['PROXY_IP_VERSION']}（DNS strategy: {dns_strategy(env)}）")
-    print(f"443 出口：direct，端口：{env['DIRECT_PORT']}")
+    print(f"直连出口：direct，端口：{env['DIRECT_PORT']}")
     print(f"Reality server_name：{env['REALITY_SERVER_NAME']}")
     print(f"Reality handshake：{env['REALITY_HANDSHAKE_SERVER']}:{env['REALITY_HANDSHAKE_PORT']}")
     if custom_domain_enabled(env):
@@ -975,7 +977,7 @@ def print_summary(env: Dict[str, str], rows: List[Dict[str, Any]]) -> None:
         for row in upstream_rows:
             print(f"  {row['tag']} {row['listen_port']} -> {row['type']}://{row['server']}:{row['server_port']}")
     if not home_rows and not upstream_rows:
-        print("没有家宽代理或上游节点行；仅生成 443 入口。")
+        print(f"没有家宽代理或上游节点行；仅生成 {env['DIRECT_PORT']} 入口。")
 
 
 def main() -> int:

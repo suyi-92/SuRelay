@@ -34,6 +34,8 @@ Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以�
 
 默认值：VLESS TCP 443、Mihomo 订阅、保留 UUID/Reality 密钥、启用 UDP 支持。CF 模式走域名 HTTPS，订阅服务仅监听本机 51040；无域名时使用公网 HTTP 51040。其他选项在 [config.example.env](config.example.env) 中查阅并修改 `config.env`。
 
+NAT VPS 若只有高位业务端口，支持把 `DIRECT_PORT` 设置为服务商的同号映射端口；Reality 与域名 HTTPS 订阅共用该端口。`SSH_PORT` 仍填写本机监听端口，迁移与验证步骤见 [NAT 端口配置](docs/nat-ports.md)。
+
 **重跑安装会沿用已有 `config.env` 和出口列表，不重新提问或覆盖它们。** 已安装后，需要修改配置并重新运行安装流程：
 
 ```bash

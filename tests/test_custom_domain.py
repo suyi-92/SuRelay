@@ -91,11 +91,34 @@ class CustomDomainConfigTest(unittest.TestCase):
         self.assertIn("127.0.0.1:$SUBSCRIPTION_LISTEN_PORT", nginx_script)
         self.assertIn("subscription_public_enabled", firewall_script)
 
-    def test_custom_domain_requires_public_443_for_singbox(self):
-        env = self.custom_domain_env(DIRECT_PORT="444")
+    def test_custom_domain_nat_port_updates_listener_nodes_and_subscription(self):
+        env = self.custom_domain_env(DIRECT_PORT="24037")
+        gen.validate_env(env)
+        config = gen.build_config(env, [], "test-uuid", "test-key", "abcd")
+        inbound = config["inbounds"][0]
+        self.assertEqual(inbound["listen_port"], 24037)
+        self.assertEqual(inbound["tls"]["reality"]["handshake"], {"server": "127.0.0.1", "server_port": 8443})
+        self.assertEqual(gen.port_list(env, []), [24037])
+        self.assertEqual(gen.node_list(env, [])[0]["port"], 24037)
+        self.assertEqual(nodes.subscription_url(env, "test-token"), "https://edge.example.com:24037/sub/test-token?target=ClashMeta")
+        self.assertEqual(env["SSH_PORT"], "22")
+        self.assertEqual(env["SUBSCRIPTION_PORT"], "")
+        self.assertEqual(env["SUBSCRIPTION_LISTEN_PORT"], "51040")
 
-        with self.assertRaises(SystemExit):
-            gen.validate_env(env)
+    def test_nat_port_preserves_explicit_subscription_override(self):
+        env = self.custom_domain_env(DIRECT_PORT="24037", SUBSCRIPTION_BASE_URL="https://sub.example.com")
+        gen.validate_env(env)
+        self.assertEqual(nodes.subscription_url(env, "token"), "https://sub.example.com/sub/token?target=ClashMeta")
+
+    def test_custom_domain_still_rejects_fallback_port_collision(self):
+        for port in ("22", "51040", "24037"):
+            with self.subTest(port=port), self.assertRaises(SystemExit):
+                gen.validate_env(self.custom_domain_env(DIRECT_PORT="24037", NGINX_FALLBACK_PORT=port))
+
+    def test_nat_listener_cannot_take_ssh_or_subscription_port(self):
+        for port in ("22", "51040"):
+            with self.subTest(port=port), self.assertRaises(SystemExit):
+                gen.validate_env(self.custom_domain_env(DIRECT_PORT=port))
 
     def test_reality_inbound_uses_custom_domain_and_local_handshake(self):
         env = self.custom_domain_env()

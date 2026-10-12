@@ -273,9 +273,9 @@ cat <<EOF
 自有域名 fallback 已配置：
 
   DNS:      Cloudflare DNS 灰云，$CUSTOM_DOMAIN 指向本机公网 IP
-  Public:   tcp/443 -> sing-box Reality
+  Listen:   tcp/$DIRECT_PORT -> sing-box Reality
   Fallback: $NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT -> Nginx TLS
   Cert:     /etc/letsencrypt/live/$CUSTOM_DOMAIN/fullchain.pem
 
-请确认 Cloudflare 记录为 DNS only / 灰云，服务商安全组放行 tcp/443。
+请确认 Cloudflare 记录为 DNS only / 灰云，服务商放行并映射 tcp/$DIRECT_PORT。
 EOF

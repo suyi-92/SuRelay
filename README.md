@@ -133,9 +133,12 @@ sudo bash bootstrap.sh --phase output-nodes
 
 ```bash
 cd /opt/reality-relay-bootstrap
-sudo nano config.env
 sudo nano home-proxies.csv
 ```
+
+~~~bash
+sudo nano config.env
+~~~
 
 在 `config.env` 中保持 `RESET_PROXY_KEYS="false"`。在 `home-proxies.csv` 中保留表头，新增或修改真实出口；删除出口就删除对应数据行：
 
@@ -159,9 +162,12 @@ sudo bash bootstrap.sh --phase validate
 
 ```bash
 cd /opt/reality-relay-bootstrap
-sudo nano config.env
 sudo nano upstream-nodes.txt
 ```
+
+~~~bash
+sudo nano config.env
+~~~
 
 在 `config.env` 中保持 `RESET_PROXY_KEYS="false"`。在 `upstream-nodes.txt` 中保留表头，新增或修改真实上游；删除出口就删除对应数据行：
 

@@ -67,7 +67,7 @@ bash bootstrap.sh --phase validate --verbose &&
 bash bootstrap.sh --phase output-nodes
 ```
 
-此流程不重复重置或轮换节点身份。`custom-domain` 会重新核对 DNS，再安装证书依赖、签发证书和配置 Nginx；任一步失败就停止。无需删除现有 Certbot 环境，依赖检查会验证安装是否完整。
+此流程不重复重置或轮换节点身份。`custom-domain` 会重新核对 DNS，再安装证书依赖、签发证书和配置 Nginx；任一步失败就停止。无需删除现有 Certbot 环境，依赖检查会验证安装是否完整。创建虚拟环境时关闭 virtualenv 的后台周期更新，避免额外下载进程占用内存；已有缓存的新版本构建工具通过依赖锁中的 `packaging` 兼容。
 
 增删出口、刷新订阅、增加 IPv6 和回滚仍按 README 对应阶段执行。回滚恢复 UFW 时同步恢复已有的 `/etc/default/ufw` 备份并重载；显式禁用 UFW 时也移除 OpenRC 默认运行级别中的自启。默认回滚范围仍是 SSH、sing-box 配置和可选防火墙，不卸载全部依赖或证书服务。
 
@@ -75,7 +75,9 @@ bash bootstrap.sh --phase output-nodes
 
 `python3 -m unittest discover -s tests` 覆盖系统识别、平台配置、apk/systemd/OpenRC 分派、参数引用、日志投递检查和现有节点/SSH 回归。
 
-`tests/alpine-certbot-lowmem.sh` 在全新、可丢弃的 Alpine 3.19 容器中验证 Certbot 冷安装、重复安装、Cloudflare 插件发现和 OOM 计数。需要预装 Bash、只读挂载项目，并设置 `RRB_TEST_DISPOSABLE=yes`；使用 cgroup v2，建议限制为 160 MiB 且禁止 swap。该检查不启动系统服务，不修改 DNS，不申请真实证书。更新锁定依赖时必须同时更新对应 URL/哈希并重跑此检查；aarch64 wheel 仍需该架构的实机验证。
+`tests/alpine-certbot-lowmem.sh` 在全新、可丢弃的 Alpine 3.19 容器中验证 Certbot 冷安装、重复安装、Cloudflare 插件发现和 OOM 计数。还会通过 `tests/fixtures/alpine-certbot-seed.txt` 安装实际故障主机使用的 pip 26.2.1 / setuptools 84.0.0 / wheel 0.48.0，复现缺少 `packaging` 的失败，并验证安装器能修复已有环境。`packaging` 已列入正式依赖锁，覆盖新版 wheel 的运行依赖。
+
+需要预装 Bash、只读挂载项目，并设置 `RRB_TEST_DISPOSABLE=yes`；使用 cgroup v2，建议限制为 160 MiB 且禁止 swap。该检查不启动系统服务，不修改 DNS，不申请真实证书。更新锁定依赖时必须同时更新对应 URL/哈希并重跑此检查；aarch64 wheel 仍需该架构的实机验证。
 
 `tests/alpine-smoke.sh` 只能在**可丢弃的 Alpine 3.19 系统**中以 root 执行。它修改 SSH、账户、防火墙和服务，不能在正式服务器运行。需要预装 Bash、OpenSSH、Python 3 并启动 OpenRC；项目中不能已有 `config.env`。显式设置 `RRB_TEST_DISPOSABLE=yes` 后，脚本验证两阶段 SSH 公钥登录、实际包安装、节点身份保持、订阅、IPv6 成功/失败恢复，以及本地 VLESS/Reality 完整流量往返。重启后的服务恢复需要另行检查；容器内验证不替代真实 VPS 的外部 IPv6、安全组及 Cloudflare/ACME 验证。
 
@@ -90,6 +92,7 @@ bash bootstrap.sh --phase output-nodes
 | 全新 Alpine 隔离容器，PID 1 为 init/OpenRC | 完整 smoke 通过：真实包安装、两阶段 SSH 公钥登录、VLESS/Reality 流量往返、重复安装身份保持、UFW 双栈规则、订阅、IPv6 修改失败恢复。 |
 | Alpine 维护与重启 | maintenance 和 boot-check 通过：SFTP、普通回滚、订阅停启、Certbot 插件、测试证书 TLS 反代、cron/hook，以及重启后的 8 个服务与双栈订阅恢复。 |
 | Certbot 小内存安装修复 | Alpine 3.19.9 x86_64，160 MiB / 无 swap：实际冷安装、重复安装、`pip check`、插件加载通过；回归运行的 `oom` / `oom_kill` 为 0，环境占约 52 MiB。Ubuntu WSL 的 13 项平台回归及修改脚本的 ShellCheck 通过。未发起真实 DNS-01 签发。 |
+| Certbot 新版构建工具兼容 | 相同 160 MiB / 无 swap 环境：冷安装、重复安装、pip 26.2.1 / setuptools 84.0.0 / wheel 0.48.0 缺失 `packaging` 的复现及修复通过；关闭 virtualenv 后台更新后 `oom` / `oom_kill` 为 0，最终环境约 50 MiB。13 项平台回归和 ShellCheck 通过。 |
 
 小内存修复测试中，旧安装命令在隔离容器内也能完成，但出现内存上限回收事件；未完整复现用户主机上的 137。用户主机的 256 MiB 限额及历史 OOM 计数说明存在内存压力，不能据此把全部历史 OOM 都归因于 Certbot。锁定直接下载地址减少安装时的版本解析和缓存开销，不代表整套服务在任意 256 MiB 主机上都已完成验收。
 

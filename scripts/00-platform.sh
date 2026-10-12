@@ -234,7 +234,9 @@ install_certbot() {
     pkg_install python3 py3-virtualenv
     CERTBOT_BIN=/opt/reality-relay-certbot/bin/certbot
     if [[ ! -x "$CERTBOT_BIN" ]]; then
-      run python3 -m virtualenv /opt/reality-relay-certbot
+      # Avoid concurrent background downloads/updates on memory-limited hosts.
+      # Already cached seed versions are still supported by the dependency lock.
+      run python3 -m virtualenv --no-periodic-update /opt/reality-relay-certbot
     fi
     # Version-index parsing can exhaust a 256 MiB VPS before any wheel installs.
     # Direct hashed artifacts bound resolver memory; native dependencies use musl

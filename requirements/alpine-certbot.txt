@@ -2,6 +2,8 @@
 # Locked 2026-10-12. Update all dependencies together and run pip check / Certbot plugin checks.
 # Direct official artifact URLs avoid loading large PyPI version indexes on small VPSes.
 # Cloudflare 2.19.4 has no wheel; its small pure-Python source uses the seeded setuptools/wheel.
+# Newer virtualenv wheel seeds require packaging even though Certbot itself does not.
+packaging @ https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
 certbot @ https://files.pythonhosted.org/packages/97/c9/602fce91aaded98e3a05285eb34ada6e071a765318eb6cb11985222ce97a/certbot-4.0.0-py3-none-any.whl --hash=sha256:66435e76d602be2826f4e7060c35b9f2a62727e43818f3c8c9f85c3bca6a5aeb
 acme @ https://files.pythonhosted.org/packages/85/44/534e30ce4909c5f6dee558d69b5dd724db02a50a8a6b7c2488176b84ba35/acme-4.0.0-py3-none-any.whl --hash=sha256:a3f595166108a5df537b4609ff783b33dbdc8f5d385f82412311c9e84f23dc59
 certbot-dns-cloudflare @ https://files.pythonhosted.org/packages/a3/44/0a389d2adf493423f17a8459c4b26e865475919231b595cc3f66b9309339/certbot_dns_cloudflare-4.0.0-py3-none-any.whl --hash=sha256:b4ab718b9ca946fc4558dcb7b79c3ef0a12ab049fdeb29bccbd1fafa48aebff0

@@ -19,7 +19,7 @@ Cloudflare 记录保持 DNS only / 灰云，A 记录指向服务商公网 IPv4�
 ```sh
 cd /opt/reality-relay-bootstrap
 git pull --ff-only origin main
-cp -p config.env "config.env.before-nat-$(date +%Y%m%d-%H%M%S)"
+cp -p config.env "config.env.before-nat-$(date +%Y%m%d-%H%M%S).bak"
 nano config.env
 ```
 

@@ -86,8 +86,8 @@ class ResetDeployment:
                     raise ResetError(f'目录内存在挂载点：{current}')
         self.paths[str(p)] = directory
 
-    def text(self, value):
-        self.safe_path(value)
+    def text(self, value, *, link=False):
+        self.safe_path(value, link=link)
         p = self.path(value)
         return p.read_text(errors='replace') if p.exists() else ''
 
@@ -230,7 +230,9 @@ class ResetDeployment:
                 elif '# SuRelay managed command' in self.text(launcher) and str(self.project / 'surelay.sh') in self.text(launcher):
                     self.add(launcher)
         self.empty_dirs.add('/etc/sing-box')
-        self.alpine = bool(re.search(r'^ID=[\"\']?alpine[\"\']?$', self.text('/etc/os-release'), re.M))
+        # Read-only distro metadata is commonly a link to /usr/lib/os-release.
+        # It is never added to the removal plan; managed targets remain strict.
+        self.alpine = bool(re.search(r'^ID=[\"\']?alpine[\"\']?$', self.text('/etc/os-release', link=True), re.M))
         self.collect_firewall(env)
 
     def collect_legacy(self):

@@ -137,6 +137,29 @@ class ResetInstallTest(unittest.TestCase):
         self.assertFalse(self.p('/root/surelay-backups').exists())
         self.assertEqual(self.calls, [['ufw', 'show', 'added']])
 
+    def test_os_release_symlink_is_read_only_metadata(self):
+        for distro in ('debian', 'ubuntu', 'alpine'):
+            contents = f'ID="{distro}"\n'
+            target = self.put('/usr/lib/os-release', contents)
+            for destination in ('../usr/lib/os-release', target):
+                self.p('/etc/os-release').unlink()
+                self.p('/etc/os-release').symlink_to(destination)
+                for uninstall in (False, True):
+                    with self.subTest(distro=distro, target=destination, uninstall=uninstall):
+                        self.calls.clear()
+                        obj = reset.ResetDeployment(self.project, self.root, self.command, uninstall=uninstall)
+                        obj.collect()
+                        with redirect_stdout(io.StringIO()):
+                            obj.describe()
+                        self.assertEqual(obj.alpine, distro == 'alpine')
+                        self.assertNotIn('/etc/os-release', obj.paths)
+                        self.assertNotIn('/usr/lib/os-release', obj.paths)
+                        self.assertTrue(self.p('/etc/os-release').is_symlink())
+                        self.assertEqual(target.read_text(), contents)
+                        self.assertTrue(self.p('/opt/relay/config.env').exists())
+                        self.assertFalse(self.p('/root/surelay-backups').exists())
+                        self.assertEqual(self.calls, [['ufw', 'show', 'added']])
+
     def test_confirmation_cancel_and_eof_do_not_create_backup(self):
         for reply in ('no\n', '\n', ''):
             obj = reset.ResetDeployment(self.project, self.root, self.command)
@@ -206,6 +229,17 @@ class ResetInstallTest(unittest.TestCase):
         with self.assertRaisesRegex(reset.ResetError, '符号链接'):
             self.resetter()
         self.assertTrue(self.p('/etc/other-data/vless-uuid.txt').exists())
+
+    def test_symlink_config_target_is_rejected(self):
+        target = self.put('/srv/other-config.json', '{"keep": true}\n')
+        self.p('/etc/sing-box/config.json').unlink()
+        self.p('/etc/sing-box/config.json').symlink_to('../../srv/other-config.json')
+        with self.assertRaisesRegex(reset.ResetError, '符号链接'):
+            self.resetter()
+        self.assertEqual(target.read_text(), '{"keep": true}\n')
+        self.assertTrue(self.p('/opt/relay/config.env').exists())
+        self.assertFalse(self.p('/root/surelay-backups').exists())
+        self.assertFalse(self.calls)
 
     def test_unowned_nginx_configuration_stops_reset(self):
         self.put('/etc/nginx/sites-available/surelay.conf', '# manually owned\n')

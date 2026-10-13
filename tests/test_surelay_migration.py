@@ -123,6 +123,9 @@ class LegacyUninstallTest(unittest.TestCase):
 
     def test_uninstall_removes_owned_launcher_without_reinstalling_or_touching_ssh(self):
         self.put('/usr/local/bin/sr', '#!/bin/sh\n# SuRelay managed command\nexec bash /opt/relay/surelay.sh "$@"\n')
+        metadata = self.put('/usr/lib/os-release', 'ID=debian\n')
+        self.p('/etc/os-release').unlink()
+        self.p('/etc/os-release').symlink_to('../usr/lib/os-release')
         obj = reset.ResetDeployment(self.project, self.root, self.command, uninstall=True)
         obj.collect()
         original_keys = self.p('/root/.ssh/authorized_keys').read_bytes()
@@ -132,6 +135,8 @@ class LegacyUninstallTest(unittest.TestCase):
         self.assertFalse(self.p('/usr/local/bin/sr').exists())
         self.assertEqual(self.p('/root/.ssh/authorized_keys').read_bytes(), original_keys)
         self.assertTrue(self.p('/opt/relay/README.md').exists())
+        self.assertTrue(self.p('/etc/os-release').is_symlink())
+        self.assertEqual(metadata.read_text(), 'ID=debian\n')
         self.assertNotIn('接下来重新填写', output.getvalue())
 
     def test_legacy_assets_and_rules_are_recognized(self):

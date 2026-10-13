@@ -39,17 +39,18 @@ class PlainTerminalTest(unittest.TestCase):
                 url = "https://example.com/".ljust(length, "a")
                 body = [("链接", "heading")] + [("", "text")] * 7
                 with patch.object(window, "dimensions", return_value=(50, 18)):
-                    window.render(body, "Enter / c 复制", flow=(1, url))
+                    window.render(body, "Enter / c 复制", flow=(1, url), expanded=True)
                     self.assertIn(url, stream.getvalue())
                     self.assertNotIn("\n", stream.getvalue())
                     stream.seek(0)
                     stream.truncate()
-                    window.render(body, "Enter / c 复制", flow=(1, url))
+                    window.render(body, "Enter / c 复制", flow=(1, url), expanded=True)
                     self.assertEqual(stream.getvalue(), "")
-                    window.render(body, "已发送复制请求", flow=(1, url))
+                    window.render(body, "已发送复制请求", flow=(1, url), expanded=True)
                     self.assertNotIn(url, stream.getvalue())
                     addressed = [int(row) for row in re.findall(r"\033\[(\d+);1H", stream.getvalue())]
-                    self.assertTrue(all(row >= 16 for row in addressed), addressed)
+                    first, _, count = window.flow
+                    self.assertTrue(all(row not in range(first + 1, first + count + 1) for row in addressed), addressed)
 
     def test_link_display_rejects_whitespace_and_terminal_controls(self):
         for suffix in ("\n", "\r", " ", "\033[2J", "\033]52;c;bad\a"):
@@ -60,13 +61,14 @@ class PlainTerminalTest(unittest.TestCase):
         window = terminal.Terminal()
         stream = window.output = io.StringIO()
         with patch.object(window, "dimensions", return_value=(50, 18)):
-            window.render([("", "text")] * 4, "复制", flow=(0, "https://example.com/".ljust(150, "x")))
+            window.render([("", "text")] * 4, "复制", flow=(0, "https://example.com/".ljust(150, "x")), expanded=True)
+            first, _, count = window.flow
             stream.seek(0)
             stream.truncate()
             window.render([("1) 返回菜单", "text")], "选择")
         # EL0 after writing spaces only erases the tail and can retain wrap
         # markers. EL2 at column 1 must precede all former link rows.
-        for row in (4, 5, 6):
+        for row in range(first + 1, first + count + 1):
             self.assertIn(f"\033[{row};1H\033[2K", stream.getvalue())
 
     def test_cards_are_centered_and_shortcuts_stay_next_to_content(self):
@@ -155,6 +157,46 @@ class PlainTerminalTest(unittest.TestCase):
         for i in range(6):
             self.assertIn(f"错误说明 {i}", "\n".join(frames))
         self.assertNotIn("错误说明", frames[-1])
+
+    def test_links_use_centered_card_and_copy_original_in_both_views(self):
+        url = "https://example.com/sub/" + "a" * 100
+        for size in ((160, 48), (90, 26), (50, 18)):
+            with self.subTest(size=size):
+                window = terminal.Terminal()
+                window.output = io.StringIO()
+                window.trail = ["SuRelay", "查看订阅链接"]
+                window.set_links([("HK", [("客户端", "Mihomo / Clash Meta")], url)], kind="订阅")
+                frames, chunks, flows = [], [], []
+                actions = iter(["", "c", "p", "", "c", "p", "0"])
+                def key():
+                    frames.append([terminal.clean(line) for line in window.frame])
+                    chunks.append(window.output.getvalue())
+                    flows.append(window.flow)
+                    window.output.seek(0)
+                    window.output.truncate()
+                    return next(actions)
+                with patch.object(window, "dimensions", return_value=size), \
+                     patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                     patch.object(window, "key", side_effect=key):
+                    window.wait_links()
+                self.assertEqual(chunks[1], "")
+                self.assertEqual(chunks[4], "")
+                self.assertIsNone(flows[0])
+                self.assertIsNotNone(flows[3])
+                self.assertIsNone(flows[-1])
+                self.assertIn("╭─ SuRelay ", "\n".join(frames[0]))
+                self.assertIn("查看订阅链接", "\n".join(frames[0]))
+                first_card_row = next(line for line in frames[0] if "╭" in line)
+                self.assertLessEqual(abs(len(first_card_row) - len(first_card_row.lstrip()) -
+                                         (size[0] - terminal.cells(first_card_row))), 1)
+                width = min(72, size[0] - 10)
+                for part in terminal.wrap(url, width):
+                    self.assertIn(part, "\n".join(frames[0]))
+                    self.assertNotIn(part, chunks[2])  # copying doesn't repaint URL
+                self.assertIn(url, chunks[3])
+                self.assertNotIn(url, chunks[5])
+                payloads = re.findall(r"\033\]52;c;([^\a]+)\a", "".join(chunks))
+                self.assertEqual([base64.b64decode(p).decode() for p in payloads], [url, url])
 
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
@@ -352,6 +394,41 @@ actions = [("批量导入", edit)]
         self.send("q")
         self.finish()
 
+    def test_vless_addition_goes_directly_to_name_and_port_and_rejects_batch_paste(self):
+        url = "vless://11111111-2222-4333-8444-555555555555@one.example:443?security=none&type=tcp#Original-One"
+        self.start('''
+from unittest.mock import Mock
+from surelay import Panel
+manager = Mock()
+manager.env = {"DIRECT_PORT":"443", "SSH_PORT":"22", "SUBSCRIPTION_LISTEN_PORT":"51040",
+               "HOME_PORT_START":"51043", "HOME_PORT_END":"65535"}
+manager.exit_files.return_value = ([], [])
+manager.save_exits.side_effect = lambda home, upstream: print("SAVED-COUNT:" + str(len(upstream)))
+panel = Panel(manager)
+actions = [("添加上游", panel.add_upstream)]
+''', NO_COLOR="1")
+        self.expect("添加上游")
+        self.send("\r")
+        self.expect("1/3  VLESS 节点链接")
+        self.send("\033[200~" + url + "\n" + url + "\033[201~")
+        self.expect("此项只接受一行")
+        self.assertNotIn("2/3  出口名称".encode(), self.all_output)
+        self.send("\033[200~" + url + "\n\033[201~\r")
+        self.expect("Original-One")
+        self.expect("2/3  出口名称")
+        self.send("\r")
+        self.expect("3/3  本机入口端口")
+        self.send("\r")
+        self.expect("保存出口")
+        self.send("\r")
+        self.expect("SAVED-COUNT:1")
+        self.assertNotIn("已接收".encode(), self.all_output)
+        self.assertNotIn("空行回车结束".encode(), self.all_output)
+        self.send("\r")
+        self.expect("添加上游")
+        self.send("q")
+        self.finish()
+
     def test_all_panel_menu_groups_open_and_return_in_one_window(self):
         self.start('''
 from unittest.mock import Mock
@@ -452,14 +529,14 @@ actions = [("链接列表", links)]
 ''', NO_COLOR="1")
         self.expect("链接列表")
         self.send("1\r")
-        self.expect(first)
+        self.expect(first[:60])
         self.assertNotIn(b"\033]52;", self.all_output)
         self.send("\r")
         self.expect("已发送复制请求")
-        self.assertEqual(self.all_output.count(first.encode()), 1)
+        self.assertEqual(self.all_output.count(first[:60].encode()), 1)
         self.send("\033[C")
         self.expect("NODE-TWO")
-        self.expect(second)
+        self.expect(second[:60])
         self.pending = b""
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 50, 0, 0))
         self.expect("\033[2J")

@@ -107,7 +107,9 @@ class Terminal:
         size = os.get_terminal_size(self.output.fileno())
         return size.columns, size.lines
 
-    def content_width(self):
+    def content_width(self, *, expanded=False):
+        if expanded:
+            return max(2, self.dimensions()[0] - 7)
         return max(2, min(72, self.dimensions()[0] - 10))
 
     def content_capacity(self, *, form=False):
@@ -196,12 +198,10 @@ class Terminal:
                 "danger": "31", "ok": "32", "warn": "33", "text": "0"}[style]
         return f"{ESC}{code}m{text}{ESC}0m"
 
-    def render(self, body, hint, cursor=None, flow=None, *, form=False):
+    def render(self, body, hint, cursor=None, flow=None, *, form=False, expanded=False):
         """Render a centered card; cursor coordinates are relative to its body."""
-        if flow or self.links:
-            return self.render_links(body, hint, flow)
         columns, height = self.dimensions()
-        width = self.content_width()
+        width = self.content_width(expanded=expanded)
         body = body[:self.content_capacity(form=form)]
         hints = wrap(hint.strip(), width)
         title = clean(self.trail[-1]) if self.trail and self.trail[-1] != "SuRelay" else "VPS 管理"
@@ -227,34 +227,11 @@ class Terminal:
         rendered = (rendered + [""] * height)[:max(1, height - 1)]
         if cursor is not None:
             cursor = (top + 4 + cursor[0], left + 4 + cursor[1])
-        self.draw(rendered, cursor)
-
-    def render_links(self, body, hint, flow=None):
-        """Draw ordinary rows plus an optional continuous, soft-wrapped block.
-
-        flow is (body row offset, text). It uses the terminal's full width:
-        cursor addressing or gutters between its rows would turn a copied URL
-        into several hard lines. Keep the whole block untouched on idle/feedback
-        redraws so mouse selection and the terminal's wrap markers survive.
-        """
-        columns, height = self.dimensions()
-        # Ordinary rows leave a spare column; flow may fill it but never uses
-        # the bottom row, so even a pending autowrap cannot scroll the screen.
-        content_width = self.content_width()
-        title = "SuRelay  ·  VPS 管理"
-        trail = " / ".join("首页" if t == "SuRelay" else t for t in self.trail)
-        if cells(trail) > content_width:
-            trail = "… / " + " / ".join(self.trail[-2:])
-        capacity = max(1, height - 7)
-        rule = ("─" * content_width, "border")
-        rows = [(title, "title"), (trail, "muted"), rule]
-        rows += body[:capacity] + [("", "text")] * max(0, capacity - len(body))
-        hints = wrap(hint.strip(), content_width)
-        rows += [rule, (hints[0], "muted"), (hints[1] if len(hints) > 1 else "", "muted")]
-        rows = rows[:max(1, height - 1)]
-        rendered = ["  " + self.paint(clip(clean(text), content_width), style) for text, style in rows]
-        flow = (flow[0] + 3, flow[1], len(wrap(flow[1], columns))) if flow else None
-        self.draw(rendered, flow=flow)
+        # Expanded original-text mode alone uses a continuous physical-width
+        # span. No border/gutter is written on these rows, so mouse selection
+        # can join the terminal's natural wraps. The surrounding card is shared.
+        flow = (top + flow[0] + 3, flow[1], len(wrap(flow[1], columns))) if flow else None
+        self.draw(rendered, cursor, flow)
 
     def draw(self, rendered, cursor=None, flow=None):
         """Diff whole-screen frames, clearing old cards and soft-wrap markers."""
@@ -532,13 +509,13 @@ class Terminal:
         self.emit("\033]52;c;" + payload + "\a")
 
     def wait_links(self):
-        selected, start, notice = 0, 0, ""
+        selected, start, notice, expanded = 0, 0, "", False
         with self.keys():
             while True:
                 if self.too_small():
                     continue
-                width = self.content_width()
-                capacity = max(1, self.dimensions()[1] - 7)
+                width = self.content_width(expanded=expanded)
+                capacity = self.content_capacity()
                 name, fields, url = self.links[selected]
                 fields = [(self.link_kind + "名称", name), *fields]
                 label_width = max(cells(label) for label, _ in fields)
@@ -548,25 +525,25 @@ class Terminal:
                     for part_index, part in enumerate(wrap(value, max(2, width - label_width - 2))):
                         indent = prefix if part_index == 0 else " " * (label_width + 2)
                         rows.append((indent + part, "heading" if index == 0 else "text"))
-                rows += [("", "text"), (self.link_kind + "链接 · 选中复制", "heading")]
+                rows += [("", "text"), (self.link_kind + ("链接 · 原文" if expanded else "链接"), "heading")]
                 link_start = len(rows)
                 # These chunks only measure the viewport. Concatenate the
                 # visible span again before emitting it, with no added bytes.
-                link_lines = wrap(url, self.dimensions()[0])
-                rows += [("", "text")] * len(link_lines)
+                link_lines = wrap(url, self.dimensions()[0] if expanded else width)
+                rows += [("", "text")] * len(link_lines) if expanded else [(line, "accent") for line in link_lines]
                 last_start = max(0, len(rows) - capacity)
                 start = min(start, last_start)
                 first, end = max(start, link_start), min(start + capacity, len(rows))
                 flow = ((first - start, "".join(link_lines[first - link_start:end - link_start]))
-                        if first < end else None)
+                        if expanded and first < end else None)
                 navigation = []
                 if len(self.links) > 1:
                     item = "格式" if self.link_kind == "订阅" else self.link_kind
                     navigation.append(f"←→ {item} {selected + 1}/{len(self.links)}")
                 if last_start:
-                    navigation.append(f"↑↓ 翻页 {start + 1}–{min(start + capacity, len(rows))}/{len(rows)}")
-                hint = notice or "Enter / c 复制链接 · Esc / 0 返回"
-                self.render(rows[start:start + capacity], hint + "\n" + " · ".join(navigation), flow=flow)
+                    navigation.append(f"↑↓ {start + 1}–{min(start + capacity, len(rows))}/{len(rows)}")
+                hint = notice or ("Enter 复制 · p 收起 · Esc 返回" if expanded else "Enter 复制 · p 原文 · Esc 返回")
+                self.render(rows[start:start + capacity], hint + "\n" + " · ".join(navigation), flow=flow, expanded=expanded)
                 key = self.key()
                 if key in ("\x1b", "0"):
                     return
@@ -578,6 +555,9 @@ class Terminal:
                 if key in (LEFT, RIGHT):
                     selected = (selected + (1 if key == RIGHT else -1)) % len(self.links)
                     start = 0
+                elif key in ("p", "P"):
+                    expanded = not expanded
+                    start = 0
                 elif key in (DOWN, PAGE_DOWN):
                     start = min(last_start, start + (capacity if key == PAGE_DOWN else 1))
                 elif key in (UP, PAGE_UP):
@@ -588,7 +568,7 @@ class Terminal:
                     start = last_start
                 elif key in ("\r", "\n", "1", "c", "C"):
                     self.copy_link(url)
-                    notice = "已发送复制请求；未生效请选中链接复制。"
+                    notice = "已发送复制请求；未生效按 p 查看原文。" if not expanded else "已发送复制请求；也可选中链接复制。"
 
     def read_line(self, label, default="", secret=False, multiline=False, *, help="", context=(), step="",
                   default_label="当前值", empty_hint="", validate=None):

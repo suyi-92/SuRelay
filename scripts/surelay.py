@@ -370,42 +370,27 @@ class Panel:
 
     def add_upstream(self):
         home, upstream = self.m.exit_files()
-        urls, parsed = [], []
         def validate_url(value):
-            if value:
-                upstream_info(value)
+            if "\n" in value or "\r" in value:
+                raise Error("每次只添加一个节点，请粘贴一条 VLESS 链接。")
+            upstream_info(required(value))
             return value
-        while True:
-            context = [("已接收", f"{len(urls)} 个节点")]
-            if parsed:
-                last = parsed[-1]
-                context.append(("上一节点", endpoint(last["server"], last["server_port"])))
-            value = ask("VLESS 节点链接", multiline=True, context=context,
-                        help="粘贴 vless:// 链接，支持一次粘贴多行。",
-                        empty_hint="空行回车结束导入，进入节点设置。", validate=validate_url)
-            if not value:
-                break
-            urls.append(value)
-            parsed.append(upstream_info(value))
-        if not urls:
-            return
-        added = []
-        for index, (url, node) in enumerate(zip(urls, parsed), 1):
-            name = GEN.safe_tag("", f"relay-{len(upstream) + 1:02}", {r["tag"] for r in [*home, *upstream]})
-            context = [("正在设置", f"第 {index}/{len(urls)} 个 · {unquote(urlsplit(url).fragment) or '未命名节点'}"),
-                       ("上游地址", endpoint(node["server"], node["server_port"]))]
-            name = ask("出口名称", name, context=context, step="1/2",
-                       help="客户端显示的名称，可用字母、数字、横线和下划线。",
-                       default_label="建议值", validate=exit_name)
-            context = [("正在设置", f"第 {index}/{len(urls)} 个 · {name}"), *context[1:]]
-            listen = port(ask("本机入口端口", self.next_port(home, upstream), context=context, step="2/2",
-                              help="客户端连接此 VPS 使用的端口。",
-                              default_label="建议值", validate=port))
-            GEN.parse_upstream_node(name, int(listen), url, 1)
-            upstream.append({"tag": name, "listen_port": listen, "node_url": url})
-            added.append(f"{name} · 本机 {listen} → {endpoint(node['server'], node['server_port'])}")
-        confirm("将添加以下出口并刷新订阅：\n" + "\n".join(added), action="保存出口")
-        self.m.save_exits(home, upstream)
+        url = ask("VLESS 节点链接", step="1/3", help="粘贴一个节点的 vless:// 链接，回车后设置名称。",
+                  validate=validate_url)
+        node = upstream_info(url)
+        name = GEN.safe_tag("", f"relay-{len(upstream) + 1:02}", {r["tag"] for r in [*home, *upstream]})
+        context = [("原节点", unquote(urlsplit(url).fragment) or "未命名节点"),
+                   ("上游地址", endpoint(node["server"], node["server_port"]))]
+        name = ask("出口名称", name, context=context, step="2/3",
+                   help="客户端显示的名称，可用字母、数字、横线和下划线。",
+                   default_label="建议值", validate=exit_name)
+        context = [("正在设置", name), *context[1:]]
+        listen = port(ask("本机入口端口", self.next_port(home, upstream), context=context, step="3/3",
+                          help="客户端连接此 VPS 使用的端口。", default_label="建议值", validate=port))
+        GEN.parse_upstream_node(name, int(listen), url, 1)
+        confirm(f"添加出口 {name}\n上游地址：{endpoint(node['server'], node['server_port'])}\n"
+                f"本机入口：{listen}/tcp\n保存后生成对应节点并刷新订阅。", action="保存出口")
+        self.m.save_exits(home, [*upstream, {"tag": name, "listen_port": listen, "node_url": url}])
 
     def edit_exit(self):
         selected = self.select_exit()

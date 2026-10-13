@@ -128,22 +128,33 @@ class ManagementTest(unittest.TestCase):
                 panel.setting("SERVER_ALIAS", "节点名称")
             apply.assert_not_called()
 
-    def test_upstream_wizard_identifies_each_node_without_raw_link_history(self):
+    def test_upstream_wizard_finishes_one_node_in_three_fields(self):
         panel = surelay.Panel(self.m)
         first = "vless://11111111-2222-4333-8444-555555555555@one.example:443?security=none&type=tcp#Original-One"
         second = first.replace("one.example", "two.example").replace("Original-One", "Original-Two")
-        with patch.object(surelay, "ask", side_effect=[first, second, "", "relay-01", "51043", "relay-02", "51044"]) as ask, \
-             patch.object(surelay, "confirm") as confirm, patch.object(self.m, "save_exits") as save:
-            panel.add_upstream()
-        first_context = str(ask.call_args_list[3].kwargs["context"])
-        second_context = str(ask.call_args_list[5].kwargs["context"])
-        self.assertIn("one.example:443", first_context)
-        self.assertIn("two.example:443", second_context)
-        self.assertNotIn("vless://", first_context + second_context)
-        self.assertIn("Original-One", first_context)
-        self.assertIn("Original-Two", second_context)
-        self.assertNotIn("vless://", confirm.call_args.args[0])
-        self.assertEqual([r["node_url"] for r in save.call_args.args[1]], [first, second])
+        existing = []
+        for index, url in enumerate((first, second), 1):
+            with patch.object(surelay, "ask", side_effect=[url, f"relay-0{index}", str(51042 + index)]) as ask, \
+                 patch.object(self.m, "exit_files", return_value=([], existing)), \
+                 patch.object(surelay, "confirm") as confirm, patch.object(self.m, "save_exits") as save:
+                panel.add_upstream()
+            self.assertEqual(ask.call_count, 3)
+            self.assertEqual([call.kwargs["step"] for call in ask.call_args_list], ["1/3", "2/3", "3/3"])
+            self.assertFalse(ask.call_args_list[0].kwargs.get("multiline", False))
+            validator = ask.call_args_list[0].kwargs["validate"]
+            self.assertEqual(validator(url), url)
+            for bad in ("", first + "\n" + second):
+                with self.assertRaises(core.Error):
+                    validator(bad)
+            context = str(ask.call_args_list[1].kwargs["context"])
+            self.assertIn("Original-One" if index == 1 else "Original-Two", context)
+            self.assertIn("one.example:443" if index == 1 else "two.example:443", context)
+            self.assertNotIn("vless://", context + confirm.call_args.args[0])
+            save.assert_called_once()
+            self.assertEqual(len(existing), index - 1)
+            existing = save.call_args.args[1]
+        self.assertEqual([r["node_url"] for r in existing], [first, second])
+        self.assertEqual([r["listen_port"] for r in existing], ["51043", "51044"])
 
     def test_socks_form_distinguishes_remote_port_and_local_entry_and_keeps_password(self):
         row = {"tag": "proxy-one", "type": "socks5", "server": "proxy.example", "server_port": "1080",
@@ -162,9 +173,16 @@ class ManagementTest(unittest.TestCase):
 
     def test_cancelling_upstream_setup_keeps_existing_exits(self):
         url = "vless://11111111-2222-4333-8444-555555555555@upstream.example:443?security=none&type=tcp"
-        with patch.object(surelay, "ask", side_effect=[url, "", "relay-01", KeyboardInterrupt()]), \
+        with patch.object(surelay, "ask", side_effect=[url, "relay-01", KeyboardInterrupt()]), \
              patch.object(self.m, "save_exits") as save:
             with self.assertRaises(KeyboardInterrupt):
+                surelay.Panel(self.m).add_upstream()
+        save.assert_not_called()
+
+        with patch.object(surelay, "ask", side_effect=[url, "relay-01", "51043"]), \
+             patch.object(surelay, "confirm", side_effect=surelay.Cancelled("取消")), \
+             patch.object(self.m, "save_exits") as save:
+            with self.assertRaises(surelay.Cancelled):
                 surelay.Panel(self.m).add_upstream()
         save.assert_not_called()
 

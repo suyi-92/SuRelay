@@ -223,30 +223,32 @@ actions = [("外部编辑器", external)]
         second = "vless://fixture@[2001:db8::10]:443?security=reality&pbk=" + "b" * 320 + "#IPv6"
         self.start(f'''
 def links():
-    window.set_links([("NODE-ONE", "edge.example:443", {first!r}),
-                      ("NODE-TWO", "[2001:db8::10]:443", {second!r})])
+    window.set_links([("NODE-ONE", [("连接地址", "edge.example"), ("连接端口", "443")], {first!r}),
+                      ("NODE-TWO", [("连接地址", "2001:db8::10"), ("连接端口", "443")], {second!r})])
 actions = [("链接列表", links)]
 ''', NO_COLOR="1")
         self.expect("链接列表")
         self.send("1\r")
-        self.expect("c 复制")
+        self.expect("复制节点链接")
         self.assertNotIn(b"\033]52;", self.all_output)
-        self.send("c")
-        self.expect("已发送复制请求")
+        self.assertNotIn(b"vless://", self.all_output)
+        self.send("\r")
+        self.expect("复制请求已发送")
         self.send("\033[C")
         self.expect("NODE-TWO")
+        self.pending = b""
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 50, 0, 0))
-        self.expect("行 ")
+        self.expect("\033[2J")
         self.send("c")
-        self.expect("按 p 查看原文")
+        self.expect("复制请求已发送")
         payloads = re.findall(rb"\033\]52;c;([^\a]+)\a", self.all_output)
         self.assertEqual([base64.b64decode(p).decode() for p in payloads], [first, second])
-        self.send("p")
+        self.send("2\r")
         self.expect("按 Enter 返回 SuRelay")
         self.assertIn((second + "\r\n按 Enter 返回 SuRelay").encode(), self.all_output)
         self.send("\r")
-        self.expect("c 复制")
-        self.send("\r")
+        self.expect("复制节点链接")
+        self.send("0\r")
         self.expect("链接列表")
         self.send("q")
         self.finish()

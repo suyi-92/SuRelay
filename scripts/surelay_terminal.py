@@ -99,6 +99,7 @@ class Terminal:
         self.external_count = 0
         self.pending = ("", [])
         self.links = []
+        self.link_kind = "节点"
         self.sink = Output(self)
 
     def dimensions(self):
@@ -154,14 +155,15 @@ class Terminal:
 
     @contextmanager
     def page(self, title):
-        saved = self.trail, self.buffer, self.streaming, self.pending, self.links
+        saved = self.trail, self.buffer, self.streaming, self.pending, self.links, self.link_kind
         self.trail = [*self.trail, title] if not self.trail or self.trail[-1] != title else self.trail[:]
         self.buffer, self.streaming, self.pending = "", False, ("", [])
         self.links = []
+        self.link_kind = "节点"
         try:
             yield
         finally:
-            self.trail, self.buffer, self.streaming, self.pending, self.links = saved
+            self.trail, self.buffer, self.streaming, self.pending, self.links, self.link_kind = saved
 
     @contextmanager
     def capture(self):
@@ -184,7 +186,7 @@ class Terminal:
         if "NO_COLOR" in os.environ:
             return text
         code = {"title": "1;36", "heading": "1", "accent": "36", "muted": "37",
-                "border": "90", "selected": "1;30;46", "danger_selected": "1;37;41",
+                "border": "90", "selected": "1;36", "danger_selected": "1;31",
                 "danger": "31", "ok": "32", "warn": "33", "text": "0"}[style]
         return f"{ESC}{code}m{text}{ESC}0m"
 
@@ -279,6 +281,15 @@ class Terminal:
             char = decoder.decode(chunk)
         return char
 
+    def menu_rows(self, names, selected, back="返回"):
+        rows = []
+        for i, name in enumerate([*names, back]):
+            number = str(i + 1) if i < len(names) else "0"
+            danger = name.startswith(("卸载", "重置"))
+            style = ("danger_selected" if danger else "selected") if i == selected else "danger" if danger else "text"
+            rows.append((f" {'›' if i == selected else ' '} {number}) {name}", style))
+        return rows
+
     def choose(self, actions, status="", selected=0):
         self.menu_count += 1
         count = len(actions) + 1
@@ -286,7 +297,7 @@ class Terminal:
             while True:
                 if self.too_small():
                     continue
-                width, height = self.dimensions()
+                _, height = self.dimensions()
                 capacity = max(1, height - 7)
                 body = []
                 for line in clean(status).strip().splitlines():
@@ -297,13 +308,8 @@ class Terminal:
                 if body:
                     body.append(("", "text"))
                 offset = len(body)
-                for i, (name, _) in enumerate([*actions, ("退出" if len(self.trail) == 1 else "返回", None)]):
-                    number = str(i + 1) if i < len(actions) else "0"
-                    danger = name.startswith(("卸载", "重置"))
-                    style = ("danger_selected" if danger else "selected") if i == selected else "danger" if danger else "text"
-                    line = f" {'›' if i == selected else ' '} {number}) {name}"
-                    line += " " * max(0, min(44, self.content_width()) - cells(line))
-                    body.append((line, style))
+                body += self.menu_rows([name for name, _ in actions], selected,
+                                       "退出" if len(self.trail) == 1 else "返回")
                 start = max(0, offset + selected - capacity + 1)
                 self.render(body[start:start + capacity], " ↑↓ / 数字选择 · Enter 确认 · Esc 返回 · q 退出")
                 key = self.key()
@@ -384,9 +390,10 @@ class Terminal:
                     with self.external():
                         print(clean(self.buffer))
 
-    def set_links(self, links):
+    def set_links(self, links, kind="节点"):
         """Keep exact copy payloads separate from wrapped display rows."""
         self.links = list(links)
+        self.link_kind = kind
         self.buffer = "\n".join(url for _, _, url in self.links)
 
     def copy_link(self, url):
@@ -396,53 +403,71 @@ class Terminal:
         self.emit("\033]52;c;" + payload + "\a")
 
     def wait_links(self):
-        selected, start, notice = 0, 0, ""
+        selected, action, start, notice = 0, 0, 0, ""
         with self.keys():
             while True:
                 if self.too_small():
                     continue
                 width = self.content_width()
                 capacity = max(1, self.dimensions()[1] - 7)
-                name, detail, url = self.links[selected]
-                heading = f"{selected + 1} / {len(self.links)}  ·  {name}"
-                rows = [(part, "heading") for part in wrap(heading, width)]
-                rows += [(part, "muted") for part in wrap(detail, width)]
-                rows += [("", "text"), ("链接预览", "accent")]
-                rows += [(part, "text") for part in wrap(url, width)]
-                rows += [("", "text")]
-                message = notice or "按 c 复制完整链接；预览有折行，请勿拖选。"
-                rows += [(part, "accent" if notice else "muted") for part in wrap(message, width)]
-                start = min(start, max(0, len(rows) - capacity))
-                hint = "Enter 返回 · c 复制 · p 原文"
+                name, fields, url = self.links[selected]
+                fields = [(self.link_kind + "名称", name), *fields]
+                label_width = max(cells(label) for label, _ in fields)
+                rows = []
                 if len(self.links) > 1:
-                    hint += " · ←→ 切换节点"
-                if len(rows) > capacity:
-                    hint += f" · ↑↓ 翻页 · 行 {start + 1}–{min(start + capacity, len(rows))}/{len(rows)}"
-                self.render(rows[start:start + capacity], hint)
+                    rows.append((f"第 {selected + 1} 个{self.link_kind}，共 {len(self.links)} 个", "muted"))
+                for index, (label, value) in enumerate(fields):
+                    prefix = label + " " * (label_width - cells(label) + 2)
+                    for part_index, part in enumerate(wrap(value, max(2, width - label_width - 2))):
+                        indent = prefix if part_index == 0 else " " * (label_width + 2)
+                        rows.append((indent + part, "heading" if index == 0 else "text"))
+                information_capacity = capacity - 4  # Three actions and one separator row.
+                start = min(start, max(0, len(rows) - information_capacity))
+                body = rows[start:start + information_capacity] + [("", "text")]
+                body += self.menu_rows([f"复制{self.link_kind}链接", "查看完整链接"], action)
+                hint = "↑↓ / 数字选择 · Enter 确认 · Esc 返回"
+                if len(self.links) > 1:
+                    hint += f" · ←→ 切换{self.link_kind}"
+                if len(rows) > information_capacity:
+                    hint += " · PgUp/PgDn 查看信息"
+                self.render(body, notice or hint)
                 key = self.key()
-                if key in ("\r", "\n", "\x1b", "0"):
+                if key == "\x1b":
                     return
                 if key in ("q", "Q"):
                     raise EOFError
+                if not key:
+                    continue
+                notice = ""
+                execute = None
                 if key in (LEFT, RIGHT):
                     selected = (selected + (1 if key == RIGHT else -1)) % len(self.links)
-                    start, notice = 0, ""
-                elif key in (DOWN, PAGE_DOWN):
-                    start = min(max(0, len(rows) - capacity), start + (capacity if key == PAGE_DOWN else 1))
-                elif key in (UP, PAGE_UP):
-                    start = max(0, start - (capacity if key == PAGE_UP else 1))
+                    start = 0
+                elif key in (DOWN, "\t"):
+                    action = (action + 1) % 3
+                elif key == UP:
+                    action = (action - 1) % 3
+                elif key in ("1", "2", "0"):
+                    action = {"1": 0, "2": 1, "0": 2}[key]
+                elif key in (PAGE_DOWN, PAGE_UP):
+                    start = max(0, min(len(rows) - information_capacity,
+                                       start + (information_capacity if key == PAGE_DOWN else -information_capacity)))
                 elif key in (HOME, ESC + "1~"):
                     start = 0
                 elif key in (END, ESC + "4~"):
-                    start = max(0, len(rows) - capacity)
+                    start = max(0, len(rows) - information_capacity)
+                elif key in ("\r", "\n"):
+                    execute = action
                 elif key in ("c", "C"):
-                    self.copy_link(url)
-                    message = "已发送复制请求；若剪贴板未更新，按 p 查看原文。"
-                    # Make feedback visible even for a very long link.
-                    start = max(0, len(rows) - len(wrap(notice or "按 c 复制完整链接；预览有折行，请勿拖选。", width))
-                                + len(wrap(message, width)) - capacity)
-                    notice = message
+                    execute = 0
                 elif key in ("p", "P"):
+                    execute = 1
+                if execute == 2:
+                    return
+                if execute == 0:
+                    self.copy_link(url)
+                    notice = "复制请求已发送，可到客户端粘贴。\n未生效时，请选「查看完整链接」。"
+                elif execute == 1:
                     with self.external():
                         print(url)
 

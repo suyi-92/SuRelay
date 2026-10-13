@@ -160,7 +160,8 @@ class Panel:
             return
         url = output.subscription_url(self.m.env, GEN.read_vless_uuid(self.m.env))
         if current_terminal():
-            current_terminal().set_links([("在线订阅", "Mihomo / Clash Meta · 导入后可刷新节点", url)])
+            fields = [("适用客户端", "Mihomo / Clash Meta"), ("使用方法", "在客户端添加订阅，可刷新节点。")]
+            current_terminal().set_links([(self.m.env["SERVER_ALIAS"], fields, url)], kind="订阅")
         else:
             print(url)
 
@@ -170,13 +171,16 @@ class Panel:
         links = []
         for node in nodes:
             host = f"[{node['server']}]" if ":" in node["server"] else node["server"]
-            detail = f"{host}:{node['port']} · VLESS / Reality"
-            links.append((node["name"], detail, output.node_to_vless_uri(node)))
+            fields = [("连接地址", host), ("连接端口", str(node["port"])), ("连接协议", "VLESS + Reality")]
+            links.append((node["name"], fields, output.node_to_vless_uri(node)))
         if current_terminal():
             current_terminal().set_links(links)
         else:
-            for name, detail, url in links:
-                print(f"{name} · {detail}\n{url}\n")
+            for name, fields, url in links:
+                print(f"节点名称：{name}")
+                for label, value in fields:
+                    print(f"{label}：{value}")
+                print(f"节点链接：\n{url}\n")
 
     def setting(self, key, label, validate=lambda value: value):
         self.m.reload()

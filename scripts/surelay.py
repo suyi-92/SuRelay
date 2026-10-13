@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlsplit
 
 from surelay_core import Error, GEN, Manager, ROOT, Snapshot, atomic, install_command, module, port, run
 from surelay_security import Security, firewall_rule
-from surelay_terminal import Terminal, current as current_terminal
+from surelay_terminal import Terminal, current as current_terminal, notice, operation, result
 
 
 def color(text, style):
@@ -188,7 +188,9 @@ def window_menu(title, actions, before=None):
                     try:
                         action()
                     except Cancelled:
-                        continue
+                        if not window.buffer.strip():
+                            continue
+                        print("操作已取消。")
                     except (Error, OSError, ValueError, GEN.ConfigError) as exc:
                         print(f"未完成：{exc}")
                     except KeyboardInterrupt:
@@ -239,11 +241,22 @@ class Panel:
         menu("节点与订阅", [
             ("查看订阅链接", self.subscription_link),
             ("查看节点链接", self.node_links),
-            ("导出客户端配置", lambda: self.m.phase("output-nodes")),
-            ("刷新订阅", lambda: self.m.phase("subscription", RRB_SHOW_RESULT="true")),
+            ("导出客户端配置", self.export_clients),
+            ("刷新订阅", self.refresh_subscription),
             ("修改节点名称", lambda: self.setting("SERVER_ALIAS", "节点名称")),
             ("修改主入口端口", lambda: self.setting("DIRECT_PORT", "主入口端口", port)),
         ])
+
+    @operation("客户端配置已导出。")
+    def export_clients(self):
+        self.m.phase("output-nodes")
+        result("客户端配置已导出。\n节点列表：/root/surelay-nodes.txt\nClash / Mihomo：/root/surelay-clash.yaml\nVLESS 链接：/root/surelay-vless.txt")
+
+    @operation("订阅已刷新。")
+    def refresh_subscription(self):
+        if self.m.env["ENABLE_SUBSCRIPTION_SERVER"] != "true":
+            raise Error("订阅服务未启用。")
+        self.m.phase("subscription", RRB_SHOW_RESULT="false")
 
     def subscription_link(self):
         output = module("surelay_output", "11-output-nodes.py")
@@ -277,6 +290,7 @@ class Panel:
                     print(f"{label}：{value}")
                 print(f"节点链接：\n{url}\n")
 
+    @operation("节点设置已保存。")
     def setting(self, key, label, validate=lambda value: value):
         self.m.reload()
         help = ("修改客户端中显示的直连节点名称，保存后刷新订阅。" if key == "SERVER_ALIAS" else
@@ -286,7 +300,7 @@ class Panel:
         if not value:
             raise Error(f"{label}不能为空。")
         if value == self.m.env[key]:
-            print(f"{label}未改变。")
+            result(f"{label}未改变。")
             return
         if key != "SERVER_ALIAS":
             confirm(f"{label}：{self.m.env[key]} → {value}\n保存后刷新订阅。", action="应用修改")
@@ -294,6 +308,7 @@ class Panel:
         if key == "DIRECT_PORT" and self.m.env["ENABLE_CUSTOM_DOMAIN"] == "true":
             values["SUBSCRIPTION_BASE_URL"] = "https://" + self.m.env["CUSTOM_DOMAIN"] + (":" + value if value != "443" else "")
         self.m.apply(values, domain=key == "DIRECT_PORT" and self.m.env["ENABLE_CUSTOM_DOMAIN"] == "true")
+        result(f"{label}已更新为 {value}。")
 
     def show_exits(self):
         print(f"直连出口 · 服务器本机网络 · 本机入口 {self.m.env['DIRECT_PORT']}/tcp")
@@ -369,6 +384,7 @@ class Panel:
                 raise Error("域名和端口请分开填写；IPv6 地址可以直接输入。") from exc
         return value
 
+    @operation("出口已添加。")
     def add_home(self):
         home, upstream = self.m.exit_files()
         name = GEN.safe_tag("", "home-01", {r["tag"] for r in [*home, *upstream]})
@@ -376,7 +392,9 @@ class Panel:
         confirm(f"添加出口 {row['tag']}\n远端代理：{row['type'].upper()} · {endpoint(row['server'], row['server_port'])}\n"
                 f"本机入口：{row['listen_port']}/tcp\n保存后生成对应节点并刷新订阅。", action="保存出口")
         self.m.save_exits([*home, row], upstream)
+        result(f"出口已添加：{row['tag']}\n本机入口：{row['listen_port']}/tcp")
 
+    @operation("上游节点已添加。")
     def add_upstream(self):
         home, upstream = self.m.exit_files()
         def validate_url(value):
@@ -401,7 +419,9 @@ class Panel:
         confirm(f"添加出口 {name}\n上游地址：{endpoint(node['server'], node['server_port'])}\n"
                 f"本机入口：{listen}/tcp\n保存后生成对应节点并刷新订阅。", action="保存出口")
         self.m.save_exits(home, [*upstream, {"tag": name, "listen_port": listen, "node_url": url}])
+        result(f"上游节点已添加：{name}\n本机入口：{listen}/tcp")
 
+    @operation("出口已更新。")
     def edit_exit(self):
         selected = self.select_exit()
         home, upstream = self.m.exit_files()
@@ -423,13 +443,16 @@ class Panel:
         confirm(f"保存出口：{selected['tag']} → {group[index]['tag']}\n本机入口：{group[index]['listen_port']}/tcp\n保存后刷新订阅。",
                 action="保存修改")
         self.m.save_exits(home, upstream)
+        result(f"出口已更新：{group[index]['tag']}\n本机入口：{group[index]['listen_port']}/tcp")
 
+    @operation("出口已删除。")
     def delete_exit(self):
         row = self.select_exit()
         confirm(f"删除出口 {row['tag']} 及其入口节点？", action="删除出口", danger=True)
         home, upstream = self.m.exit_files()
         self.m.save_exits([r for r in home if r["tag"] != row["tag"]],
                           [r for r in upstream if r["tag"] != row["tag"]])
+        result(f"出口已删除：{row['tag']}")
 
     def ipv6(self):
         menu("IPv6 设置", [
@@ -438,6 +461,7 @@ class Panel:
             ("关闭 IPv6 节点", self.disable_ipv6),
         ])
 
+    @operation("IPv6 节点已启用。")
     def enable_ipv6(self):
         detected = run(["curl", "-6fsS", "--max-time", "4", "https://api64.ipify.org"], capture=True, check=False)
         default = detected.stdout.strip() if detected.returncode == 0 else self.m.env["SERVER_IP_IPV6"]
@@ -453,7 +477,9 @@ class Panel:
             raise Error("bindv6only=1，无法保证现有 IPv4 节点继续工作。")
         confirm(f"启用 {address} 的 IPv6 节点？")
         self.m.apply({"SERVER_IP_IPV6": str(address), "ENABLE_IPV6_LISTEN": "true", "RESET_PROXY_KEYS": "false"})
+        result(f"IPv6 节点已启用：{address}")
 
+    @operation("IPv6 节点已关闭。")
     def disable_ipv6(self):
         if not self.m.env["SERVER_IP_IPV4"]:
             raise Error("没有 IPv4 地址，不能关闭唯一可用的入口地址族。")
@@ -469,10 +495,19 @@ class Panel:
         menu("域名与证书", [
             ("查看当前配置", lambda: print(f"节点域名：{self.m.env['CUSTOM_DOMAIN'] or '未配置'}\n域名模式：{'已启用' if self.m.env['ENABLE_CUSTOM_DOMAIN'] == 'true' else '未启用'}\nCloudflare 根域名：{self.m.env['CLOUDFLARE_ZONE_NAME'] or '未配置'}")),
             ("配置或修改 CF 域名", self.configure_domain), ("更新 CF 凭据", self.cf_credentials),
-            ("同步 DNS 记录", lambda: self.m.phase("cloudflare-dns")),
+            ("同步 DNS 记录", self.sync_dns),
             ("检查或续期证书", self.certificate), ("停用域名模式", self.disable_domain),
         ])
 
+    @operation("DNS 记录已同步。")
+    def sync_dns(self):
+        if self.m.env["ENABLE_CUSTOM_DOMAIN"] != "true":
+            raise Error("尚未启用域名模式。")
+        if self.m.env["CLOUDFLARE_ENSURE_DNS_RECORDS"] != "true":
+            raise Error("自动创建 DNS 记录未启用，请先在高级配置中启用 CLOUDFLARE_ENSURE_DNS_RECORDS。")
+        self.m.phase("cloudflare-dns")
+
+    @operation("域名配置已更新。")
     def configure_domain(self):
         env = self.m.env
         context = [("当前节点", env["SERVER_ALIAS"])]
@@ -495,7 +530,9 @@ class Panel:
         self.m.apply(values, domain=True)
         if old["CUSTOM_DOMAIN"] and old["CUSTOM_DOMAIN"] != domain:
             self.m.remove_old_dns(old, ["A", "AAAA"])
+        result(f"域名配置已更新：{domain}")
 
+    @operation("Cloudflare 凭据已更新。")
     def cf_credentials(self):
         value = ask("新的 Cloudflare API Token", secret=True, context=[("域名", self.m.env["CUSTOM_DOMAIN"] or "未配置")],
                     help="替换域名解析使用的凭据，需要 Zone 读取和 DNS 编辑权限。", validate=required)
@@ -504,6 +541,7 @@ class Panel:
         confirm("更新 CF 凭据并验证域名配置？")
         self.m.apply({"CLOUDFLARE_API_TOKEN": value}, domain=True)
 
+    @operation("证书检查与续期流程已完成。")
     def certificate(self):
         if self.m.env["ENABLE_CUSTOM_DOMAIN"] != "true":
             raise Error("尚未启用域名模式。")
@@ -511,6 +549,7 @@ class Panel:
         run(["openssl", "x509", "-in", f"/etc/letsencrypt/live/{domain}/fullchain.pem", "-noout", "-dates"], check=False)
         self.m.phase("custom-domain", RRB_SKIP_PACKAGE_INSTALL="false")
 
+    @operation("域名模式已停用，已切换为 IP 节点和 HTTP 订阅。")
     def disable_domain(self):
         old = dict(self.m.env)
         confirm("停用域名模式，切换为 IP 节点与 HTTP 订阅（公网 51040），删除对应项目 DNS 记录？",
@@ -522,6 +561,7 @@ class Panel:
         self.m.remove_old_dns(old, ["A", "AAAA"])
         print("原证书与 Nginx 本机站点保留，可再次启用域名时复用。")
 
+    @operation("服务操作已完成。")
     def service_action(self, action):
         names = ["sing-box", self.m.env["SUBSCRIPTION_SERVICE"]]
         label = {"start": "启动", "stop": "停止", "restart": "重启"}[action]
@@ -529,7 +569,7 @@ class Panel:
         targets = names if choice == 2 else [names[choice]]
         for name in targets:
             self.m.service(name, action)
-        print(f"已{label}所选服务。")
+        result(f"已{label}所选服务。")
 
     def services(self):
         menu("服务与诊断", [
@@ -567,11 +607,17 @@ class Panel:
     def security(self):
         menu("VPS 安全", [
             ("查看安全状态", self.security_status), ("防火墙与端口", self.firewall),
-            ("修改 SSH 端口", lambda: self.s.change_ssh_port(ask("新的 SSH 登录端口", self.m.env["SSH_PORT"], validate=port,
-                help="修改这台 VPS 的 SSH 监听端口。验证新端口登录成功后才撤下旧端口。"), self.confirm_login)),
+            ("修改 SSH 端口", self.change_ssh_port),
             ("管理 SSH 公钥", self.keys), ("SSH 登录设置", self.ssh_login),
             ("登录防护（fail2ban）", self.fail2ban),
         ])
+
+    @operation("SSH 端口已更新。")
+    def change_ssh_port(self):
+        value = ask("新的 SSH 登录端口", self.m.env["SSH_PORT"], validate=port,
+                    help="修改这台 VPS 的 SSH 监听端口。验证新端口登录成功后才撤下旧端口。")
+        self.s.change_ssh_port(value, self.confirm_login)
+        result(f"SSH 端口：{value}")
 
     def security_status(self):
         labels = {"port": "SSH 端口", "permitrootlogin": "root 登录", "pubkeyauthentication": "公钥认证",
@@ -616,6 +662,7 @@ class Panel:
         choice = pick("选择 SSH 公钥", [self.s.validate_key(lines[index]).strip() for index in indexes])
         return lines, indexes[choice]
 
+    @operation("SSH 公钥已添加。")
     def add_keys(self):
         _, lines, _ = self.s.keys()
         added = []
@@ -630,12 +677,15 @@ class Panel:
         if added:
             confirm(f"添加 {len(added)} 把公钥？")
             self.s.write_keys([*lines, *added])
+        result(f"已添加 {len(added)} 把 SSH 公钥。" if added else "未添加新公钥。")
 
+    @operation("所选 SSH 公钥已删除。")
     def delete_key(self):
         lines, index = self.key_selection()
         self.confirm_login(purpose=f"验证后删除公钥：{self.s.validate_key(lines[index]).strip()}\n请使用另一把保留的公钥登录。")
         self.s.write_keys(lines[:index] + lines[index + 1:])
 
+    @operation("SSH 公钥已替换。")
     def replace_key(self):
         lines, index = self.key_selection()
         key = ask("替换用的 SSH 公钥", context=[("待替换指纹", self.s.validate_key(lines[index]).strip())],
@@ -645,16 +695,25 @@ class Panel:
             raise Error("该公钥已存在。")
         self.s.write_keys([*lines, key])
         print("新公钥已添加，旧公钥暂时保留。请用新公钥完成登录验证。")
-        self.confirm_login(purpose="请使用刚添加的新公钥登录，验证成功后移除旧公钥。")
+        try:
+            self.confirm_login(purpose="请使用刚添加的新公钥登录，验证成功后移除旧公钥。")
+        except BaseException:
+            notice("新公钥已添加；旧公钥仍保留，尚未完成替换。")
+            raise
         self.s.write_keys(lines[:index] + lines[index + 1:] + [key])
 
     def ssh_login(self):
         menu("SSH 登录设置", [
             ("查看有效策略", lambda: print(self.s.effective())),
-            ("关闭密码登录", lambda: self.s.password(False, self.confirm_login)),
+            ("关闭密码登录", self.disable_password),
             ("临时开启密码登录", self.enable_password),
         ])
 
+    @operation("SSH 密码登录已关闭。")
+    def disable_password(self):
+        self.s.password(False, self.confirm_login)
+
+    @operation("SSH 密码登录已临时开启。")
     def enable_password(self):
         confirm("临时允许 root 密码认证？此操作不创建或更改密码。", action="开启密码登录", danger=True)
         self.s.password(True, self.confirm_login)
@@ -684,10 +743,12 @@ class Panel:
         note = ask("规则备注", "application", context=context, step="5/5", help="为这条规则起一个便于识别的名称。", default_label="建议值")
         return firewall_rule(ports, proto, source, family, note)
 
+    @operation("本机端口已开放。")
     def add_rule(self):
         rule = self.rule_input()
         confirm("将开放本机端口：\n" + self.rule_label(rule), action="开放端口")
         self.s.edit_rule(rule)
+        result("本机端口已开放：\n" + self.rule_label(rule))
 
     @staticmethod
     def rule_label(rule):
@@ -695,6 +756,7 @@ class Panel:
         source = "、".join(rule["sources"])
         return f"{rule['note']} · {rule['port']}/{protocol} · 来源 {source}"
 
+    @operation("防火墙规则已更新。")
     def change_rule(self, replace):
         _, rules = self.s.custom_rules()
         if not rules:
@@ -707,7 +769,9 @@ class Panel:
         confirm(("修改所选规则：\n" if replace else "删除所选自定义规则：\n") + preview,
                 action="应用修改" if replace else "删除规则", danger=not replace)
         self.s.edit_rule(replacement, choice)
+        result("自定义规则已修改。" if replace else "自定义规则已删除。")
 
+    @operation("防火墙已启用。")
     def enable_firewall(self):
         confirm("保留 SSH 和项目业务端口，然后启用 UFW？")
         self.s.enable_firewall()
@@ -722,6 +786,7 @@ class Panel:
             ("调整封禁参数", self.ban_settings),
         ])
 
+    @operation("SSH 登录防护已启用。")
     def enable_fail2ban(self):
         backup = Snapshot([self.m.config, Path("/etc/fail2ban/jail.d/zz-surelay.local")])
         try:
@@ -733,16 +798,19 @@ class Panel:
             self.m.reload()
             raise
 
+    @operation("SSH 登录防护已停用。")
     def disable_fail2ban(self):
         confirm("停用 SSH 登录防护，其他服务的防护保留？", action="停用 SSH 防护", danger=True)
         self.s.fail2ban_settings({"enabled": "false"})
 
+    @operation("指定 IP 已解除封禁。")
     def unban(self):
         value = str(ipaddress.ip_address(ask("解除封禁的 IP 地址", help="从 SSH 登录防护的封禁列表中移除此 IP。",
                                              validate=lambda value: str(ipaddress.ip_address(value)))))
         run(["fail2ban-client", "set", "sshd", "unbanip", value])
-        print(f"已解除 {value} 的 SSH 封禁。")
+        result(f"已解除 {value} 的 SSH 封禁。")
 
+    @operation("SSH 防护白名单已保存。")
     def whitelist(self):
         current = run(["fail2ban-client", "get", "sshd", "ignoreip"], capture=True)
         value = ask("新的 SSH 防护白名单", context=[("当前白名单", current)],
@@ -753,6 +821,7 @@ class Panel:
         confirm("替换 SSH 防护白名单？")
         self.s.fail2ban_settings({"ignoreip": " ".join(dict.fromkeys(values))})
 
+    @operation("SSH 封禁参数已保存。")
     def ban_settings(self):
         definitions = [("bantime", "封禁时长（秒）", "3600", "触发防护后，禁止此 IP 登录多久。"),
                        ("findtime", "统计窗口（秒）", "600", "在多长时间内累计登录失败次数。"),
@@ -770,7 +839,7 @@ class Panel:
     def advanced(self):
         menu("高级维护", [
             ("更新 SuRelay", self.update_code), ("更新 sing-box", self.update_core),
-            ("备份节点配置", self.m.backup), ("恢复节点配置", self.restore),
+            ("备份节点配置", self.backup_nodes), ("恢复节点配置", self.restore),
             ("编辑高级配置并应用", self.edit_config), ("重置并重新安装", self.reset),
             ("继续安装", self.install), ("迁移旧安装目录", self.migrate),
         ])
@@ -780,17 +849,8 @@ class Panel:
         if not window:
             self.m.update_code()
             raise SystemExit(0)
-        window.buffer = ""
-        window.render([("正在更新 SuRelay…", "muted")], "Ctrl+C 取消")
-        try:
-            with window.capture(streaming=False):
-                self.m.update_code()
-        except BaseException:
-            # Keep diagnostics available with p, but don't flood the result
-            # pane with Git output or migration details after an error/cancel.
-            window.details, window.buffer = window.buffer, ""
-            raise
-        window.buffer = ""
+        with window.operation("", progress="正在更新 SuRelay…"):
+            self.m.update_code()
         try:
             choice = window.choose([("重启管理面板", None)],
                                    "SuRelay 更新完成。\n重新打开后即可使用最新版。", navigation=False, back="关闭面板")
@@ -798,10 +858,17 @@ class Panel:
             choice = None
         raise PanelExit(self.m.root if choice == 0 else None)
 
+    @operation("sing-box 内核已更新。")
     def update_core(self):
         self.m.backup()
         run(["bash", self.m.root / "scripts/18-update-core.sh"], env={"RRB_PROJECT_DIR": str(self.m.root), "RRB_VERBOSE": "true"})
 
+    @operation("节点配置已备份。")
+    def backup_nodes(self):
+        directory = self.m.backup()
+        result(f"节点配置已备份。\n备份位置：{directory}")
+
+    @operation("节点配置已恢复。")
     def restore(self):
         path = ask("备份目录路径", help="填写此前“备份节点配置”生成的完整目录，例如 /root/surelay-backups/surelay-xxxx。",
                    validate=required)
@@ -809,6 +876,7 @@ class Panel:
                 action="恢复备份", danger=True)
         self.m.restore_nodes(path)
 
+    @operation("高级配置已应用。")
     def edit_config(self):
         # Edit a private copy. Do not leave a half-edited live config on cancel/error.
         with tempfile.TemporaryDirectory(prefix="surelay-edit-") as folder:
@@ -837,6 +905,7 @@ class Panel:
         run(["bash", self.m.root / "install.sh"], interactive=True)
         raise SystemExit(0)
 
+    @operation("旧安装迁移已完成。重新运行 sr 打开面板。")
     def migrate(self):
         self.m.migrate()
         raise SystemExit(0)

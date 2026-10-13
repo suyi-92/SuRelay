@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from surelay_terminal import current as current_terminal
+from surelay_terminal import current as current_terminal, notice
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +50,9 @@ def run(args, *, capture=False, check=True, env=None, input=None, interactive=Fa
             )
     if check and result.returncode:
         detail = (result.stderr or "").strip()[-1600:] if capture else ""
+        if window and window.quiet and capture:
+            window.append((result.stdout or "") + (result.stderr or ""))
+            detail = ""
         raise Error(f"{Path(str(args[0])).name} 执行失败（{result.returncode}）。{detail}")
     return result.stdout.strip() if capture and check else result
 
@@ -299,7 +302,7 @@ class Manager:
                 if not site_existed and enabled_site.is_symlink() and enabled_site.resolve() == self.nginx_path().resolve():
                     enabled_site.unlink()
                 self.service("nginx", "reload", check=False)
-            print(f"本地变更失败，已恢复配置；备份：{backup.directory}")
+            notice(f"本地变更失败，已恢复配置；备份：{backup.directory}")
             raise
         print("本地配置已应用，节点身份已保留。")
         try:
@@ -315,6 +318,9 @@ class Manager:
             self.output("--skip-node-files", "--quiet", "--print-summary")
         except (Error, OSError, SystemExit) as exc:
             raise Error(f"本地配置已生效，但发布未全部完成：{exc}。请在菜单重试订阅刷新或 DNS 同步。") from exc
+        except (KeyboardInterrupt, EOFError):
+            notice("本地配置已生效；发布已取消，可在菜单重试订阅刷新或 DNS 同步。")
+            raise
 
     def remove_old_dns(self, old, types):
         if old.get("ENABLE_CUSTOM_DOMAIN") != "true":
@@ -331,7 +337,7 @@ class Manager:
                     cf.cf_request(token, "DELETE", f"/zones/{zone['id']}/dns_records/{record['id']}")
                     print(f"已删除原配置管理的 {kind} 记录：{old['CUSTOM_DOMAIN']}")
                 else:
-                    print(f"保留未能确认归属的 {kind} 记录：{record.get('content')}；请在 Cloudflare 检查。")
+                    notice(f"保留未能确认归属的 {kind} 记录：{record.get('content')}；请在 Cloudflare 检查。")
 
     def exit_files(self):
         """Pin generated tags/ports before edits so deleting rows cannot renumber others."""

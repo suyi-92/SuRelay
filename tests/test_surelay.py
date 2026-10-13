@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import surelay_core as core
 import surelay_security as security
 import surelay
+import surelay_terminal as terminal
 
 
 class ManagementTest(unittest.TestCase):
@@ -55,6 +56,17 @@ class ManagementTest(unittest.TestCase):
         for name in ("service", "check_listeners", "phase", "output", "core_binary"):
             stack.enter_context(patch.object(self.m, name))
         return stack
+
+    @contextlib.contextmanager
+    def panel_window(self):
+        window = terminal.Terminal()
+        window.output = io.StringIO()
+        token = terminal._current.set(window)
+        try:
+            with patch.object(window, "dimensions", return_value=(90, 26)), window.page("修改节点名称"):
+                yield window
+        finally:
+            terminal._current.reset(token)
 
     def test_shell_values_and_multiline_keys_roundtrip_without_execution(self):
         text = "ADMIN_PUBKEY='key1\nkey2'\nSERVER_ALIAS=old\nSERVER_ALIAS=duplicate\n"
@@ -291,6 +303,73 @@ class ManagementTest(unittest.TestCase):
             self.m.apply({"SERVER_ALIAS": "new"})
         self.assertEqual(self.m.env["SERVER_ALIAS"], "new")
         self.assertNotIn("original", (self.root / "sing-box.json").read_text())
+
+    def test_quiet_panel_reports_rollback_and_partial_publication_accurately(self):
+        self.mock_system()
+        panel = surelay.Panel(self.m)
+        for stage in ("listener", "publication", "cancelled-publication"):
+            with self.subTest(stage=stage), self.panel_window() as window, \
+                 patch.object(surelay, "ask", return_value="new-name"):
+                self.m.update({"SERVER_ALIAS": "fixture"})
+                self.m.check_listeners.side_effect = core.Error("listener failed") if stage == "listener" else None
+                self.m.phase.side_effect = (KeyboardInterrupt() if stage == "cancelled-publication" else
+                                            core.Error("subscription unavailable") if stage == "publication" else None)
+                with window.capture():
+                    try:
+                        panel.setting("SERVER_ALIAS", "节点名称")
+                    except core.Error as exc:
+                        print(f"未完成：{exc}")
+                    except KeyboardInterrupt:
+                        print("操作已取消。")
+                    else:
+                        self.fail("Failed operation reported success")
+                self.assertNotIn("节点名称已更新为", window.buffer)
+                self.assertNotIn("变更前备份", window.buffer)
+                self.assertIn("变更前备份", window.details)
+                self.assertNotIn("变更前备份", window.output.getvalue())
+                if stage == "listener":
+                    self.assertIn("已恢复配置", window.buffer)
+                    self.assertEqual(self.m.env["SERVER_ALIAS"], "fixture")
+                elif stage == "publication":
+                    self.assertIn("本地配置已生效，但发布未全部完成", window.buffer)
+                    self.assertEqual(self.m.env["SERVER_ALIAS"], "new-name")
+                else:
+                    self.assertIn("本地配置已生效；发布已取消", window.buffer)
+                    self.assertEqual(self.m.env["SERVER_ALIAS"], "new-name")
+
+    def test_maintenance_summaries_hide_backend_output_and_keep_useful_paths(self):
+        panel = surelay.Panel(self.m)
+        self.m.env.update(ENABLE_SUBSCRIPTION_SERVER="true", ENABLE_CUSTOM_DOMAIN="true", CUSTOM_DOMAIN="edge.example.com")
+        def noisy(*args, **kwargs):
+            print("BACKEND_INTERNAL_DETAIL")
+            return self.root / "backups/fixture"
+        with patch.object(self.m, "phase", side_effect=noisy), \
+             patch.object(self.m, "backup", side_effect=noisy), \
+             patch.object(surelay, "run", side_effect=noisy):
+            for method, expected in ((panel.export_clients, "/root/surelay-clash.yaml"),
+                                     (panel.refresh_subscription, "订阅已刷新"),
+                                     (panel.sync_dns, "DNS 记录已同步"),
+                                     (panel.certificate, "证书检查与续期流程已完成"),
+                                     (panel.backup_nodes, str(self.root / "backups/fixture")),
+                                     (panel.update_core, "sing-box 内核已更新")):
+                with self.subTest(method=method.__name__), self.panel_window() as window:
+                    method()
+                    self.assertIn(expected, window.buffer)
+                    self.assertNotIn("BACKEND_INTERNAL_DETAIL", window.buffer + window.output.getvalue())
+                    self.assertIn("BACKEND_INTERNAL_DETAIL", window.details)
+
+    def test_quiet_operation_keeps_warnings_and_no_change_result(self):
+        with self.panel_window() as window:
+            with window.operation("操作成功。"):
+                print("[time] WARN: upstream needs attention")
+            self.assertIn("可按 p 查看详情", window.buffer)
+            self.assertIn("upstream needs attention", window.details)
+            self.assertNotIn("upstream needs attention", window.output.getvalue())
+        with self.panel_window() as window, patch.object(surelay, "ask", return_value="fixture"), \
+             patch.object(self.m, "apply") as apply:
+            surelay.Panel(self.m).setting("SERVER_ALIAS", "节点名称")
+            self.assertEqual(window.buffer.strip(), "节点名称未改变。")
+            apply.assert_not_called()
 
     def test_apply_does_not_run_install_or_rotate_keys(self):
         identities = {p: p.read_bytes() for p in self.state.iterdir()}

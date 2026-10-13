@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from surelay_core import Error, Snapshot, atomic, port, run
+from surelay_terminal import notice
 
 SSH_BEGIN = "# BEGIN SuRelay SSH settings"
 SSH_END = "# END SuRelay SSH settings"
@@ -247,7 +248,7 @@ class Security:
                 run(["fail2ban-client", "reload"], check=False)
             if shutil.which("ufw"):
                 run(["ufw", "reload"], check=False)
-            print("SSH 迁移未完成，已恢复原配置。")
+            notice("SSH 迁移未完成，已恢复原配置。")
             raise
         # Delete only owned rules for obsolete SSH ports after the new login was verified.
         if shutil.which("ufw"):

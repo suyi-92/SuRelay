@@ -5,6 +5,7 @@ import base64
 import codecs
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from contextvars import ContextVar
+from functools import wraps
 import io
 import os
 import re
@@ -25,6 +26,37 @@ HOME, END, DELETE = ESC + "H", ESC + "F", ESC + "3~"
 
 def current():
     return _current.get()
+
+
+def operation(success):
+    """Keep maintenance output in details; forms and explicit views stay live."""
+    def decorate(action):
+        @wraps(action)
+        def wrapped(*args, **kwargs):
+            window = current()
+            if not window:
+                return action(*args, **kwargs)
+            with window.operation(success):
+                return action(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
+def result(message):
+    window = current()
+    if window and window.quiet:
+        window.summary = message
+    else:
+        print(message)
+
+
+def notice(message):
+    """Keep actionable warnings/rollback outcomes visible even on failure."""
+    window = current()
+    if window and window.quiet:
+        window.notices.append(message)
+    else:
+        print(message)
 
 
 def clean(text):
@@ -91,6 +123,11 @@ class Terminal:
         self.trail = []
         self.buffer = ""
         self.details = ""
+        self.quiet = False
+        self.summary = ""
+        self.notices = []
+        self.progress = ""
+        self.has_warning = False
         self.frame = []
         self.flow = None
         self.cursor = None
@@ -185,10 +222,38 @@ class Terminal:
         finally:
             self.streaming = previous
 
+    @contextmanager
+    def operation(self, success, *, progress="正在执行，请稍候…"):
+        if self.quiet:
+            yield
+            return
+        self.buffer, self.summary, self.notices = "", "", []
+        self.quiet, self.progress, self.has_warning = True, progress, False
+        completed = False
+        try:
+            self.refresh_output()
+            with self.capture():
+                yield
+            completed = True
+        except SystemExit as exc:
+            completed = exc.code in (None, 0)
+            raise
+        finally:
+            self.quiet = False
+            messages = [self.summary or success] if completed and (self.summary or success) else []
+            messages.extend(self.notices)
+            if self.has_warning and not self.notices:
+                messages.append("执行过程中有提示，可按 p 查看详情。")
+            self.buffer = "\n".join(messages) + ("\n" if messages else "")
+
     def append(self, text):
-        self.buffer += text
-        if len(self.buffer) > 262144:
-            self.buffer = "[较早输出已省略]\n" + self.buffer[-200000:]
+        target = "details" if self.quiet else "buffer"
+        value = getattr(self, target) + text
+        if self.quiet:
+            self.has_warning |= bool(re.search(r"(?:^|\n|\]\s*)WARN(?:ING)?\b|警告", clean(value[-8192:]), re.I))
+        if len(value) > 262144:
+            value = "[较早输出已省略]\n" + value[-200000:]
+        setattr(self, target, value)
         if "\n" in text and time.monotonic() - self.last_draw >= 0.05:
             self.refresh_output()
 
@@ -466,7 +531,9 @@ class Terminal:
         return rows or [("操作已完成。", "ok")]
 
     def refresh_output(self):
-        if self.streaming:
+        if self.quiet:
+            self.render([(self.progress, "muted")], "Ctrl+C 取消")
+        elif self.streaming:
             self.render(self.output_rows()[-self.content_capacity():],
                         " 正在执行… · Ctrl+C 取消")
 
@@ -500,7 +567,7 @@ class Terminal:
                     start = max(0, len(lines) - capacity)
                 elif key in ("p", "P"):
                     with self.external():
-                        print(clean(self.details or self.buffer))
+                        print(clean(self.buffer + "\n" + self.details if self.details else self.buffer))
 
     def set_links(self, links, kind="节点"):
         """Accept any number of formats/nodes, keeping each exact URL intact."""
@@ -728,6 +795,8 @@ class Terminal:
 
     def run(self, args, env, input=None):
         """Stream noninteractive commands into the result pane, never the shell."""
+        if self.quiet:
+            self.refresh_output()
         if input is not None:
             result = subprocess.run(args, input=input, text=True, encoding="utf-8", errors="replace",
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)

@@ -527,7 +527,11 @@ manager = Mock()
 manager.env = {"DIRECT_PORT":"443", "SSH_PORT":"22", "SUBSCRIPTION_LISTEN_PORT":"51040",
                "HOME_PORT_START":"51043", "HOME_PORT_END":"65535"}
 manager.exit_files.return_value = ([], [])
-manager.save_exits.side_effect = lambda home, upstream: print("SAVED-COUNT:" + str(len(upstream)) + " NAME:" + upstream[-1]["tag"])
+def save(home, upstream):
+    assert len(upstream) == 1 and upstream[0]["tag"] == "Original-One"
+    print("UFW_INTERNAL_DETAIL")
+    run([sys.executable, "-c", "print('SUBSCRIPTION_INTERNAL_DETAIL')"])
+manager.save_exits.side_effect = save
 panel = Panel(manager)
 actions = [("添加上游", panel.add_upstream)]
 ''', NO_COLOR="1")
@@ -546,8 +550,11 @@ actions = [("添加上游", panel.add_upstream)]
         self.send("\r")
         self.expect("保存出口")
         self.send("\r")
-        self.expect("SAVED-COUNT:1")
-        self.expect("NAME:Original-One")
+        self.expect("上游节点已添加：Original-One")
+        self.expect("本机入口：51043/tcp")
+        self.expect("p 详情")
+        self.assertNotIn(b"UFW_INTERNAL_DETAIL", self.all_output)
+        self.assertNotIn(b"SUBSCRIPTION_INTERNAL_DETAIL", self.all_output)
         self.assertNotIn("已接收".encode(), self.all_output)
         self.assertNotIn("空行回车结束".encode(), self.all_output)
         self.send("\r")
@@ -572,6 +579,103 @@ actions = [("全部管理界面", panel.main)]
             self.expect(item)
             self.send("0\r")
             self.expect("卸载 SuRelay")
+        self.send("q")
+        self.finish()
+        self.assertEqual(self.all_output.count(b"\033[?1049h"), 1)
+
+    def test_service_operation_keeps_logs_in_details_and_next_query_visible(self):
+        self.start('''
+from unittest.mock import Mock
+from surelay import Panel
+manager = Mock()
+manager.env = {"SUBSCRIPTION_SERVICE": "surelay-subscription"}
+def service(name, action):
+    print("SERVICE_INTERNAL_DETAIL")
+    run([sys.executable, "-c", "print('SYSTEMCTL_INTERNAL_DETAIL')"])
+manager.service.side_effect = service
+panel = Panel(manager)
+actions = [("启动服务", lambda: panel.service_action("start")),
+           ("查看日志", lambda: run([sys.executable, "-c", "print('REQUESTED_LOG_OUTPUT')"]))]
+''', NO_COLOR="1")
+        self.expect("启动服务")
+        self.send("1\r")
+        self.expect("代理与订阅服务")
+        self.send("\r")
+        self.expect("已启动所选服务。")
+        self.expect("p 详情")
+        self.assertNotIn(b"SERVICE_INTERNAL_DETAIL", self.all_output)
+        self.assertNotIn(b"SYSTEMCTL_INTERNAL_DETAIL", self.all_output)
+        self.send("p")
+        self.expect("SERVICE_INTERNAL_DETAIL")
+        self.expect("SYSTEMCTL_INTERNAL_DETAIL")
+        self.expect("按 Enter 返回 SuRelay")
+        self.send("\r")
+        self.expect("已启动所选服务。")
+        self.send("\r")
+        self.expect("查看日志")
+        self.send("2\r")
+        self.expect("REQUESTED_LOG_OUTPUT")
+        self.expect("Enter 返回")
+        self.send("\r")
+        self.expect("查看日志")
+        self.send("q")
+        self.finish()
+
+    def test_failed_subscription_keeps_captured_stderr_out_of_summary(self):
+        self.start('''
+from unittest.mock import Mock
+from surelay import Panel
+manager = Mock()
+manager.env = {"ENABLE_SUBSCRIPTION_SERVER": "true"}
+def phase(*args, **kwargs):
+    print("UFW_INTERNAL_DETAIL")
+    run([sys.executable, "-c", "import sys; print('SUBSCRIPTION_STDERR_DETAIL', file=sys.stderr); sys.exit(7)"], capture=True)
+manager.phase.side_effect = phase
+panel = Panel(manager)
+actions = [("刷新订阅", panel.refresh_subscription)]
+''', NO_COLOR="1")
+        self.expect("刷新订阅")
+        self.send("1\r")
+        self.expect("未完成：")
+        self.expect("p 详情")
+        self.assertNotIn("订阅已刷新".encode(), self.all_output)
+        self.assertNotIn(b"UFW_INTERNAL_DETAIL", self.all_output)
+        self.assertNotIn(b"SUBSCRIPTION_STDERR_DETAIL", self.all_output)
+        self.send("p")
+        self.expect("UFW_INTERNAL_DETAIL")
+        self.expect("SUBSCRIPTION_STDERR_DETAIL")
+        self.expect("按 Enter 返回 SuRelay")
+        self.send("\r")
+        self.expect("未完成：")
+        self.send("\r")
+        self.expect("刷新订阅")
+        self.send("q")
+        self.finish()
+
+    def test_key_replacement_cancel_reports_retained_keys_without_success(self):
+        self.start('''
+from unittest.mock import Mock
+from surelay import Panel
+manager = Mock()
+manager.env = {"SSH_PORT":"22", "SERVER_IP_IPV4":"192.0.2.1"}
+panel = Panel(manager)
+panel.key_selection = lambda: (["old-key"], 0)
+panel.s.validate_key = lambda value: "fingerprint"
+panel.s.write_keys = lambda lines: print("KEYS_INTERNAL_DETAIL")
+actions = [("替换公钥", panel.replace_key)]
+''', NO_COLOR="1")
+        self.expect("替换公钥")
+        self.send("1\r")
+        self.expect("Ctrl+U 清空")
+        self.send("new-key\r")
+        self.expect("已验证登录成功，继续")
+        self.assertNotIn(b"KEYS_INTERNAL_DETAIL", self.all_output)
+        self.send("0\r")
+        self.expect("新公钥已添加；旧公钥仍保留，尚未完成替换。")
+        self.expect("操作已取消。")
+        self.assertNotIn("SSH 公钥已替换".encode(), self.all_output)
+        self.send("\r")
+        self.expect("替换公钥")
         self.send("q")
         self.finish()
         self.assertEqual(self.all_output.count(b"\033[?1049h"), 1)

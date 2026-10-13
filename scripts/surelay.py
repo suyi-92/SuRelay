@@ -40,7 +40,6 @@ def confirm(message, word="YES"):
 
 def menu(title, actions, before=None):
     while True:
-        print()
         divider()
         print(color("  " + title, "title"))
         if title == "SuRelay":

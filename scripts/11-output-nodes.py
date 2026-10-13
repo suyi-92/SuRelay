@@ -176,7 +176,7 @@ def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]], proje
         print(f"IPv6 节点：{reason}；VPS 需有可用公网 IPv6。\n开启：{command}")
     url = subscription_url(env, nodes[0]["uuid"])
     if url:
-        print(f"\n{cyan}{bold}订阅链接（Mihomo / Clash Meta）{reset}\n{cyan}{url}{reset}")
+        print(f"{cyan}{bold}订阅链接（Mihomo / Clash Meta）{reset}\n{cyan}{url}{reset}")
     print(f"\n{divider}\n{green}{bold}本地节点（复制 vless:// 链接导入）{reset}")
     for node in nodes:
         print(f"{green}{node_to_vless_uri(node)}{reset}\n")

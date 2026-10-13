@@ -1,5 +1,6 @@
 """SuRelay operations, compatible with existing state paths and node identities."""
 from __future__ import annotations
+from contextlib import nullcontext
 import csv
 import importlib.util
 import io
@@ -13,6 +14,8 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+
+from surelay_terminal import current as current_terminal
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,13 +34,20 @@ def module(name, filename):
 GEN = module("surelay_generator", "08-generate-singbox-config.py")
 
 
-def run(args, *, capture=False, check=True, env=None, input=None):
-    result = subprocess.run(
-        [str(x) for x in args], text=True, encoding="utf-8", errors="replace",
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        env={**os.environ, "LC_ALL": "C.UTF-8", **(env or {})}, input=input,
-    )
+def run(args, *, capture=False, check=True, env=None, input=None, interactive=False):
+    args = [str(x) for x in args]
+    environment = {**os.environ, "LC_ALL": "C.UTF-8", **(env or {})}
+    window = current_terminal()
+    if window and not capture and not interactive:
+        result = window.run(args, environment, input)
+    else:
+        with window.external() if window and interactive else nullcontext():
+            result = subprocess.run(
+                args, text=True, encoding="utf-8", errors="replace",
+                stdout=subprocess.PIPE if capture else None,
+                stderr=subprocess.PIPE if capture else None,
+                env=environment, input=input,
+            )
     if check and result.returncode:
         detail = (result.stderr or "").strip()[-1600:] if capture else ""
         raise Error(f"{Path(str(args[0])).name} 执行失败（{result.returncode}）。{detail}")

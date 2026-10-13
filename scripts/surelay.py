@@ -2,7 +2,9 @@
 """SuRelay terminal control panel. Run sr, sr status, sr update or sr help."""
 from __future__ import annotations
 import argparse
+from contextlib import redirect_stdout
 import getpass
+import io
 import ipaddress
 import os
 import re
@@ -14,6 +16,7 @@ from pathlib import Path
 
 from surelay_core import Error, GEN, Manager, ROOT, Snapshot, atomic, install_command, module, port, run
 from surelay_security import Security, firewall_rule
+from surelay_terminal import Terminal, current as current_terminal
 
 
 def color(text, style):
@@ -27,9 +30,13 @@ def divider():
     print(color("─" * min(60, max(24, shutil.get_terminal_size().columns - 2)), "muted"))
 
 
-def ask(label, default="", secret=False):
+def ask(label, default="", secret=False, multiline=False):
     prompt = f"{label}" + (f" [{default}]" if default and not secret else "") + "："
-    value = getpass.getpass(prompt) if secret else input(prompt)
+    window = current_terminal()
+    if window:
+        value = window.read_line(label, default, secret, multiline)
+    else:
+        value = getpass.getpass(prompt) if secret else input(prompt)
     return (value if secret else value.strip()) or str(default)
 
 
@@ -39,6 +46,8 @@ def confirm(message, word="YES"):
 
 
 def menu(title, actions, before=None):
+    if current_terminal():
+        return window_menu(title, actions, before)
     while True:
         divider()
         print(color("  " + title, "title"))
@@ -65,6 +74,46 @@ def menu(title, actions, before=None):
             print(color(f"\n未完成：{exc}", "warn"))
         except KeyboardInterrupt:
             print("\n操作已取消，返回菜单。")
+
+
+def window_menu(title, actions, before=None):
+    window = current_terminal()
+    selected = 0
+    with window.page(title):
+        while True:
+            status = io.StringIO()
+            with redirect_stdout(status):
+                if before:
+                    before()
+            try:
+                choice = window.choose(actions, status.getvalue(), selected)
+            except KeyboardInterrupt:
+                return
+            if choice is None:
+                return
+            selected = choice
+            name, action = actions[choice]
+            navigation, external = window.menu_count, window.external_count
+            with window.page(name):
+                window.render([], " 正在打开…")
+                with window.capture():
+                    try:
+                        action()
+                    except (Error, OSError, ValueError, GEN.ConfigError) as exc:
+                        print(f"未完成：{exc}")
+                    except KeyboardInterrupt:
+                        print("操作已取消。")
+                    except SystemExit as exc:
+                        if exc.code in (None, 0) and (window.buffer or window.external_count == external):
+                            window.wait()
+                        raise
+                # Returning from a submenu should immediately restore the parent.
+                # Leaf results stay visible until the user has read/copied them.
+                if window.menu_count == navigation and (window.buffer or window.external_count == external):
+                    try:
+                        window.wait()
+                    except KeyboardInterrupt:
+                        pass
 
 
 class Panel:
@@ -174,7 +223,7 @@ class Panel:
         print("每行粘贴一条 VLESS 链接，空行结束。")
         urls = []
         while True:
-            value = ask("VLESS")
+            value = ask("VLESS", multiline=True)
             if not value:
                 break
             urls.append(value)
@@ -383,7 +432,7 @@ class Panel:
         print("每行一把公钥，空行结束。")
         added = []
         while True:
-            value = ask("公钥")
+            value = ask("公钥", multiline=True)
             if not value:
                 break
             print(self.s.validate_key(value))
@@ -534,7 +583,7 @@ class Panel:
             path = Path(folder) / "config.env"
             atomic(path, self.m.config.read_bytes())
             editor = shlex.split(os.environ.get("EDITOR", "nano" if shutil.which("nano") else "vi"))
-            run([*editor, path])
+            run([*editor, path], interactive=True)
             run(["bash", "-n", path], capture=True)
             old = GEN.parse_env_file(self.m.config)
             new = GEN.parse_env_file(path)
@@ -549,11 +598,11 @@ class Panel:
 
     def reset(self):
         # The established reset flow has its own preview, backup and RESET confirmation.
-        run(["bash", self.m.root / "install.sh", "--reset"])
+        run(["bash", self.m.root / "install.sh", "--reset"], interactive=True)
         self.m.reload()
 
     def install(self):
-        run(["bash", self.m.root / "install.sh"])
+        run(["bash", self.m.root / "install.sh"], interactive=True)
         raise SystemExit(0)
 
     def migrate(self):
@@ -562,7 +611,7 @@ class Panel:
 
     def uninstall(self):
         run(["python3", self.m.root / "scripts/17-reset-install.py",
-             "--project-dir", self.m.root, "--uninstall", "--apply"])
+             "--project-dir", self.m.root, "--uninstall", "--apply"], interactive=True)
         raise SystemExit(0)
 
 
@@ -570,6 +619,7 @@ def main():
     parser = argparse.ArgumentParser(prog="sr", description="SuRelay：sr 打开菜单；sr status 查看状态；sr update 更新管理脚本。")
     parser.add_argument("command", nargs="?", default="menu", choices=["menu", "status", "update", "install", "migrate", "uninstall", "help"])
     parser.add_argument("--install-command", action="store_true", help="安装 /usr/local/bin/sr，不修改运行配置")
+    parser.add_argument("--plain", action="store_true", help="使用逐行菜单，适用于不支持全屏界面的终端")
     args = parser.parse_args()
     if args.command == "help":
         parser.print_help()
@@ -599,7 +649,8 @@ def main():
         else:
             if not sys.stdin.isatty():
                 raise Error("菜单需要交互终端；只查看状态可使用 sr status。")
-            panel.main()
+            with Terminal(enabled=not args.plain):
+                panel.main()
     return 0
 
 

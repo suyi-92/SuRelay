@@ -1,0 +1,286 @@
+"""Interactive panel regressions in a real PTY; never use host services/config."""
+import contextlib
+import io
+import os
+from pathlib import Path
+import select
+import signal
+import struct
+import subprocess
+import sys
+import time
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import surelay_terminal as terminal
+
+
+class PlainTerminalTest(unittest.TestCase):
+    def test_redirected_output_never_enters_alternate_screen(self):
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream), terminal.Terminal():
+            self.assertIsNone(terminal.current())
+        self.assertEqual(stream.getvalue(), "")
+
+    def test_display_width_and_control_sequences(self):
+        self.assertEqual(terminal.cells("节点e\u0301"), 5)
+        self.assertEqual(terminal.wrap("节点abcd", 4), ["节点", "abcd"])
+        self.assertEqual(terminal.clean("\033[31m正常\033[0m\033[2J\033]0;bad\a"), "正常")
+
+
+@unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
+class WindowTest(unittest.TestCase):
+    def start(self, body, **env):
+        import fcntl
+        import pty
+        import termios
+        self.master, self.slave = pty.openpty()
+        self.original = termios.tcgetattr(self.slave)
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 26, 90, 0, 0))
+        self.all_output, self.pending = b"", b""
+        def controlling_terminal():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        script = f'''
+import os, sys, termios
+sys.path.insert(0, {str(ROOT / "scripts")!r})
+from surelay import ask, confirm, menu
+from surelay_core import run
+from surelay_terminal import Terminal
+{body}
+try:
+    with Terminal() as window:
+        menu("SuRelay", actions, lambda: print("节点  Fixture"))
+except (EOFError, KeyboardInterrupt):
+    pass
+print("CLEAN_EXIT", flush=True)
+'''
+        self.process = subprocess.Popen([sys.executable, "-u", "-c", script], stdin=self.slave,
+                                        stdout=self.slave, stderr=self.slave, preexec_fn=controlling_terminal,
+                                        env={**os.environ, "TERM": "xterm-256color", **env})
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        self.process.wait(timeout=5)
+        os.close(self.master)
+        os.close(self.slave)
+
+    def expect(self, text, timeout=5):
+        expected = text.encode()
+        deadline = time.monotonic() + timeout
+        while expected not in self.pending and time.monotonic() < deadline:
+            if select.select([self.master], [], [], 0.1)[0]:
+                data = os.read(self.master, 65536)
+                self.pending += data
+                self.all_output += data
+        self.assertIn(expected, self.pending, self.all_output.decode(errors="replace"))
+        self.pending = self.pending.split(expected, 1)[1]
+
+    def send(self, text):
+        os.write(self.master, text.encode())
+
+    def finish(self):
+        import termios
+        self.expect("CLEAN_EXIT")
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertEqual(termios.tcgetattr(self.slave), self.original)
+        self.assertIn(b"\x1b[?25h\x1b[?1049l", self.all_output)
+        self.assertNotIn(b"Traceback", self.all_output)
+
+    def test_navigation_updates_existing_rows_and_restores_terminal(self):
+        self.start('''
+def child():
+    menu("节点与订阅", [("查看链接", lambda: print("fixture link"))])
+actions = [("打开节点", child)]
+''', NO_COLOR="1")
+        self.expect("打开节点")
+        self.send("\033OB\033OA\r")
+        self.expect("查看链接")
+        self.send("0\r")
+        self.expect("打开节点")
+        self.send("q")
+        self.finish()
+        self.assertEqual(self.all_output.count("  SuRelay  ·  VPS 管理".encode()), 1)
+        self.assertEqual(self.all_output.count(b"\x1b[?1049h"), 1)
+        self.assertNotIn(b"\n", self.all_output.split(b"CLEAN_EXIT")[0])
+        self.assertNotIn(b"\x1b[1;36m", self.all_output)
+
+    def test_forms_keep_secrets_hidden_and_require_confirmation(self):
+        self.start('''
+def edit():
+    name = ask("节点名称", "old-name")
+    token = ask("请输入 Token", secret=True)
+    confirm("确认应用")
+    print("SAVED:" + name + ":" + str(len(token)))
+actions = [("修改设置", edit)]
+''')
+        self.expect("修改设置")
+        self.send("1\r")
+        self.expect("节点名称")
+        self.send("临时名称\x15\r")
+        self.expect("请输入 Token")
+        self.send("secret-value-123\r")
+        self.expect("确认应用")
+        self.send("NO\r")
+        self.expect("操作已取消")
+        self.assertNotIn(b"SAVED:", self.all_output)
+        self.assertNotIn(b"secret-value-123", self.all_output)
+        self.send("\r")
+        self.expect("修改设置")
+        self.send("\r")
+        self.expect("节点名称")
+        self.send("新名字\r")
+        self.expect("请输入 Token")
+        self.send("abc\r")
+        self.expect("确认应用")
+        self.send("YES\r")
+        self.expect("SAVED:新名字:3")
+        self.send("\r")
+        self.expect("修改设置")
+        self.send("q")
+        self.finish()
+
+    def test_multiline_paste_cannot_answer_a_later_confirmation(self):
+        self.start('''
+def keys():
+    values = []
+    while True:
+        value = ask("公钥", multiline=True)
+        if not value:
+            break
+        values.append(value)
+    confirm("确认公钥")
+    print("KEY_COUNT:" + str(len(values)))
+actions = [("添加公钥", keys)]
+''')
+        self.expect("添加公钥")
+        self.send("1\r")
+        self.expect("公钥")
+        self.send("\033[200~key-one\nkey-two\n\nYES\033[201~\r")
+        self.expect("确认公钥")
+        self.assertNotIn(b"KEY_COUNT:", self.all_output)
+        self.send("YES\r")
+        self.expect("KEY_COUNT:2")
+        self.send("\r")
+        self.expect("添加公钥")
+        self.send("q")
+        self.finish()
+
+    def test_command_output_paging_and_copy_view(self):
+        self.start('''
+def output():
+    run([sys.executable, "-u", "-c", "import sys; [print('LINE-%03d' % i) for i in range(60)]; print('END-ERROR', file=sys.stderr); sys.exit(3)"])
+actions = [("查看日志", output)]
+''')
+        self.expect("查看日志")
+        self.send("1\r")
+        self.expect("Enter 返回")
+        self.send("\033[F")
+        self.expect("END-ERROR")
+        self.send("p")
+        self.expect("按 Enter 返回 SuRelay")
+        self.assertIn(b"LINE-000\r\nLINE-001", self.all_output)
+        self.send("\r")
+        self.expect("Enter 返回")
+        self.send("\r")
+        self.expect("查看日志")
+        self.send("q")
+        self.finish()
+
+    def test_external_program_receives_a_normal_terminal(self):
+        self.start('''
+def external():
+    run([sys.executable, "-c", "print('RECEIVED:' + input('EXTERNAL_PROMPT:'))"], interactive=True)
+actions = [("外部编辑器", external)]
+''')
+        self.expect("外部编辑器")
+        self.send("1\r")
+        self.expect("EXTERNAL_PROMPT")
+        import termios
+        self.assertEqual(termios.tcgetattr(self.slave), self.original)
+        self.send("hello\r")
+        self.expect("RECEIVED:hello")
+        self.expect("按 Enter 返回 SuRelay")
+        self.send("\r")
+        self.expect("外部编辑器")
+        self.send("q")
+        self.finish()
+
+    def test_escape_cancels_input_and_resize_preserves_value(self):
+        import fcntl
+        import termios
+        self.start('''
+def edit():
+    print("VALUE:" + ask("名称"))
+actions = [("输入名称", edit)]
+''')
+        self.expect("输入名称")
+        self.send("1\r")
+        self.expect("Ctrl+U 清空")
+        self.send("\033")
+        self.expect("操作已取消")
+        self.send("\r")
+        self.expect("输入名称")
+        self.send("1\r")
+        self.expect("Ctrl+U 清空")
+        self.send("resize-value")
+        self.expect(" > resize-value")
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
+        self.expect("窗口过小")
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        self.expect("Ctrl+U 清空")
+        self.send("\r")
+        self.expect("VALUE:resize-value")
+        self.send("\r")
+        self.expect("输入名称")
+        self.send("q")
+        self.finish()
+
+    def test_sigterm_restores_echo_cursor_and_screen(self):
+        self.start('actions = [("等待退出", lambda: None)]')
+        self.expect("等待退出")
+        self.process.send_signal(signal.SIGTERM)
+        self.expect("\033[?25h\033[?1049l")
+        self.assertEqual(self.process.wait(timeout=5), 128 + signal.SIGTERM)
+        import termios
+        self.assertEqual(termios.tcgetattr(self.slave), self.original)
+
+    def test_ctrl_c_stops_child_command_and_returns_to_menu(self):
+        self.start('''
+def slow():
+    run([sys.executable, "-u", "-c", "import os, time; print('CHILD_PID:%d:READY' % os.getpid()); time.sleep(60)"])
+actions = [("慢速操作", slow)]
+''')
+        self.expect("慢速操作")
+        self.send("1\r")
+        self.expect(":READY")
+        import re
+        pid = int(re.search(rb"CHILD_PID:(\d+):READY", self.all_output).group(1))
+        self.send("\x03")
+        self.expect("操作已取消")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.send("\r")
+        self.expect("慢速操作")
+        self.send("q")
+        self.finish()
+
+    def test_dumb_terminal_uses_the_plain_menu(self):
+        self.start('actions = [("普通菜单", lambda: None)]', TERM="dumb")
+        self.expect("请选择")
+        self.send("0\r")
+        self.expect("CLEAN_EXIT")
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertNotIn(b"\x1b[?1049h", self.all_output)
+
+
+if __name__ == "__main__":
+    unittest.main()

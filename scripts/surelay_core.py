@@ -111,7 +111,7 @@ def csv_text(fields, rows):
 class Snapshot:
     """Private copies survive interruption; no arbitrary archive extraction."""
     def __init__(self, paths, root=None):
-        root = Path(root or "/root/reality-relay-bootstrap-backups")
+        root = Path(root or "/root/surelay-backups")
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory = Path(tempfile.mkdtemp(prefix="surelay-", dir=root))
         self.items = []
@@ -147,7 +147,7 @@ class Manager:
             self.reload()
 
     def reload(self):
-        self.env = GEN.defaults(GEN.parse_env_file(self.config))
+        self.env = GEN.defaults(GEN.parse_env_file(self.config)) if self.config.exists() else {}
         return self.env
 
     def path(self, key):
@@ -214,7 +214,9 @@ class Manager:
         if value != "auto":
             return Path(value)
         directory = "http.d" if self.alpine() else "sites-available"
-        return Path(f"/etc/nginx/{directory}/reality-relay-bootstrap.conf")
+        current = Path(f"/etc/nginx/{directory}/surelay.conf")
+        legacy = current.with_name("reality-relay-bootstrap.conf")
+        return legacy if legacy.is_file() and not current.exists() else current
 
     def check_listeners(self, rows):
         families = []
@@ -400,8 +402,57 @@ class Manager:
         if run(["git", "-C", self.root, "rev-list", "origin/main..HEAD"], capture=True):
             raise Error("存在本地独有提交，停止自动更新。")
         run(["git", "-C", self.root, "merge", "--ff-only", "origin/main"])
-        install_command(self.root)
+        self.migrate()
         print("SuRelay 已更新；重新执行 sr 使用新版菜单。")
+
+    def migrate(self, destination=Path("/opt/SuRelay"), legacy=Path("/opt/reality-relay-bootstrap"),
+                launcher=Path("/usr/local/bin/sr")):
+        """Move only the checkout; keep running services, credentials and identity in place."""
+        destination, legacy, launcher = Path(destination), Path(legacy), Path(launcher)
+        old_root = self.root
+        move = old_root == legacy
+        if move and (destination.exists() or destination.is_symlink()):
+            raise Error(f"迁移目标已存在：{destination}；请先核实两份安装，未覆盖任何目录。")
+        if move and not (old_root / ".git").is_dir():
+            raise Error("迁移目录要求独立 Git 克隆；自定义工作树请在原路径更新。")
+        remote = run(["git", "-C", old_root, "remote", "get-url", "origin"], capture=True)
+        replacements = {
+            "https://github.com/suyi-92/reality-relay-bootstrap.git": "https://github.com/suyi-92/SuRelay.git",
+            "https://github.com/suyi-92/reality-relay-bootstrap": "https://github.com/suyi-92/SuRelay.git",
+            "git@github.com:suyi-92/reality-relay-bootstrap.git": "git@github.com:suyi-92/SuRelay.git",
+        }
+        backup = Snapshot([self.config, launcher])
+        moved = False
+        try:
+            if move:
+                old_root.rename(destination)
+                moved = True
+                old_root.symlink_to(destination, target_is_directory=True)
+                self.root, self.config = destination, destination / "config.env"
+                if self.config.exists():
+                    # Absolute project inputs follow the checkout; runtime paths stay untouched.
+                    raw = GEN.parse_env_file(self.config)
+                    paths = {k: str(destination) + v[len(str(old_root)):] for k, v in raw.items()
+                             if k.endswith(("_PATH", "_DIR", "_FILE", "_CONF", "_ROOT"))
+                             and v.startswith(str(old_root) + "/")}
+                    if paths:
+                        self.update(paths)
+            if remote in replacements:
+                run(["git", "-C", self.root, "remote", "set-url", "origin", replacements[remote]])
+            install_command(self.root, launcher)
+        except BaseException:
+            if moved:
+                if old_root.is_symlink():
+                    old_root.unlink()
+                destination.rename(old_root)
+            self.root, self.config = old_root, old_root / "config.env"
+            if remote in replacements:
+                run(["git", "-C", old_root, "remote", "set-url", "origin", remote], check=False)
+            backup.restore()
+            self.reload()
+            raise
+        print(f"SuRelay 目录：{self.root}；迁移备份：{backup.directory}")
+        print("原有配置、节点身份和订阅已保留。" if move else "已完成命令与仓库地址更新。")
 
 
 def install_command(root=ROOT, target=Path("/usr/local/bin/sr")):

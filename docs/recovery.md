@@ -55,7 +55,7 @@ sudo CONFIRM_ROLLBACK=yes RESTORE_233BOY_CONF=yes bash bootstrap.sh --phase roll
 默认使用最近一次备份。如需指定备份目录：
 
 ```bash
-sudo CONFIRM_ROLLBACK=yes ROLLBACK_BACKUP_DIR=/root/reality-relay-bootstrap-backups/backup-xxxx bash bootstrap.sh --phase rollback
+sudo CONFIRM_ROLLBACK=yes ROLLBACK_BACKUP_DIR=/root/surelay-backups/backup-xxxx bash bootstrap.sh --phase rollback
 ```
 
 

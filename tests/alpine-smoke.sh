@@ -45,10 +45,10 @@ bash bootstrap.sh --phase firewall
 bash scripts/10-validate.sh --skip-proxy-tests
 
 # Idempotent install must retain all node identity files.
-sha256sum /etc/reality-relay-bootstrap/{vless-uuid.txt,reality-private.key,reality-public.key,reality-short-id.txt} >/tmp/rrb-identity.sha256
+sha256sum /etc/surelay/{vless-uuid.txt,reality-private.key,reality-public.key,reality-short-id.txt} >/tmp/rrb-identity.sha256
 bash bootstrap.sh --phase singbox
 sha256sum -c /tmp/rrb-identity.sha256
-token="$(cat /etc/reality-relay-bootstrap/vless-uuid.txt)"
+token="$(cat /etc/surelay/vless-uuid.txt)"
 curl --noproxy '*' -fsS "http://127.0.0.1:51040/sub/$token?target=ClashMeta" -o /tmp/rrb-subscription.yaml
 grep -q 'type: vless' /tmp/rrb-subscription.yaml
 
@@ -82,7 +82,7 @@ trap 'kill "$tls_pid" "$http_pid" ${client_pid:+"$client_pid"} 2>/dev/null || tr
 python3 - <<'PY'
 import json
 from pathlib import Path
-state = Path('/etc/reality-relay-bootstrap')
+state = Path('/etc/surelay')
 read = lambda name: (state / name).read_text().strip()
 config = {'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': 19090}],
           'outbounds': [{'type': 'vless', 'server': '127.0.0.1', 'server_port': 443,

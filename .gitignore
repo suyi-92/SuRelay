@@ -4,6 +4,9 @@ upstream-nodes.txt
 *.log
 *.bak
 __pycache__/
+surelay-nodes.txt
+surelay-clash.yaml
+surelay-vless.txt
 reality-relay-bootstrap-nodes.txt
 reality-relay-bootstrap-clash.yaml
 reality-relay-bootstrap-vless.txt

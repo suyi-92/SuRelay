@@ -84,7 +84,9 @@ def parse_env_file(path: Path) -> Dict[str, str]:
 
 def defaults(env: Dict[str, str]) -> Dict[str, str]:
     merged = dict(env)
-    state_dir = merged.get("RRB_STATE_DIR") or "/etc/reality-relay-bootstrap"
+    legacy_state = "/etc/reality-relay-bootstrap"
+    state_dir = merged.get("RRB_STATE_DIR") or (
+        legacy_state if Path(legacy_state).is_dir() and not Path("/etc/surelay").exists() else "/etc/surelay")
     d = {
         "SERVER_ALIAS": "my-vps",
         "SERVER_IP": "",
@@ -128,7 +130,7 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         "CLOUDFLARE_DNS_PROPAGATION_SECONDS": "60",
         "NGINX_FALLBACK_HOST": "127.0.0.1",
         "NGINX_FALLBACK_PORT": "8443",
-        "NGINX_FALLBACK_ROOT": "/var/www/reality-fallback",
+        "NGINX_FALLBACK_ROOT": "/var/www/reality-fallback" if Path("/var/www/reality-fallback").is_dir() and not Path("/var/www/surelay-fallback").exists() else "/var/www/surelay-fallback",
         "NGINX_FALLBACK_CONF": "auto",
         "SINGBOX_CONFIG_PATH": "/etc/sing-box/config.json",
         "VLESS_UUID_PATH": f"{state_dir}/vless-uuid.txt",
@@ -173,8 +175,7 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
     apply_custom_domain_defaults(merged)
     apply_subscription_defaults(merged)
 
-    default_state_dir = "/etc/reality-relay-bootstrap"
-    if merged["RRB_STATE_DIR"] != default_state_dir:
+    for default_state_dir in ("/etc/surelay", legacy_state):
         default_paths = {
             "VLESS_UUID_PATH": "vless-uuid.txt",
             "REALITY_PRIVATE_KEY_PATH": "reality-private.key",
@@ -185,6 +186,11 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         for key, filename in default_paths.items():
             if merged.get(key) == f"{default_state_dir}/{filename}":
                 merged[key] = f"{merged['RRB_STATE_DIR']}/{filename}"
+    legacy_service = "reality-relay-subscription"
+    merged["SUBSCRIPTION_SERVICE"] = "surelay-subscription"
+    if any(Path(p.format(legacy_service)).exists() for p in (
+            "/etc/systemd/system/{}.service", "/etc/init.d/{}")):
+        merged["SUBSCRIPTION_SERVICE"] = legacy_service
     return merged
 
 

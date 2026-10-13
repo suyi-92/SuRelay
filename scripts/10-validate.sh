@@ -106,7 +106,7 @@ if [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" && "$SINGBOX_ONLY" != "true" ]]; t
     info "DRY-RUN: 实际运行后应检查订阅服务监听端口：$SUBSCRIPTION_LISTEN_PORT"
   else
     info "检查订阅服务。"
-    service_active reality-relay-subscription || die "订阅服务未运行"
+    service_active "$SUBSCRIPTION_SERVICE" || die "订阅服务未运行"
     wait_for_port_listener "$SUBSCRIPTION_LISTEN_PORT" 15 || die "订阅服务未监听端口：$SUBSCRIPTION_LISTEN_PORT"
     info "订阅服务端口正常：$SUBSCRIPTION_LISTEN_PORT"
   fi

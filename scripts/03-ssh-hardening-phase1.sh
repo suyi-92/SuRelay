@@ -11,7 +11,7 @@ backup_path /etc/ssh/sshd_config
 ensure_sshd_dropin_include
 
 write_sshd_policy <<'EOF'
-# Managed by reality-relay-bootstrap phase1.
+# Managed by surelay phase1.
 # Phase1 only enables public key authentication. It intentionally does NOT
 # disable root login or password login. Final hardening is a separate phase.
 PubkeyAuthentication yes

@@ -7,7 +7,7 @@ require_root
 load_config
 
 if is_dry_run; then
-  log "DRY-RUN: generate /root/reality-relay-bootstrap-nodes.txt and /root/reality-relay-bootstrap-clash.yaml"
+  log "DRY-RUN: generate /root/surelay-nodes.txt and /root/surelay-clash.yaml"
   exit 0
 fi
 
@@ -15,9 +15,9 @@ args=(
   python3 "$SCRIPT_DIR/11-output-nodes.py"
   --config-env "$RRB_CONFIG_FILE"
   --generator "$SCRIPT_DIR/08-generate-singbox-config.py"
-  --nodes-out /root/reality-relay-bootstrap-nodes.txt
-  --clash-out /root/reality-relay-bootstrap-clash.yaml
-  --vless-out /root/reality-relay-bootstrap-vless.txt
+  --nodes-out /root/surelay-nodes.txt
+  --clash-out /root/surelay-clash.yaml
+  --vless-out /root/surelay-vless.txt
   --print-summary
   --quiet
 )

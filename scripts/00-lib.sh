@@ -9,16 +9,18 @@ RRB_YES="${RRB_YES:-false}"
 RRB_VERBOSE="${RRB_VERBOSE:-false}"
 export RRB_PROJECT_DIR RRB_CONFIG_FILE RRB_DRY_RUN RRB_YES RRB_VERBOSE
 SCRIPT_DIR="$RRB_PROJECT_DIR/scripts"
-LOG_FILE="/var/log/reality-relay-bootstrap.log"
-BACKUP_ROOT="/root/reality-relay-bootstrap-backups"
+LOG_FILE="/var/log/surelay.log"
+BACKUP_ROOT="/root/surelay-backups"
 PHASE_NAME="${PHASE_NAME:-manual}"
 BACKUP_DIR="${BACKUP_DIR:-}"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  LOG_FILE="/tmp/reality-relay-bootstrap.log"
-  BACKUP_ROOT="/tmp/reality-relay-bootstrap-backups"
+  LOG_FILE="/tmp/surelay.log"
+  BACKUP_ROOT="/tmp/surelay-backups"
 fi
 
+# The trap assigns rc when evaluated, not when registered.
+# shellcheck disable=SC2154
 trap 'rc=$?; echo "[ERROR] line=${LINENO} cmd=${BASH_COMMAND} rc=${rc}" >&2; exit $rc' ERR
 
 _ts() { date '+%F %T'; }
@@ -201,7 +203,10 @@ load_config() {
   : "${ENABLE_IPV6_LISTEN:=false}"
   : "${CSV_PATH:=./home-proxies.csv}"
   : "${UPSTREAM_NODES_PATH:=./upstream-nodes.txt}"
-  : "${RRB_STATE_DIR:=/etc/reality-relay-bootstrap}"
+  if [[ -z "${RRB_STATE_DIR:-}" && -d /etc/reality-relay-bootstrap && ! -e /etc/surelay ]]; then
+    RRB_STATE_DIR=/etc/reality-relay-bootstrap
+  fi
+  : "${RRB_STATE_DIR:=/etc/surelay}"
   export RRB_STATE_DIR
   : "${ENABLE_CUSTOM_DOMAIN:=false}"
   : "${CUSTOM_DOMAIN:=}"
@@ -220,7 +225,10 @@ load_config() {
   : "${CLOUDFLARE_DNS_PROPAGATION_SECONDS:=60}"
   : "${NGINX_FALLBACK_HOST:=127.0.0.1}"
   : "${NGINX_FALLBACK_PORT:=8443}"
-  : "${NGINX_FALLBACK_ROOT:=/var/www/reality-fallback}"
+  if [[ -z "${NGINX_FALLBACK_ROOT:-}" && -d /var/www/reality-fallback && ! -e /var/www/surelay-fallback ]]; then
+    NGINX_FALLBACK_ROOT=/var/www/reality-fallback
+  fi
+  : "${NGINX_FALLBACK_ROOT:=/var/www/surelay-fallback}"
   : "${NGINX_FALLBACK_CONF:=auto}"
   resolve_platform_config
   : "${SINGBOX_CONFIG_PATH:=/etc/sing-box/config.json}"
@@ -230,14 +238,13 @@ load_config() {
   : "${REALITY_PUBLIC_KEY_PATH:=$RRB_STATE_DIR/reality-public.key}"
   : "${REALITY_SHORT_ID_PATH:=$RRB_STATE_DIR/reality-short-id.txt}"
 
-  DEFAULT_RRB_STATE_DIR="/etc/reality-relay-bootstrap"
-  if [[ "$RRB_STATE_DIR" != "$DEFAULT_RRB_STATE_DIR" ]]; then
+  for DEFAULT_RRB_STATE_DIR in /etc/surelay /etc/reality-relay-bootstrap; do
     [[ "$VLESS_UUID_PATH" == "$DEFAULT_RRB_STATE_DIR/vless-uuid.txt" ]] && VLESS_UUID_PATH="$RRB_STATE_DIR/vless-uuid.txt"
     [[ "$REALITY_PRIVATE_KEY_PATH" == "$DEFAULT_RRB_STATE_DIR/reality-private.key" ]] && REALITY_PRIVATE_KEY_PATH="$RRB_STATE_DIR/reality-private.key"
     [[ "$REALITY_PUBLIC_KEY_PATH" == "$DEFAULT_RRB_STATE_DIR/reality-public.key" ]] && REALITY_PUBLIC_KEY_PATH="$RRB_STATE_DIR/reality-public.key"
     [[ "$REALITY_SHORT_ID_PATH" == "$DEFAULT_RRB_STATE_DIR/reality-short-id.txt" ]] && REALITY_SHORT_ID_PATH="$RRB_STATE_DIR/reality-short-id.txt"
     [[ "$CLOUDFLARE_API_TOKEN_FILE" == "$DEFAULT_RRB_STATE_DIR/cloudflare.ini" ]] && CLOUDFLARE_API_TOKEN_FILE="$RRB_STATE_DIR/cloudflare.ini"
-  fi
+  done
 
   : "${REALITY_SERVER_NAME:=www.microsoft.com}"
   : "${REALITY_HANDSHAKE_SERVER:=www.microsoft.com}"
@@ -251,7 +258,12 @@ load_config() {
   : "${SUBSCRIPTION_PORT:=}"
   : "${SUBSCRIPTION_INTERNAL_PORT:=51040}"
   : "${SUBSCRIPTION_LISTEN_PORT:=}"
-  : "${SUBSCRIPTION_DIR:=/etc/reality-relay-bootstrap/subscription}"
+  : "${SUBSCRIPTION_DIR:=$RRB_STATE_DIR/subscription}"
+  SUBSCRIPTION_SERVICE=surelay-subscription
+  if [[ -f /etc/systemd/system/reality-relay-subscription.service || -f /etc/init.d/reality-relay-subscription ]]; then
+    SUBSCRIPTION_SERVICE=reality-relay-subscription
+  fi
+  export SUBSCRIPTION_SERVICE
   : "${RESET_PROXY_KEYS:=false}"
   : "${SUBSCRIPTION_TARGET:=ClashMeta}"
   : "${SUBSCRIPTION_BASE_URL:=}"
@@ -527,6 +539,7 @@ require_supported_os() {
   local os_release="${RRB_OS_RELEASE_FILE:-/etc/os-release}"
   [[ -r "$os_release" ]] || die "无法读取 $os_release"
   # shellcheck disable=SC1091
+  # shellcheck disable=SC1090
   source "$os_release"
   local os_id="${ID:-}" ver="${VERSION_ID:-}"
   case "$os_id:$ver" in
@@ -592,7 +605,7 @@ ssh_service_name() {
 
 remove_legacy_sshd_dropins() {
   local path
-  for path in /etc/ssh/sshd_config.d/00-reality-relay-bootstrap-{phase1,hardening}.conf; do
+  for path in /etc/ssh/sshd_config.d/00-{surelay,reality-relay-bootstrap}-{phase1,hardening}.conf; do
     if is_dry_run; then
       log "DRY-RUN: remove legacy managed SSH drop-in $path"
     else
@@ -782,7 +795,9 @@ diagnose_singbox_listeners() {
   (ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null || true) | tee -a "$LOG_FILE" >&2
   if is_alpine; then
     rc-service sing-box status 2>&1 | tee -a "$LOG_FILE" >&2 || true
-    tail -n 80 /var/log/reality-relay/sing-box.log 2>/dev/null | tee -a "$LOG_FILE" >&2 || true
+    local core_log=/var/log/surelay/sing-box.log
+    [[ -f "$core_log" ]] || core_log=/var/log/reality-relay/sing-box.log
+    tail -n 80 "$core_log" 2>/dev/null | tee -a "$LOG_FILE" >&2 || true
     return
   fi
   if command -v systemctl >/dev/null 2>&1; then

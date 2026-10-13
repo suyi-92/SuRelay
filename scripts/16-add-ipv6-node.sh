@@ -5,15 +5,15 @@ PHASE_NAME="ipv6-node"
 source "${RRB_PROJECT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/00-lib.sh"
 
 ADDRESS=""
-V6_NODES_OUT="/root/reality-relay-bootstrap-v6-nodes.txt"
-V6_CLASH_OUT="/root/reality-relay-bootstrap-v6-clash.yaml"
-V6_VLESS_OUT="/root/reality-relay-bootstrap-v6-vless.txt"
+V6_NODES_OUT="/root/surelay-v6-nodes.txt"
+V6_CLASH_OUT="/root/surelay-v6-clash.yaml"
+V6_VLESS_OUT="/root/surelay-v6-vless.txt"
 
 usage() {
   cat <<'EOF'
 Usage: sudo bash scripts/16-add-ipv6-node.sh --address <IPv6地址>
 
-该脚本只适用于已经完成 reality-relay-bootstrap 部署的服务器。
+该脚本只适用于已经完成 surelay 部署的服务器。
 EOF
 }
 

@@ -95,6 +95,9 @@ class Security:
         self.m = manager
         self.ssh_config = Path("/etc/ssh/sshd_config")
         self.socket_conf = Path("/etc/systemd/system/ssh.socket.d/surelay.conf")
+        legacy_socket = self.socket_conf.with_name("reality-relay-bootstrap.conf")
+        if legacy_socket.exists() and not self.socket_conf.exists():
+            self.socket_conf = legacy_socket
 
     def sshd(self):
         return shutil.which("sshd") or "/usr/sbin/sshd"
@@ -224,7 +227,7 @@ class Security:
             if set(both) != effective_ports:
                 raise Error("存在额外端口配置，已停止迁移。")
             if shutil.which("ufw"):
-                run(["ufw", "allow", f"{new}/tcp", "comment", "reality-relay-bootstrap SSH current port"])
+                run(["ufw", "allow", f"{new}/tcp", "comment", "surelay SSH current port"])
             self.verify_ssh_listener(new)
             confirm_login(new)
             self.set_ssh_ports([new], socket_active)
@@ -252,7 +255,8 @@ class Security:
             numbers = []
             for line in status.splitlines():
                 match = re.match(r"\[\s*(\d+)\]\s+(\d+)/tcp", line)
-                if match and match[2] in old_ports and match[2] != new and "reality-relay-bootstrap SSH" in line:
+                if match and match[2] in old_ports and match[2] != new and any(
+                        name in line for name in ("surelay SSH", "reality-relay-bootstrap SSH")):
                     numbers.append(int(match[1]))
             for number in sorted(numbers, reverse=True):
                 run(["ufw", "--force", "delete", str(number)])

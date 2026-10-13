@@ -136,7 +136,7 @@ EOF
   fi
 
   write_root_file "$NGINX_FALLBACK_CONF" 0644 <<EOF
-# Managed by reality-relay-bootstrap.
+# Managed by surelay.
 # Public tcp/443 is handled by sing-box Reality; ordinary TLS is forwarded here.
 server {
   listen $NGINX_FALLBACK_HOST:$NGINX_FALLBACK_PORT ssl http2;
@@ -181,7 +181,8 @@ EOF
 }
 
 write_renew_hook() {
-  local hook="/etc/letsencrypt/renewal-hooks/deploy/reality-relay-bootstrap-nginx.sh"
+  local hook="/etc/letsencrypt/renewal-hooks/deploy/surelay-nginx.sh"
+  [[ ! -f /etc/letsencrypt/renewal-hooks/deploy/reality-relay-bootstrap-nginx.sh ]] || hook=/etc/letsencrypt/renewal-hooks/deploy/reality-relay-bootstrap-nginx.sh
   run mkdir -p "$(dirname "$hook")"
   write_root_file "$hook" 0755 <<'EOF'
 #!/usr/bin/env bash
@@ -195,9 +196,11 @@ EOF
   if is_alpine; then
     pkg_install busybox-openrc
     run mkdir -p /etc/periodic/daily
-    write_root_file /etc/periodic/daily/reality-relay-certbot 0755 <<'EOF'
+    local renewal=/etc/periodic/daily/surelay-certbot
+    [[ ! -f /etc/periodic/daily/reality-relay-certbot ]] || renewal=/etc/periodic/daily/reality-relay-certbot
+    write_root_file "$renewal" 0755 <<EOF
 #!/bin/sh
-exec /opt/reality-relay-certbot/bin/certbot renew --quiet
+exec "$CERTBOT_BIN" renew --quiet
 EOF
     service_enable crond
     if ! service_active crond; then service_restart crond; fi

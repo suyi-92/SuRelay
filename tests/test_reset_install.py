@@ -26,26 +26,26 @@ class ResetInstallTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.project = Path('/opt/relay')
         self.calls = []
-        self.active = {'sing-box', 'reality-relay-subscription', 'nginx', 'fail2ban'}
-        self.rules = ["ufw allow 22/tcp comment 'reality-relay-bootstrap SSH current port'",
-                      "ufw allow 443/tcp comment 'reality-relay-bootstrap sing-box VLESS+Reality 443'",
-                      "ufw allow 51040/tcp comment 'reality-relay-bootstrap subscription 51040'",
+        self.active = {'sing-box', 'surelay-subscription', 'nginx', 'fail2ban'}
+        self.rules = ["ufw allow 22/tcp comment 'surelay SSH current port'",
+                      "ufw allow 443/tcp comment 'surelay sing-box VLESS+Reality 443'",
+                      "ufw allow 51040/tcp comment 'surelay subscription 51040'",
                       "ufw allow 8080/tcp comment 'unrelated application'"]
         self.put('/etc/os-release', 'ID=debian\n')
         self.put('/opt/relay/config.env', 'SERVER_ALIAS=old\nSERVER_IP=192.0.2.10\n')
         self.put('/opt/relay/home-proxies.csv', 'old-list\n')
         self.put('/opt/relay/upstream-nodes.txt', 'old-upstream\n')
         self.put('/opt/relay/README.md', 'source code must survive\n')
-        self.put('/etc/reality-relay-bootstrap/vless-uuid.txt', 'old-identity\n')
-        self.put('/etc/reality-relay-bootstrap/reality-private.key', 'fake-test-private\n')
-        self.put('/etc/reality-relay-bootstrap/subscription/all/clashmeta.yaml', 'old-subscription\n')
-        self.put('/etc/reality-relay-bootstrap/user-note.txt', 'keep non-project data\n')
+        self.put('/etc/surelay/vless-uuid.txt', 'old-identity\n')
+        self.put('/etc/surelay/reality-private.key', 'fake-test-private\n')
+        self.put('/etc/surelay/subscription/all/clashmeta.yaml', 'old-subscription\n')
+        self.put('/etc/surelay/user-note.txt', 'keep non-project data\n')
         self.put('/etc/sing-box/config.json', '{"inbounds": []}\n')
-        self.put('/etc/systemd/system/reality-relay-subscription.service', 'Description=Reality Relay Bootstrap subscription file server\n')
-        self.put('/etc/nginx/sites-available/reality-relay-bootstrap.conf', '# Managed by reality-relay-bootstrap.\n')
+        self.put('/etc/systemd/system/surelay-subscription.service', 'Description=SuRelay subscription file server\n')
+        self.put('/etc/nginx/sites-available/surelay.conf', '# Managed by surelay.\n')
         self.put('/etc/nginx/sites-enabled/other.conf', 'other site\n')
-        (self.p('/etc/nginx/sites-enabled/reality-relay-bootstrap.conf')).symlink_to('../sites-available/reality-relay-bootstrap.conf')
-        self.put('/etc/fail2ban/jail.d/sshd.local', '# Managed by reality-relay-bootstrap.\n')
+        (self.p('/etc/nginx/sites-enabled/surelay.conf')).symlink_to('../sites-available/surelay.conf')
+        self.put('/etc/fail2ban/jail.d/sshd.local', '# Managed by surelay.\n')
         self.put('/etc/fail2ban/jail.d/other.local', 'other jail\n')
         self.put('/etc/ufw/ufw.conf', 'ENABLED=yes\n')
         self.put('/etc/ssh/sshd_config', 'working SSH config\n')
@@ -104,7 +104,7 @@ class ResetInstallTest(unittest.TestCase):
         self.assertTrue(all(not self.p(p).exists() for p in obj.paths))
         for value in ('/etc/ssh/sshd_config', '/root/.ssh/authorized_keys', '/opt/relay/README.md',
                       '/etc/nginx/sites-enabled/other.conf', '/etc/fail2ban/jail.d/other.local',
-                      '/etc/reality-relay-bootstrap/user-note.txt'):
+                      '/etc/surelay/user-note.txt'):
             self.assertTrue(self.p(value).is_file(), value)
         self.assertEqual(len(self.rules), 2)
         self.assertIn('SSH', self.rules[0])
@@ -116,8 +116,8 @@ class ResetInstallTest(unittest.TestCase):
     def test_alpine_removes_owned_services_from_every_runlevel(self):
         self.put('/etc/os-release', 'ID=alpine\nVERSION_ID=3.19.9\n')
         self.put('/usr/local/bin/sing-box', 'musl fixture\n')
-        for name in ('sing-box', 'reality-relay-subscription'):
-            self.put(f'/etc/init.d/{name}', '# Managed by reality-relay-bootstrap.\n')
+        for name in ('sing-box', 'surelay-subscription'):
+            self.put(f'/etc/init.d/{name}', '# Managed by surelay.\n')
             self.put(f'/etc/conf.d/{name}', 'command=test\n')
             for level in ('default', 'custom'):
                 p = self.p(f'/etc/runlevels/{level}/{name}')
@@ -134,7 +134,7 @@ class ResetInstallTest(unittest.TestCase):
         obj = self.resetter()
         obj.describe()
         self.assertTrue(self.p('/opt/relay/config.env').exists())
-        self.assertFalse(self.p('/root/reality-relay-bootstrap-backups').exists())
+        self.assertFalse(self.p('/root/surelay-backups').exists())
         self.assertEqual(self.calls, [['ufw', 'show', 'added']])
 
     def test_confirmation_cancel_and_eof_do_not_create_backup(self):
@@ -192,7 +192,7 @@ class ResetInstallTest(unittest.TestCase):
     def test_unsafe_custom_paths_fail_before_any_cleanup(self):
         for setting in ('RRB_STATE_DIR=/etc', 'CSV_PATH=/etc/passwd',
                         'SINGBOX_CONFIG_PATH=/etc/ssh/sshd_config', 'SUBSCRIPTION_DIR=/root',
-                        'REALITY_PRIVATE_KEY_PATH=/etc/reality-relay-bootstrap/../passwd'):
+                        'REALITY_PRIVATE_KEY_PATH=/etc/surelay/../passwd'):
             with self.subTest(setting=setting):
                 self.put('/opt/relay/config.env', setting + '\n')
                 with self.assertRaises(reset.ResetError):
@@ -201,22 +201,22 @@ class ResetInstallTest(unittest.TestCase):
         self.assertFalse(self.calls)
 
     def test_symlink_state_parent_is_rejected(self):
-        self.p('/etc/reality-relay-bootstrap').rename(self.p('/etc/other-data'))
-        self.p('/etc/reality-relay-bootstrap').symlink_to('other-data')
+        self.p('/etc/surelay').rename(self.p('/etc/other-data'))
+        self.p('/etc/surelay').symlink_to('other-data')
         with self.assertRaisesRegex(reset.ResetError, '符号链接'):
             self.resetter()
         self.assertTrue(self.p('/etc/other-data/vless-uuid.txt').exists())
 
     def test_unowned_nginx_configuration_stops_reset(self):
-        self.put('/etc/nginx/sites-available/reality-relay-bootstrap.conf', '# manually owned\n')
+        self.put('/etc/nginx/sites-available/surelay.conf', '# manually owned\n')
         with self.assertRaisesRegex(reset.ResetError, '归属标记'):
             self.resetter()
         self.assertTrue(self.p('/opt/relay/config.env').exists())
 
     def certificate(self):
-        self.put('/etc/reality-relay-bootstrap/cloudflare.ini', 'dns_cloudflare_api_token = fixture\n')
+        self.put('/etc/surelay/cloudflare.ini', 'dns_cloudflare_api_token = fixture\n')
         self.put('/etc/letsencrypt/renewal/edge.example.test.conf',
-                 'version = 4.0.0\n[renewalparams]\ndns_cloudflare_credentials = /etc/reality-relay-bootstrap/cloudflare.ini\n')
+                 'version = 4.0.0\n[renewalparams]\ndns_cloudflare_credentials = /etc/surelay/cloudflare.ini\n')
         self.put('/etc/letsencrypt/archive/edge.example.test/cert1.pem', 'test certificate\n')
         p = self.p('/etc/letsencrypt/live/edge.example.test/cert.pem')
         p.parent.mkdir(parents=True, exist_ok=True)

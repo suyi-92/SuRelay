@@ -7,9 +7,9 @@ require_root
 load_config
 require_supported_os
 
-SERVICE_NAME="reality-relay-subscription"
+SERVICE_NAME="$SUBSCRIPTION_SERVICE"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-SERVER_INSTALL_DIR="/usr/local/lib/reality-relay-bootstrap"
+SERVER_INSTALL_DIR="/usr/local/lib/surelay"
 SERVER_INSTALL_PATH="$SERVER_INSTALL_DIR/subscription-server.py"
 
 subscription_target_file() {
@@ -76,7 +76,7 @@ else
   run mkdir -p /etc/systemd/system
   write_root_file "$SERVICE_FILE" 0644 <<EOF_SERVICE
 [Unit]
-Description=Reality Relay Bootstrap subscription file server
+Description=SuRelay subscription file server
 After=network-online.target
 Wants=network-online.target
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# reality-relay-bootstrap 总入口。所有危险步骤都拆成阶段执行，避免一次性锁机。
+# surelay 总入口。所有危险步骤都拆成阶段执行，避免一次性锁机。
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +28,7 @@ Phases:
   custom-domain   可选配置 Cloudflare DNS-01 证书和本机 Nginx fallback
   firewall        安装/配置 UFW，只开放 SSH、443 和实际中转端口
   validate        验证 SSH、fail2ban、UFW、sing-box、监听端口、家宽代理和上游节点
-  output-nodes    可选生成 /root/reality-relay-bootstrap-nodes.txt 与 /root/reality-relay-bootstrap-clash.yaml
+  output-nodes    可选生成 /root/surelay-nodes.txt 与 /root/surelay-clash.yaml
   rollback        回滚 SSH 加固、sing-box 配置；可选处理 UFW
 EOF
 }

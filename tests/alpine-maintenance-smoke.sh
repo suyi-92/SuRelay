@@ -17,12 +17,12 @@ grep -q '/upload' /tmp/rrb-sftp-result
 # Disable/re-enable the subscription using the same public entry point.
 sed -i 's/^ENABLE_SUBSCRIPTION_SERVER=.*/ENABLE_SUBSCRIPTION_SERVER="false"/' config.env
 bash bootstrap.sh --phase subscription
-if rc-service reality-relay-subscription status; then exit 1; fi
+if rc-service surelay-subscription status; then exit 1; fi
 sed -i 's/^ENABLE_SUBSCRIPTION_SERVER=.*/ENABLE_SUBSCRIPTION_SERVER="true"/' config.env
 bash bootstrap.sh --phase subscription
 
 # Exercise the normal rollback service adapter without changing production hosts.
-backup="$(find /root/reality-relay-bootstrap-backups -maxdepth 1 -type d -name '*-singbox-install' | sort | tail -n 1)"
+backup="$(find /root/surelay-backups -maxdepth 1 -type d -name '*-singbox-install' | sort | tail -n 1)"
 CONFIRM_ROLLBACK=yes ROLLBACK_BACKUP_DIR="$backup" bash bootstrap.sh --phase rollback
 ssh -i /tmp/rrb-test-key -o BatchMode=yes root@127.0.0.1 'test "$(id -u)" = 0'
 CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final
@@ -62,13 +62,13 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -days 1 -subj /CN=edge.example.test >/dev/null 2>&1
 bash bootstrap.sh --phase subscription
 RRB_PROJECT_DIR="$PWD" bash /tmp/rrb-domain-functions.sh
-token="$(cat /etc/reality-relay-bootstrap/vless-uuid.txt)"
+token="$(cat /etc/surelay/vless-uuid.txt)"
 curl --noproxy '*' -kfsS --resolve edge.example.test:8443:127.0.0.1 \
   "https://edge.example.test:8443/sub/$token?target=ClashMeta" -o /tmp/rrb-domain-sub.yaml
 grep -q 'type: vless' /tmp/rrb-domain-sub.yaml
-bash /etc/letsencrypt/renewal-hooks/deploy/reality-relay-bootstrap-nginx.sh
+bash /etc/letsencrypt/renewal-hooks/deploy/surelay-nginx.sh
 rc-service crond status
-test -x /etc/periodic/daily/reality-relay-certbot
+test -x /etc/periodic/daily/surelay-certbot
 mv /tmp/rrb-before-domain.env config.env
 bash bootstrap.sh --phase subscription
 sha256sum -c /tmp/rrb-identity.sha256

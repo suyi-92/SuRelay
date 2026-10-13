@@ -16,6 +16,17 @@ from surelay_core import Error, GEN, Manager, ROOT, Snapshot, atomic, install_co
 from surelay_security import Security, firewall_rule
 
 
+def color(text, style):
+    if not sys.stdout.isatty() or "NO_COLOR" in os.environ or os.environ.get("TERM") == "dumb":
+        return str(text)
+    codes = {"title": "1;36", "accent": "36", "ok": "32", "warn": "33", "danger": "31", "muted": "2"}
+    return f"\033[{codes[style]}m{text}\033[0m"
+
+
+def divider():
+    print(color("─" * min(60, max(24, shutil.get_terminal_size().columns - 2)), "muted"))
+
+
 def ask(label, default="", secret=False):
     prompt = f"{label}" + (f" [{default}]" if default and not secret else "") + "："
     value = getpass.getpass(prompt) if secret else input(prompt)
@@ -29,12 +40,20 @@ def confirm(message, word="YES"):
 
 def menu(title, actions, before=None):
     while True:
-        print(f"\n{title}\n" + "─" * 40)
+        print()
+        divider()
+        print(color("  " + title, "title"))
+        if title == "SuRelay":
+            print(color("  Reality · 中转 · VPS 管理", "muted"))
+        divider()
         if before:
             before()
+            divider()
         for index, (name, _) in enumerate(actions, 1):
-            print(f"{index}. {name}")
-        print("0. " + ("退出" if title == "SuRelay" else "返回"))
+            style = "danger" if name.startswith(("卸载", "重置")) else "accent"
+            print(f"  {color(str(index) + ')', style)} {color(name, style) if style == 'danger' else name}")
+        print("  " + color("0)", "muted") + (" 退出" if title == "SuRelay" else " 返回"))
+        divider()
         try:
             choice = ask("请选择", "0")
             if choice == "0":
@@ -44,7 +63,7 @@ def menu(title, actions, before=None):
                 continue
             actions[int(choice) - 1][1]()
         except (Error, OSError, ValueError, GEN.ConfigError) as exc:
-            print(f"\n未完成：{exc}")
+            print(color(f"\n未完成：{exc}", "warn"))
         except KeyboardInterrupt:
             print("\n操作已取消，返回菜单。")
 
@@ -56,17 +75,24 @@ class Panel:
 
     def status(self):
         self.m.reload()
-        print(f"节点：{self.m.env['SERVER_ALIAS']}")
-        for name, label in (("sing-box", "代理服务"), ("reality-relay-subscription", "订阅服务")):
-            print(f"{label}：{'运行中' if self.m.active(name) else '未运行'}")
-        print("域名：" + (self.m.env["CUSTOM_DOMAIN"] if self.m.env["ENABLE_CUSTOM_DOMAIN"] == "true" else "未启用"))
-        print("IPv6：" + (self.m.env["SERVER_IP_IPV6"] if self.m.env["ENABLE_IPV6_LISTEN"] == "true" else "未启用"))
+        if not self.m.config.exists():
+            print(color("  安装：尚未配置，请运行 sr install", "warn"))
+            return
+        print("  节点  " + color(self.m.env['SERVER_ALIAS'], "title"))
+        for name, label in (("sing-box", "代理"), (self.m.env["SUBSCRIPTION_SERVICE"], "订阅")):
+            active = self.m.active(name)
+            print(f"  {label}  " + color("● 运行中" if active else "○ 未运行", "ok" if active else "warn"))
+        print("  域名  " + (self.m.env["CUSTOM_DOMAIN"] if self.m.env["ENABLE_CUSTOM_DOMAIN"] == "true" else "未启用"))
+        print("  IPv6  " + (self.m.env["SERVER_IP_IPV6"] if self.m.env["ENABLE_IPV6_LISTEN"] == "true" else "未启用"))
+        if not self.m.path("SINGBOX_CONFIG_PATH").is_file():
+            print(color("  安装尚未完成：运行 sr install 继续安装。", "warn"))
 
     def main(self):
         menu("SuRelay", [
             ("节点与订阅", self.nodes), ("出口管理", self.exits), ("IPv6 设置", self.ipv6),
             ("域名与证书", self.domain), ("服务与诊断", self.services),
             ("VPS 安全", self.security), ("高级维护", self.advanced),
+            ("卸载 SuRelay", self.uninstall),
         ], self.status)
 
     def nodes(self):
@@ -101,7 +127,7 @@ class Panel:
         print(f"固定出口：服务器直连，入口 {self.m.env['DIRECT_PORT']}/tcp")
         rows = self.m.rows()
         for i, row in enumerate(rows, 1):
-            print(f"{i}. {row['tag']} | {row['type']} | {row['server']}:{row['server_port']} | 入口 {row['listen_port']}/tcp")
+            print(f"{i}) {row['tag']} | {row['type']} | {row['server']}:{row['server_port']} | 入口 {row['listen_port']}/tcp")
         return rows
 
     def select_exit(self):
@@ -216,7 +242,7 @@ class Panel:
         self.m.apply({"SERVER_IP_IPV6": "", "SERVER_IP": self.m.env["SERVER_IP_IPV4"],
                       "ENABLE_IPV6_LISTEN": "false", "PROXY_IP_VERSION": "ipv4"})
         for suffix in ("vless.txt", "nodes.txt", "clash.yaml"):
-            path = Path("/root/reality-relay-bootstrap-v6-" + suffix)
+            path = Path("/root/surelay-v6-" + suffix)
             if path.exists():
                 path.unlink()
 
@@ -271,7 +297,7 @@ class Panel:
         print("原证书与 Nginx 本机站点保留，可再次启用域名时复用。")
 
     def service_action(self, action):
-        names = ["sing-box", "reality-relay-subscription"]
+        names = ["sing-box", self.m.env["SUBSCRIPTION_SERVICE"]]
         choice = ask("服务：1 代理 / 2 订阅 / 3 全部", "3")
         if choice not in {"1", "2", "3"}:
             raise Error("服务选择无效。")
@@ -291,7 +317,7 @@ class Panel:
     def detail_status(self):
         self.status()
         run(["ss", "-lntup"])
-        for service in ("sing-box", "reality-relay-subscription"):
+        for service in ("sing-box", self.m.env["SUBSCRIPTION_SERVICE"]):
             if self.m.alpine():
                 self.m.service(service, "status", check=False)
             else:
@@ -300,11 +326,12 @@ class Panel:
     def logs(self):
         choice = ask("日志：1 SuRelay / 2 sing-box / 3 订阅", "1")
         if choice == "1":
-            run(["tail", "-n", "80", "/var/log/reality-relay-bootstrap.log"], check=False)
+            run(["tail", "-n", "80", "/var/log/surelay.log"], check=False)
         elif choice in {"2", "3"}:
-            name = "sing-box" if choice == "2" else "reality-relay-subscription"
+            name = "sing-box" if choice == "2" else self.m.env["SUBSCRIPTION_SERVICE"]
             if self.m.alpine():
-                run(["tail", "-n", "80", f"/var/log/{name}.log"], check=False)
+                paths = [Path(folder) / f"{name}.log" for folder in ("/var/log/surelay", "/var/log/reality-relay")]
+                run(["tail", "-n", "80", next((p for p in paths if p.exists()), paths[0])], check=False)
             else:
                 run(["journalctl", "-u", name, "-n", "80", "--no-pager"], check=False)
 
@@ -342,7 +369,7 @@ class Panel:
     def show_keys(self):
         _, lines, indexes = self.s.keys()
         for i, index in enumerate(indexes, 1):
-            print(f"{i}. {self.s.validate_key(lines[index])}")
+            print(f"{i}) {self.s.validate_key(lines[index])}")
         return lines, indexes
 
     def key_selection(self):
@@ -421,7 +448,7 @@ class Panel:
     def change_rule(self, replace):
         _, rules = self.s.custom_rules()
         for i, rule in enumerate(rules, 1):
-            print(f"{i}. {rule}")
+            print(f"{i}) {rule}")
         choice = ask("自定义规则编号")
         if not choice.isdigit() or not 1 <= int(choice) <= len(rules):
             raise Error("自定义规则编号无效；其他软件的规则仅展示。")
@@ -484,6 +511,7 @@ class Panel:
             ("更新 SuRelay", self.update_code), ("更新 sing-box", self.update_core),
             ("备份节点配置", self.m.backup), ("恢复节点配置", self.restore),
             ("编辑高级配置并应用", self.edit_config), ("重置并重新安装", self.reset),
+            ("继续安装", self.install), ("迁移旧安装目录", self.migrate),
         ])
 
     def update_code(self):
@@ -525,10 +553,23 @@ class Panel:
         run(["bash", self.m.root / "install.sh", "--reset"])
         self.m.reload()
 
+    def install(self):
+        run(["bash", self.m.root / "install.sh"])
+        raise SystemExit(0)
+
+    def migrate(self):
+        self.m.migrate()
+        raise SystemExit(0)
+
+    def uninstall(self):
+        run(["python3", self.m.root / "scripts/17-reset-install.py",
+             "--project-dir", self.m.root, "--uninstall", "--apply"])
+        raise SystemExit(0)
+
 
 def main():
     parser = argparse.ArgumentParser(prog="sr", description="SuRelay：sr 打开菜单；sr status 查看状态；sr update 更新管理脚本。")
-    parser.add_argument("command", nargs="?", default="menu", choices=["menu", "status", "update", "help"])
+    parser.add_argument("command", nargs="?", default="menu", choices=["menu", "status", "update", "install", "migrate", "uninstall", "help"])
     parser.add_argument("--install-command", action="store_true", help="安装 /usr/local/bin/sr，不修改运行配置")
     args = parser.parse_args()
     if args.command == "help":
@@ -541,8 +582,8 @@ def main():
         install_command()
         return 0
     manager = Manager()
-    if not manager.config.exists():
-        raise Error("尚未安装，请先运行一键安装命令。")
+    if not manager.config.exists() and args.command == "menu":
+        raise Error(f"未找到配置：{manager.config}。首次部署运行 sr install；更新脚本不会自动安装节点。")
     import fcntl
     with open("/run/surelay.lock", "w") as lock:
         try:
@@ -554,6 +595,8 @@ def main():
             panel.status()
         elif args.command == "update":
             manager.update_code()
+        elif args.command in {"install", "migrate", "uninstall"}:
+            getattr(panel, args.command)()
         else:
             if not sys.stdin.isatty():
                 raise Error("菜单需要交互终端；只查看状态可使用 sr status。")

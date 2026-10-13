@@ -1,6 +1,6 @@
-# reality-relay-bootstrap 完整使用手册
+# SuRelay 完整使用手册
 
-> 适用项目：`reality-relay-bootstrap` 
+> 适用项目：`SuRelay`
 > 目标系统：Ubuntu 22.04 / Ubuntu 24.04 / Debian 10-13 / Alpine 3.19。
 > 本文中的 apt、systemctl、journalctl 示例适用于 Debian/Ubuntu；Alpine 请结合 [Alpine 部署说明](docs/alpine.md)，使用 `INSTALL_SINGBOX_METHOD="auto"`、apk 和 OpenRC。
 > 核心目标：新 VPS 可复现部署、SSH 不锁机、fail2ban、UFW、sing-box VLESS+Reality 多入口多出口、客户端节点生成、验证与回滚。
@@ -46,14 +46,14 @@ rollback       -> 回滚 SSH 加固、sing-box 配置，可选处理 UFW
 config.env
 home-proxies.csv
 upstream-nodes.txt
-/etc/reality-relay-bootstrap/vless-uuid.txt
-/etc/reality-relay-bootstrap/reality-private.key
-/etc/reality-relay-bootstrap/reality-public.key
-/etc/reality-relay-bootstrap/reality-short-id.txt
-/etc/reality-relay-bootstrap/home-proxies.csv
-/etc/reality-relay-bootstrap/upstream-nodes.txt
-/root/reality-relay-bootstrap-nodes.txt
-/root/reality-relay-bootstrap-clash.yaml
+/etc/surelay/vless-uuid.txt
+/etc/surelay/reality-private.key
+/etc/surelay/reality-public.key
+/etc/surelay/reality-short-id.txt
+/etc/surelay/home-proxies.csv
+/etc/surelay/upstream-nodes.txt
+/root/surelay-nodes.txt
+/root/surelay-clash.yaml
 ```
 
 完整路径总表见 [`docs/path-map.md`](docs/path-map.md)，里面按路径列出了用途、权限、敏感性和清理建议。
@@ -66,7 +66,7 @@ upstream-nodes.txt
 如果你希望尽量少编辑文件，可以直接使用 `install.sh`。首次只收集基础信息、Cloudflare 配置和管理员公钥，然后生成 `config.env`、`home-proxies.csv` 和 `upstream-nodes.txt`：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh)
 ```
 
 已经 `git clone` 到服务器时，也可以进入项目目录后运行：
@@ -91,14 +91,14 @@ sudo bash install.sh --add-ipv6-node '[2001:db8::10]'
 远程一键入口的参数写在进程替换之后：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh) -6 2001:db8::10
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh) -6 2001:db8::10
 ```
 
 维护模式的前置条件与边界：
 
 1. 安装目录里必须已有 `config.env`，系统必须已有可运行的 sing-box。
 2. `VLESS_UUID_PATH`、Reality private/public key 和 short-id 四份材料必须存在；缺任一项都会在修改前停止。
-3. 修改前会把 `config.env`、当前 sing-box 配置和必要的 UFW 配置放进 `/root/reality-relay-bootstrap-backups/backup-*-ipv6-node/`。
+3. 修改前会把 `config.env`、当前 sing-box 配置和必要的 UFW 配置放进 `/root/surelay-backups/backup-*-ipv6-node/`。
 4. 只更新 `SERVER_IP_IPV6`、`ENABLE_IPV6_LISTEN=true`、`CLIENT_UDP=true`、`RESET_PROXY_KEYS=false`；不会修改 `SERVER_IP_IPV4` 或 `PROXY_IP_VERSION`，因此 v6 只是新增客户端入口地址，原有出口/DNS 策略保持不变。
 5. `net.ipv6.bindv6only=1` 且已有 IPv4 节点时会在修改前停止，避免 `::` 监听导致 v4 节点掉线。重启后还会按每个实际入口端口分别验证 IPv4 和 IPv6 listener。
 6. UFW 启用时会确保 `/etc/default/ufw` 使用 `IPV6=yes`，规则仍只开放实际 VLESS TCP 端口；云厂商 IPv6 安全组需要手动同步。
@@ -108,9 +108,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstr
 输出文件：
 
 ```text
-/root/reality-relay-bootstrap-v6-vless.txt  # 每行一个可导入的 vless:// Reality 分享链接
-/root/reality-relay-bootstrap-v6-nodes.txt  # VLESS 字段文本，含 udp=true
-/root/reality-relay-bootstrap-v6-clash.yaml # Mihomo/Clash，含 ipv6: true 与 udp: true
+/root/surelay-v6-vless.txt  # 每行一个可导入的 vless:// Reality 分享链接
+/root/surelay-v6-nodes.txt  # VLESS 字段文本，含 udp=true
+/root/surelay-v6-clash.yaml # Mihomo/Clash，含 ipv6: true 与 udp: true
 ```
 
 VLESS Reality 使用 TCP 作为承载，但客户端的 UDP 数据会封装在该连接里，所以防火墙不需要额外开放同号 UDP 端口。
@@ -181,10 +181,10 @@ sudo apt update
 sudo apt install git -y
 ```
 
-拉取 `Reality Relay Bootstrap` 项目：
+拉取 `SuRelay` 项目：
 
 ```bash
-git clone https://github.com/suyi-92/reality-relay-bootstrap.git
+git clone https://github.com/suyi-92/SuRelay.git
 ```
 
 ---
@@ -194,7 +194,7 @@ git clone https://github.com/suyi-92/reality-relay-bootstrap.git
 在服务器上执行：
 
 ```bash
-cd reality-relay-bootstrap
+cd surelay
 
 cp config.example.env config.env
 cp home-proxies.example.csv home-proxies.csv
@@ -274,14 +274,14 @@ ENABLE_IPV6_LISTEN="false"
 SFTP_PUBKEY=""
 CSV_PATH="./home-proxies.csv"
 UPSTREAM_NODES_PATH="./upstream-nodes.txt"
-RRB_STATE_DIR="/etc/reality-relay-bootstrap"
+RRB_STATE_DIR="/etc/surelay"
 ENABLE_CUSTOM_DOMAIN="false"
 CUSTOM_DOMAIN=""
 CUSTOM_DOMAIN_PROVIDER="cloudflare"
 LE_EMAIL=""
 LE_STAGING="false"
 CLOUDFLARE_API_TOKEN=""
-CLOUDFLARE_API_TOKEN_FILE="/etc/reality-relay-bootstrap/cloudflare.ini"
+CLOUDFLARE_API_TOKEN_FILE="/etc/surelay/cloudflare.ini"
 CLOUDFLARE_ZONE_NAME=""
 CLOUDFLARE_ACCOUNT_ID=""
 CLOUDFLARE_CREATE_ZONE="false"
@@ -297,11 +297,11 @@ SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 PROXY_PROTOCOL="vless-reality"
 PROXY_IP_VERSION="ipv4"
 RESET_PROXY_KEYS="false"
-VLESS_UUID_PATH="/etc/reality-relay-bootstrap/vless-uuid.txt"
+VLESS_UUID_PATH="/etc/surelay/vless-uuid.txt"
 VLESS_FLOW="xtls-rprx-vision"
-REALITY_PRIVATE_KEY_PATH="/etc/reality-relay-bootstrap/reality-private.key"
-REALITY_PUBLIC_KEY_PATH="/etc/reality-relay-bootstrap/reality-public.key"
-REALITY_SHORT_ID_PATH="/etc/reality-relay-bootstrap/reality-short-id.txt"
+REALITY_PRIVATE_KEY_PATH="/etc/surelay/reality-private.key"
+REALITY_PUBLIC_KEY_PATH="/etc/surelay/reality-public.key"
+REALITY_SHORT_ID_PATH="/etc/surelay/reality-short-id.txt"
 REALITY_SERVER_NAME="www.microsoft.com"
 REALITY_HANDSHAKE_SERVER="www.microsoft.com"
 REALITY_HANDSHAKE_PORT="443"
@@ -439,18 +439,18 @@ HOME_PORT_END="65535"
 `RRB_STATE_DIR` 是默认状态目录，用来保存复制后的 `home-proxies.csv`、VLESS UUID、Reality keypair 和 short-id。除非你明确要迁移目录，否则建议保持默认：
 
 ```bash
-RRB_STATE_DIR="/etc/reality-relay-bootstrap"
+RRB_STATE_DIR="/etc/surelay"
 ```
 
 ```bash
 PROXY_PROTOCOL="vless-reality"
 PROXY_IP_VERSION="ipv4"
 RESET_PROXY_KEYS="false"
-VLESS_UUID_PATH="/etc/reality-relay-bootstrap/vless-uuid.txt"
+VLESS_UUID_PATH="/etc/surelay/vless-uuid.txt"
 VLESS_FLOW="xtls-rprx-vision"
-REALITY_PRIVATE_KEY_PATH="/etc/reality-relay-bootstrap/reality-private.key"
-REALITY_PUBLIC_KEY_PATH="/etc/reality-relay-bootstrap/reality-public.key"
-REALITY_SHORT_ID_PATH="/etc/reality-relay-bootstrap/reality-short-id.txt"
+REALITY_PRIVATE_KEY_PATH="/etc/surelay/reality-private.key"
+REALITY_PUBLIC_KEY_PATH="/etc/surelay/reality-public.key"
+REALITY_SHORT_ID_PATH="/etc/surelay/reality-short-id.txt"
 REALITY_SERVER_NAME="www.microsoft.com"
 REALITY_HANDSHAKE_SERVER="www.microsoft.com"
 REALITY_HANDSHAKE_PORT="443"
@@ -470,15 +470,15 @@ REALITY_MAX_TIME_DIFFERENCE="1m"
 首次执行 `singbox` 阶段时会自动生成：
 
 ```text
-/etc/reality-relay-bootstrap/vless-uuid.txt
-/etc/reality-relay-bootstrap/reality-private.key
-/etc/reality-relay-bootstrap/reality-public.key
-/etc/reality-relay-bootstrap/reality-short-id.txt
+/etc/surelay/vless-uuid.txt
+/etc/surelay/reality-private.key
+/etc/surelay/reality-public.key
+/etc/surelay/reality-short-id.txt
 ```
 
 你一般不需要手动改这些路径。
 
-因此 `/etc/reality-relay-bootstrap/home-proxies.csv` 也按敏感文件处理。
+因此 `/etc/surelay/home-proxies.csv` 也按敏感文件处理。
 
 `REALITY_SERVER_NAME` 和 `REALITY_HANDSHAKE_SERVER` 默认是：
 
@@ -499,7 +499,7 @@ CLOUDFLARE_API_TOKEN="Cloudflare DNS API Token"
 NGINX_FALLBACK_PORT="8443"
 ```
 
-Cloudflare 侧需要先在控制台添加/托管 zone，并到域名注册商把 NS 改成 Cloudflare 分配的 nameserver。脚本默认会用 API token 创建或更新 `CUSTOM_DOMAIN` 的 A/AAAA 记录，`proxied=false`，也就是灰云 / DNS only。公网 `443` 继续由 sing-box 监听，普通 TLS fallback 到本机 Nginx `127.0.0.1:8443`；Nginx 默认站点根目录是 `/var/www/reality-fallback`，会写入 `Digital Notes` 静态首页、`robots.txt` 和空 `favicon.ico`。`REALITY_SERVER_NAME` 会自动回填为 `CUSTOM_DOMAIN`，`REALITY_HANDSHAKE_SERVER` 会回填为 `127.0.0.1`，`REALITY_HANDSHAKE_PORT` 会回填为 `NGINX_FALLBACK_PORT`。订阅服务启用时只绑定本机，并通过 `https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta` 对外访问。
+Cloudflare 侧需要先在控制台添加/托管 zone，并到域名注册商把 NS 改成 Cloudflare 分配的 nameserver。脚本默认会用 API token 创建或更新 `CUSTOM_DOMAIN` 的 A/AAAA 记录，`proxied=false`，也就是灰云 / DNS only。公网 `443` 继续由 sing-box 监听，普通 TLS fallback 到本机 Nginx `127.0.0.1:8443`；Nginx 默认站点根目录是 `/var/www/surelay-fallback`，会写入 `Digital Notes` 静态首页、`robots.txt` 和空 `favicon.ico`。`REALITY_SERVER_NAME` 会自动回填为 `CUSTOM_DOMAIN`，`REALITY_HANDSHAKE_SERVER` 会回填为 `127.0.0.1`，`REALITY_HANDSHAKE_PORT` 会回填为 `NGINX_FALLBACK_PORT`。订阅服务启用时只绑定本机，并通过 `https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta` 对外访问。
 
 ### 5.7 客户端输出变量
 
@@ -645,7 +645,7 @@ sudo bash bootstrap.sh --phase firewall --dry-run
 也可以显式指定配置文件路径：
 
 ```bash
-sudo bash bootstrap.sh --phase preflight --config /root/reality-relay-bootstrap/config.env
+sudo bash bootstrap.sh --phase preflight --config /root/surelay/config.env
 ```
 
 `--yes` 当前为预留参数；危险步骤仍必须使用 `CONFIRM_*` 环境变量显式确认：
@@ -791,12 +791,12 @@ sudo bash bootstrap.sh --phase singbox
 
 ```text
 /etc/sing-box/config.json
-/etc/reality-relay-bootstrap/vless-uuid.txt
-/etc/reality-relay-bootstrap/reality-private.key
-/etc/reality-relay-bootstrap/reality-public.key
-/etc/reality-relay-bootstrap/reality-short-id.txt
-/etc/reality-relay-bootstrap/home-proxies.csv
-/etc/reality-relay-bootstrap/subscription/
+/etc/surelay/vless-uuid.txt
+/etc/surelay/reality-private.key
+/etc/surelay/reality-public.key
+/etc/surelay/reality-short-id.txt
+/etc/surelay/home-proxies.csv
+/etc/surelay/subscription/
 ```
 
 ### 8.7 配置 UFW 防火墙
@@ -868,9 +868,9 @@ sudo bash bootstrap.sh --phase output-nodes
 查看：
 
 ```bash
-sudo cat /root/reality-relay-bootstrap-nodes.txt
-sudo cat /root/reality-relay-bootstrap-clash.yaml
-sudo cat /root/reality-relay-bootstrap-vless.txt
+sudo cat /root/surelay-nodes.txt
+sudo cat /root/surelay-clash.yaml
+sudo cat /root/surelay-vless.txt
 ```
 
 默认订阅端口配置：
@@ -904,7 +904,7 @@ http://服务器IP:51040/sub/<VLESS_UUID>?target=ClashMeta
 https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta
 ```
 
-`<VLESS_UUID>` 来自 `/etc/reality-relay-bootstrap/vless-uuid.txt`。内置订阅服务是 HTTP；未启用自有域名时如需 HTTPS，请在外层接入带证书的反向代理，并把 `SUBSCRIPTION_BASE_URL` 设置为反代外部地址。启用自有域名时，订阅服务默认只监听本机 `SUBSCRIPTION_INTERNAL_PORT`，外部 HTTPS 由 sing-box Reality fallback 到 Nginx 后反代。
+`<VLESS_UUID>` 来自 `/etc/surelay/vless-uuid.txt`。内置订阅服务是 HTTP；未启用自有域名时如需 HTTPS，请在外层接入带证书的反向代理，并把 `SUBSCRIPTION_BASE_URL` 设置为反代外部地址。启用自有域名时，订阅服务默认只监听本机 `SUBSCRIPTION_INTERNAL_PORT`，外部 HTTPS 由 sing-box Reality fallback 到 Nginx 后反代。
 启用自有域名时，`SUBSCRIPTION_PORT` 默认留空；显式填写它时会额外开放 `http://SERVER_IP:SUBSCRIPTION_PORT/sub/...` 直连订阅；简洁输出仍只显示首选域名链接。
 
 `SUBSCRIPTION_TARGET` 当前只生成 ClashMeta/Mihomo YAML；旧配置里的其它 target 会警告并按 ClashMeta 处理，旧 URL target 不再兼容。
@@ -920,7 +920,7 @@ https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta
 首次部署推荐按下面顺序：
 
 ```bash
-cd /root/reality-relay-bootstrap
+cd /root/surelay
 
 cp config.example.env config.env
 nano config.env
@@ -968,7 +968,7 @@ home-02
 
 ## 11. 客户端节点信息
 
-`/root/reality-relay-bootstrap-clash.yaml` 会生成 Clash/Mihomo 可用配置。
+`/root/surelay-clash.yaml` 会生成 Clash/Mihomo 可用配置。
 
 节点字段示例：
 
@@ -992,7 +992,7 @@ proxies:
       - "http/1.1"
 ```
 
-`/root/reality-relay-bootstrap-nodes.txt` 是纯文本字段，便于你复制到其他客户端或订阅管理工具。
+`/root/surelay-nodes.txt` 是纯文本字段，便于你复制到其他客户端或订阅管理工具。
 
 注意：这两个文件包含 UUID 和 Reality public key/short-id。虽然 public key 不像 private key 那么敏感，但完整节点仍应当当作敏感信息处理。
 
@@ -1040,7 +1040,7 @@ ssh -p 22 -o PubkeyAuthentication=no -o PreferredAuthentications=password root@�
 把服务器上的文件复制到本地：
 
 ```bash
-sudo cat /root/reality-relay-bootstrap-clash.yaml
+sudo cat /root/surelay-clash.yaml
 ```
 
 复制内容到本地文件，例如：
@@ -1080,7 +1080,7 @@ home-02 -> home-02 对应家宽出口 IP
 编辑 CSV：
 
 ```bash
-cd /root/reality-relay-bootstrap
+cd /root/surelay
 nano home-proxies.csv
 ```
 
@@ -1105,7 +1105,7 @@ sudo bash bootstrap.sh --phase output-nodes
 TCP 51045
 ```
 
-最后把新的 `/root/reality-relay-bootstrap-clash.yaml` 导入客户端，或更新你的订阅管理工具。
+最后把新的 `/root/surelay-clash.yaml` 导入客户端，或更新你的订阅管理工具。
 
 ---
 
@@ -1114,7 +1114,7 @@ TCP 51045
 编辑 CSV，删除对应行：
 
 ```bash
-cd /root/reality-relay-bootstrap
+cd /root/surelay
 nano home-proxies.csv
 ```
 
@@ -1159,7 +1159,7 @@ RESET_PROXY_KEYS="false"
 ### 16.1 更换 UUID
 
 ```bash
-sudo rm -f /etc/reality-relay-bootstrap/vless-uuid.txt
+sudo rm -f /etc/surelay/vless-uuid.txt
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase output-nodes
 ```
@@ -1167,9 +1167,9 @@ sudo bash bootstrap.sh --phase output-nodes
 ### 16.2 更换 Reality keypair 和 short-id
 
 ```bash
-sudo rm -f /etc/reality-relay-bootstrap/reality-private.key
-sudo rm -f /etc/reality-relay-bootstrap/reality-public.key
-sudo rm -f /etc/reality-relay-bootstrap/reality-short-id.txt
+sudo rm -f /etc/surelay/reality-private.key
+sudo rm -f /etc/surelay/reality-public.key
+sudo rm -f /etc/surelay/reality-short-id.txt
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase output-nodes
 ```
@@ -1177,7 +1177,7 @@ sudo bash bootstrap.sh --phase output-nodes
 更换后必须重新导入：
 
 ```text
-/root/reality-relay-bootstrap-clash.yaml
+/root/surelay-clash.yaml
 ```
 
 ---
@@ -1218,10 +1218,10 @@ sudo ufw disable
 
 ### 17.4 指定备份目录回滚
 
-默认 rollback 会使用 `/root/reality-relay-bootstrap-backups/` 下最新的备份目录。需要指定某个备份目录时：
+默认 rollback 会使用 `/root/surelay-backups/` 下最新的备份目录。需要指定某个备份目录时：
 
 ```bash
-sudo CONFIRM_ROLLBACK=yes ROLLBACK_BACKUP_DIR=/root/reality-relay-bootstrap-backups/backup-xxxx bash bootstrap.sh --phase rollback
+sudo CONFIRM_ROLLBACK=yes ROLLBACK_BACKUP_DIR=/root/surelay-backups/backup-xxxx bash bootstrap.sh --phase rollback
 ```
 
 ### 17.5 从备份恢复 UFW 配置
@@ -1245,13 +1245,13 @@ sudo CONFIRM_ROLLBACK=yes RESTORE_233BOY_CONF=yes bash bootstrap.sh --phase roll
 日志文件：
 
 ```text
-/var/log/reality-relay-bootstrap.log
+/var/log/surelay.log
 ```
 
 备份目录：
 
 ```text
-/root/reality-relay-bootstrap-backups/
+/root/surelay-backups/
 ```
 
 常见备份内容：
@@ -1267,7 +1267,7 @@ sudo CONFIRM_ROLLBACK=yes RESTORE_233BOY_CONF=yes bash bootstrap.sh --phase roll
 查看最近备份：
 
 ```bash
-sudo ls -lah /root/reality-relay-bootstrap-backups/
+sudo ls -lah /root/surelay-backups/
 ```
 
 ---
@@ -1306,8 +1306,8 @@ sudo cat /root/.ssh/authorized_keys
 不要关闭旧窗口。先临时移除加固 drop-in：
 
 ```bash
-sudo rm -f /etc/ssh/sshd_config.d/00-reality-relay-bootstrap-hardening.conf
-sudo rm -f /etc/ssh/sshd_config.d/00-reality-relay-bootstrap-phase1.conf
+sudo rm -f /etc/ssh/sshd_config.d/00-surelay-hardening.conf
+sudo rm -f /etc/ssh/sshd_config.d/00-surelay-phase1.conf
 sudo /usr/sbin/sshd -t
 sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd
 ```
@@ -1437,7 +1437,7 @@ sudo bash bootstrap.sh --phase validate
 [ ] 服务商安全组放行 SSH_PORT、DIRECT_PORT、CSV 端口
 [ ] Test-NetConnection 443 成功
 [ ] Test-NetConnection 51043 成功
-[ ] /root/reality-relay-bootstrap-clash.yaml 已生成
+[ ] /root/surelay-clash.yaml 已生成
 [ ] 客户端导入节点后能连接
 [ ] SERVER_ALIAS 对应的 443 节点出口是 VPS 自身公网 IP
 [ ] 每个家宽节点出口 IP 符合预期
@@ -1451,8 +1451,8 @@ sudo bash bootstrap.sh --phase validate
 
 ```bash
 cd /root
-unzip reality-relay-bootstrap.zip
-cd reality-relay-bootstrap
+unzip surelay.zip
+cd surelay
 
 cp config.example.env config.env
 nano config.env

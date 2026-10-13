@@ -87,13 +87,13 @@ install_by_233boy() {
     log "DRY-RUN: download and run 233boy install.sh, then disable /etc/sing-box/conf"
     return 0
   fi
-  mkdir -p /root/reality-relay-bootstrap-cache
-  curl -fsSL https://github.com/233boy/sing-box/raw/main/install.sh -o /root/reality-relay-bootstrap-cache/233boy-install.sh
-  chmod 700 /root/reality-relay-bootstrap-cache/233boy-install.sh
+  mkdir -p /root/surelay-cache
+  curl -fsSL https://github.com/233boy/sing-box/raw/main/install.sh -o /root/surelay-cache/233boy-install.sh
+  chmod 700 /root/surelay-cache/233boy-install.sh
   if [[ "$RRB_VERBOSE" == "true" ]]; then
-    bash /root/reality-relay-bootstrap-cache/233boy-install.sh 2>&1 | tee -a "$LOG_FILE"
+    bash /root/surelay-cache/233boy-install.sh 2>&1 | tee -a "$LOG_FILE"
   else
-    bash /root/reality-relay-bootstrap-cache/233boy-install.sh >>"$LOG_FILE" 2>&1
+    bash /root/surelay-cache/233boy-install.sh >>"$LOG_FILE" 2>&1
   fi
   local stamp
   stamp="$(date '+%Y%m%d-%H%M%S')"

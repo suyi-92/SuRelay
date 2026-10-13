@@ -17,7 +17,7 @@ Cloudflare 记录保持 DNS only / 灰云，A 记录指向服务商公网 IPv4�
 先更新到包含 NAT 端口支持的项目版本，再以 root 操作。保留当前 SSH 窗口，先备份配置：
 
 ```sh
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 git pull --ff-only origin main
 cp -p config.env "config.env.before-nat-$(date +%Y%m%d-%H%M%S).bak"
 nano config.env
@@ -40,7 +40,7 @@ RESET_PROXY_KEYS="false"
 只更新代理配置、订阅和防火墙即可。下面先进行配置校验，通过后才写入并重启代理；不会重跑 SSH 加固、重新签发证书或生成密钥：
 
 ```sh
-cd /opt/reality-relay-bootstrap &&
+cd /opt/SuRelay &&
 python3 scripts/08-generate-singbox-config.py --config-env config.env --check-only --quiet &&
 python3 scripts/08-generate-singbox-config.py --config-env config.env --write --quiet &&
 bash scripts/10-validate.sh --singbox-only --skip-proxy-tests --restart-singbox &&

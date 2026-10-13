@@ -7,29 +7,29 @@
 在已更新代码的服务器项目目录，以 root 执行：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 bash install.sh --reset
 ```
 
 Ubuntu/Debian 的远程入口：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh) --reset
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh) --reset
 ```
 
 Alpine 3.19 的远程入口：
 
 ```sh
 apk add --no-cache bash curl ca-certificates
-curl -fsSL https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh -o /tmp/reality-relay-install.sh
-bash /tmp/reality-relay-install.sh --reset
+curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh -o /tmp/surelay-install.sh
+bash /tmp/surelay-install.sh --reset
 ```
 
 远程入口下载已发布的 main；尚未推送的功能需复制完整项目后使用本地入口。
 
 1. 检查系统、现有配置路径、服务与文件归属，显示实际删除清单。
 2. 输入大写 `RESET` 确认；其他输入或 EOF 取消，旧部署不变。
-3. 在 `/root/reality-relay-bootstrap-backups/reset-*` 创建仅 root 可读的 `files.tar.gz` 和 `manifest.json`。逐文件核验备份后才停止服务；磁盘满、文件读取失败等错误会阻止卸载。
+3. 在 `/root/surelay-backups/reset-*` 创建仅 root 可读的 `files.tar.gz` 和 `manifest.json`。逐文件核验备份后才停止服务；磁盘满、文件读取失败等错误会阻止卸载。
 4. 停止并禁用旧 sing-box/订阅服务；删除已列出的项目文件，清理带项目标记的代理/订阅 UFW 规则，重载共享 Nginx/fail2ban。OpenRC 从所有已登记运行级别移除专用服务。
 5. 重新收集配置、公钥、可选域名信息，创建空出口列表。检查系统、更新 root 公钥后，保留当前 SSH 策略并要求第二个终端验证；确认后替换最终 SSH 策略及旧项目 SFTP Match 块，继续安装。
 
@@ -49,14 +49,14 @@ bash /tmp/reality-relay-install.sh --reset
 | SSH/用户 | 卸载时保留 SSH 服务、策略、root 公钥、系统账户及 SFTP 上传目录；新公钥验证成功后才替换项目 SSH/SFTP 策略。不会删除历史公钥。 |
 | 其他 | 保留软件包、Cloudflare DNS、服务商安全组、历史备份和排障日志。隔离的旧 233boy 配置及第三方管理工具不作递归清理。 |
 
-重置支持默认目录，以及具有 `reality-relay-bootstrap` / `reality-relay-bootstrap-*` 名称的专用 state 目录；密钥和订阅必须位于该目录内。自定义 sing-box 路径、项目外出口输入、无归属标记的同名 Nginx 配置、指向其他位置的目录符号链接，会在卸载前报错。先核实并迁回支持的路径再执行，不能用批量删除绕过。证书共享检查覆盖 Nginx、Apache、HTTPD、HAProxy 和 Caddy 配置；其他应用共享证书时，应先迁出该项目的证书/凭据管理。
+重置支持默认目录，以及具有 `surelay` / `surelay-*` 名称的专用 state 目录；密钥和订阅必须位于该目录内。自定义 sing-box 路径、项目外出口输入、无归属标记的同名 Nginx 配置、指向其他位置的目录符号链接，会在卸载前报错。先核实并迁回支持的路径再执行，不能用批量删除绕过。证书共享检查覆盖 Nginx、Apache、HTTPD、HAProxy 和 Caddy 配置；其他应用共享证书时，应先迁出该项目的证书/凭据管理。
 
 ## 只预览
 
 不传 `--apply` 时，只读取清单和防火墙规则，不备份、停止服务或删除：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 python3 scripts/17-reset-install.py --project-dir "$PWD"
 ```
 
@@ -67,7 +67,7 @@ python3 scripts/17-reset-install.py --project-dir "$PWD"
 如果要放弃新配置、恢复旧部署，保留当前 SSH 会话，先检查指定的备份内容（将目录替换为实际值）：
 
 ```bash
-backup=/root/reality-relay-bootstrap-backups/reset-实际目录
+backup=/root/surelay-backups/reset-实际目录
 tar -tzf "$backup/files.tar.gz"
 cat "$backup/manifest.json"
 ```

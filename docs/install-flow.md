@@ -68,7 +68,7 @@ sudo bash bootstrap.sh --phase singbox
 此阶段会：
 
 1. 安装 sing-box。
-2. 复制 `home-proxies.csv` 到 `/etc/reality-relay-bootstrap/home-proxies.csv`，如果存在也会复制 `upstream-nodes.txt`。
+2. 复制 `home-proxies.csv` 到 `/etc/surelay/home-proxies.csv`，如果存在也会复制 `upstream-nodes.txt`。
 3. 生成 VLESS UUID、Reality keypair、short-id。
 4. 生成 `/etc/sing-box/config.json`。
 5. 执行 `sing-box check`。

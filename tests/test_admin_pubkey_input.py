@@ -45,6 +45,7 @@ set -Eeuo pipefail
 BOLD='' DIM='' CYAN='' RESET=''
 INPUT_TTY="$1"
 line() { :; }
+section() { printf '%s\\n' "$*"; }
 info() { printf 'INFO: %s\\n' "$*"; }
 warn() { printf 'WARN: %s\\n' "$*" >&2; }
 die() { printf 'ERROR: %s\\n' "$*" >&2; exit 1; }

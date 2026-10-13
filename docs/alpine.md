@@ -13,8 +13,8 @@ Alpine 3.19 使用 apk、OpenRC 和 musl。安装、维护、`-6` 和回滚使�
 
 ```sh
 apk add --no-cache bash curl ca-certificates
-curl -fsSL https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh -o /tmp/reality-relay-install.sh
-bash /tmp/reality-relay-install.sh
+curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh -o /tmp/surelay-install.sh
+bash /tmp/surelay-install.sh
 ```
 
 本地尚未发布的修改应复制整个项目到服务器，再在该目录执行 `bash install.sh`；远程入口只会取得已推送的分支内容。安装过程中仍须在第二个终端验证 root 公钥登录后，才关闭密码登录。
@@ -27,12 +27,12 @@ bash /tmp/reality-relay-install.sh
 | --- | --- |
 | `INSTALL_SINGBOX_METHOD=auto` | 选择 `release`。从 SagerNet 官方 Release 下载固定的 sing-box 1.14.3 Linux musl 归档，按架构检查固定 SHA256；替换前运行版本检查和现有配置检查。没有隐式升级到 latest。 |
 | sing-box 服务 | 程序位于 `/usr/local/bin/sing-box`，通过 `/etc/init.d/sing-box` 和 `/etc/conf.d/sing-box` 启动；OpenRC supervise-daemon 负责进程和有限次数的失败重启。 |
-| 订阅 | `/etc/init.d/reality-relay-subscription` 与对应 `conf.d` 保存启动参数；保留原有 token、监听地址和权限。 |
+| 订阅 | `/etc/init.d/surelay-subscription` 与对应 `conf.d` 保存启动参数；保留原有 token、监听地址和权限。 |
 | SSH/SFTP | 使用 `sshd` OpenRC 服务和 shadow 用户管理。SFTP 账户使用丢弃的随机密码代替锁定密码标记，因为非 PAM OpenSSH 会拒绝锁定账户的公钥；最终 Match 策略仍只允许公钥和 internal-sftp。 |
 | fail2ban | 使用 `polling` 文件后端。默认检查 `/var/log/messages`，可通过 `FAIL2BAN_SSH_LOG` 指定实际日志。安装前发送一条 authpriv 探针，确认日志确实可读；没有现有 syslog 服务时启动系统自带的 syslog。 |
 | UFW | 安装 OpenRC 服务和 IPv6 iptables 工具；先放行 SSH，再应用实际入口和订阅端口，启用 IPv6 时同步 `IPV6=yes`，添加开机启动。 |
-| Nginx | `NGINX_FALLBACK_CONF=auto` 使用 `/etc/nginx/http.d/reality-relay-bootstrap.conf`。自定义路径会链接到 `http.d`，`nginx -t` 通过后才重载。 |
-| 证书 | `/opt/reality-relay-certbot` 独立 Python 环境安装固定版本的 Certbot、ACME 和 Cloudflare 插件（4.0.0）。`requirements/alpine-certbot.txt` 固定完整依赖的官方文件 URL 和 SHA256，跳过版本索引解析、依赖搜索、缓存和预编译；原生依赖使用 musl wheel，仅 Cloudflare 的小型纯 Python 源码包在本地打包。安装后运行 `pip check`，不修改系统 Python 包。每日 cron 执行续期，成功后通过 OpenRC 重载 Nginx。 |
+| Nginx | `NGINX_FALLBACK_CONF=auto` 使用 `/etc/nginx/http.d/surelay.conf`。自定义路径会链接到 `http.d`，`nginx -t` 通过后才重载。 |
+| 证书 | `/opt/surelay-certbot` 独立 Python 环境安装固定版本的 Certbot、ACME 和 Cloudflare 插件（4.0.0）。`requirements/alpine-certbot.txt` 固定完整依赖的官方文件 URL 和 SHA256，跳过版本索引解析、依赖搜索、缓存和预编译；原生依赖使用 musl wheel，仅 Cloudflare 的小型纯 Python 源码包在本地打包。安装后运行 `pip check`，不修改系统 Python 包。每日 cron 执行续期，成功后通过 OpenRC 重载 Nginx。 |
 
 Debian/Ubuntu 的 `auto` 仍使用原有 APT 和 systemd 流程。`apt`、`233boy` 不能用于 Alpine；从其他机器复制来的旧配置应先修改安装方式。
 
@@ -42,16 +42,16 @@ Debian/Ubuntu 的 `auto` 仍使用原有 APT 和 systemd 流程。`apt`、`233bo
 rc-status default
 rc-service sshd status
 rc-service sing-box status
-rc-service reality-relay-subscription status
+rc-service surelay-subscription status
 rc-service fail2ban status
 fail2ban-client status sshd
 ufw status verbose
-tail -n 80 /var/log/reality-relay/sing-box.log
-tail -n 80 /var/log/reality-relay/reality-relay-subscription.log
+tail -n 80 /var/log/surelay/sing-box.log
+tail -n 80 /var/log/surelay/surelay-subscription.log
 tail -n 80 /var/log/messages
 ```
 
-自有域名模式另检查 `rc-service nginx status`、`rc-service crond status` 和 `/opt/reality-relay-certbot/bin/certbot certificates`。首次签发、实际 Cloudflare DNS 权限和公网端口连通性必须用部署者的真实域名验证。
+自有域名模式另检查 `rc-service nginx status`、`rc-service crond status` 和 `/opt/surelay-certbot/bin/certbot certificates`。首次签发、实际 Cloudflare DNS 权限和公网端口连通性必须用部署者的真实域名验证。
 
 ### 小内存主机从证书安装失败处继续
 
@@ -60,7 +60,7 @@ tail -n 80 /var/log/messages
 更新项目中的 `scripts/00-platform.sh` 和 `requirements/alpine-certbot.txt` 后，如果已经完成 sing-box、订阅和 DNS，而失败停在 Certbot 安装，可沿用现有配置继续：
 
 ```sh
-cd /opt/reality-relay-bootstrap &&
+cd /opt/SuRelay &&
 bash bootstrap.sh --phase custom-domain --verbose &&
 bash bootstrap.sh --phase firewall --verbose &&
 bash bootstrap.sh --phase validate --verbose &&

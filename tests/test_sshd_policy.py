@@ -132,7 +132,7 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
         for source, target in [("/etc/ssh", self.ssh_dir), ("/etc/sing-box", self.root / "sing-box"), ("/etc/ufw", self.root / "ufw")]:
             library = library.replace(source, str(target))
             phase = phase.replace(source, str(target))
-        phase = phase.replace("/tmp/reality-relay-bootstrap-sshd-test.err", str(self.root / "sshd-test.err"))
+        phase = phase.replace("/tmp/surelay-sshd-test.err", str(self.root / "sshd-test.err"))
         backup = self.root / "backups" / f"backup-{len(self.backups):03d}-{script_name}"
         self.backups.append(backup)
         variables = {
@@ -183,8 +183,8 @@ getent() {{
         self.assertEqual(self.provider.read_bytes(), self.provider_bytes)
 
     def test_reproduces_provider_conflict_then_migrates_legacy_files(self):
-        legacy_final = self.dropins / "00-reality-relay-bootstrap-hardening.conf"
-        legacy_phase1 = self.dropins / "00-reality-relay-bootstrap-phase1.conf"
+        legacy_final = self.dropins / "00-surelay-hardening.conf"
+        legacy_phase1 = self.dropins / "00-surelay-phase1.conf"
         legacy_final.write_bytes(FINAL)
         legacy_phase1.write_bytes(PHASE1)
         before = self.effective()
@@ -253,7 +253,7 @@ getent() {{
         self.assertEqual(self.config.read_bytes().count(POLICY.BEGIN), 1)
 
     def test_dry_run_does_not_migrate_or_write_policy(self):
-        legacy = self.dropins / "00-reality-relay-bootstrap-hardening.conf"
+        legacy = self.dropins / "00-surelay-hardening.conf"
         legacy.write_bytes(FINAL)
         self.assert_success(self.run_phase("03-ssh-hardening-phase1.sh", dry_run=True))
         self.assertEqual(self.config.read_bytes(), self.original)

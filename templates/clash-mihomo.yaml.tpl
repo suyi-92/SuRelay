@@ -1,5 +1,5 @@
 # VLESS+Reality Clash/Mihomo template.
-# 实际节点由 scripts/11-output-nodes.py 生成到 /root/reality-relay-bootstrap-clash.yaml。
+# 实际节点由 scripts/11-output-nodes.py 生成到 /root/surelay-clash.yaml。
 
 mixed-port: 7890
 allow-lan: false

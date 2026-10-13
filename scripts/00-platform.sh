@@ -123,7 +123,7 @@ values = dict(command=sys.argv[1], directory=sys.argv[2], rrb_check_config=sys.a
 for key, value in values.items():
     print(f"{key}={shlex.quote(value)}")
 PY
-  write_root_file "/etc/init.d/$name" 0755 <"$RRB_PROJECT_DIR/templates/rrb-service.openrc"
+  write_root_file "/etc/init.d/$name" 0755 <"$RRB_PROJECT_DIR/templates/surelay-service.openrc"
 }
 
 resolve_platform_config() {
@@ -132,9 +132,13 @@ resolve_platform_config() {
   fi
   if [[ "$NGINX_FALLBACK_CONF" == auto ]]; then
     if is_alpine; then
-      NGINX_FALLBACK_CONF=/etc/nginx/http.d/reality-relay-bootstrap.conf
+      NGINX_FALLBACK_CONF=/etc/nginx/http.d/surelay.conf
     else
-      NGINX_FALLBACK_CONF=/etc/nginx/sites-available/reality-relay-bootstrap.conf
+      NGINX_FALLBACK_CONF=/etc/nginx/sites-available/surelay.conf
+    fi
+    local legacy_conf="${NGINX_FALLBACK_CONF%/*}/reality-relay-bootstrap.conf"
+    if [[ -f "$legacy_conf" && ! -e "$NGINX_FALLBACK_CONF" ]]; then
+      NGINX_FALLBACK_CONF="$legacy_conf"
     fi
   fi
 }
@@ -232,19 +236,22 @@ ensure_ufw_ipv6() {
 install_certbot() {
   if is_alpine; then
     pkg_install python3 py3-virtualenv
-    CERTBOT_BIN=/opt/reality-relay-certbot/bin/certbot
+    CERTBOT_BIN=/opt/surelay-certbot/bin/certbot
+    if [[ -x /opt/reality-relay-certbot/bin/certbot && ! -e "$CERTBOT_BIN" ]]; then
+      CERTBOT_BIN=/opt/reality-relay-certbot/bin/certbot
+    fi
     if [[ ! -x "$CERTBOT_BIN" ]]; then
       # Avoid concurrent background downloads/updates on memory-limited hosts.
       # Already cached seed versions are still supported by the dependency lock.
-      run python3 -m virtualenv --no-periodic-update /opt/reality-relay-certbot
+      run python3 -m virtualenv --no-periodic-update /opt/surelay-certbot
     fi
     # Version-index parsing can exhaust a 256 MiB VPS before any wheel installs.
     # Direct hashed artifacts bound resolver memory; native dependencies use musl
     # wheels. Only the small pure-Python Cloudflare source needs a local build.
-    run /opt/reality-relay-certbot/bin/pip install --no-input --disable-pip-version-check \
+    run "${CERTBOT_BIN%/*}/pip" install --no-input --disable-pip-version-check \
       --no-index --no-deps --no-build-isolation --no-cache-dir --no-compile --require-hashes \
       -r "$RRB_PROJECT_DIR/requirements/alpine-certbot.txt"
-    run /opt/reality-relay-certbot/bin/pip check
+    run "${CERTBOT_BIN%/*}/pip" check
   else
     pkg_install certbot python3-certbot-dns-cloudflare
     CERTBOT_BIN=certbot

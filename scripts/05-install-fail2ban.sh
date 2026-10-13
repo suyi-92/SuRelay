@@ -28,7 +28,7 @@ else
   mkdir -p /etc/fail2ban/jail.d
 fi
 write_root_file /etc/fail2ban/jail.d/sshd.local 0644 <<EOF
-# Managed by reality-relay-bootstrap.
+# Managed by surelay.
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1
 bantime = 1h

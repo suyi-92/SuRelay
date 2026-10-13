@@ -69,10 +69,11 @@ from pathlib import Path
 user = sys.argv[1]
 path = Path("/etc/ssh/sshd_config")
 if path.exists():
-    start = f"# BEGIN reality-relay-bootstrap SFTP user {user}"
-    end = f"# END reality-relay-bootstrap SFTP user {user}"
     text = path.read_text(encoding="utf-8", errors="replace")
-    text = re.sub(re.escape(start) + r".*?" + re.escape(end) + r"\n?", "", text, flags=re.S)
+    for name in ('surelay', 'reality-relay-bootstrap'):
+        start = f"# BEGIN {name} SFTP user {user}"
+        end = f"# END {name} SFTP user {user}"
+        text = re.sub(re.escape(start) + r".*?" + re.escape(end) + r"\n?", "", text, flags=re.S)
     path.write_text(text, encoding="utf-8")
 PY
 fi

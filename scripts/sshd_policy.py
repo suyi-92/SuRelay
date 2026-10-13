@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 
 
-BEGIN = b"# BEGIN reality-relay-bootstrap SSH policy"
-END = b"# END reality-relay-bootstrap SSH policy"
+BEGIN = b"# BEGIN surelay SSH policy"
+END = b"# END surelay SSH policy"
+LEGACY_BEGIN = b"# BEGIN reality-relay-bootstrap SSH policy"
+LEGACY_END = b"# END reality-relay-bootstrap SSH policy"
 BOM = b"\xef\xbb\xbf"
 
 
@@ -21,11 +23,11 @@ def remove_policy(config: bytes) -> bytes:
     seen = False
     for line in body.splitlines(keepends=True):
         marker = line.rstrip(b"\r\n")
-        if marker == BEGIN:
+        if marker in (BEGIN, LEGACY_BEGIN):
             if inside or seen:
                 raise ValueError("SSH policy block is duplicated or nested; inspect sshd_config before retrying")
             inside = seen = True
-        elif marker == END:
+        elif marker in (END, LEGACY_END):
             if not inside:
                 raise ValueError("SSH policy block has an unmatched end marker")
             inside = False
@@ -39,7 +41,7 @@ def remove_policy(config: bytes) -> bytes:
 def apply_policy(config: bytes, policy: bytes) -> bytes:
     remaining = remove_policy(config)
     policy_lines = policy.splitlines()
-    if not policy.strip() or BEGIN in policy_lines or END in policy_lines:
+    if not policy.strip() or any(m in policy_lines for m in (BEGIN, END, LEGACY_BEGIN, LEGACY_END)):
         raise ValueError("SSH policy must be nonempty and must not contain managed block markers")
     bom = BOM if remaining.startswith(BOM) else b""
     body = remaining[len(bom):]

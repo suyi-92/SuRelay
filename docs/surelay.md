@@ -4,9 +4,13 @@
 
 ## 更新与兼容
 
-旧部署在原项目目录快进更新代码后执行 bash surelay.sh --install-command，然后运行 sr。日常使用 sr update；只允许干净 main 分支快进到 origin/main，本地独有提交或修改会阻止更新。菜单不会在打开时联网更新。
+项目与 GitHub 仓库名称为 **SuRelay**，新安装代码目录为 `/opt/SuRelay`，运行数据为 `/etc/surelay`。旧安装执行 README 顶部的更新命令，自动迁移默认代码目录并更新仓库地址；自定义目录原地更新。也可在更新代码后执行 `bash surelay.sh migrate`。
 
-仓库与 /opt/reality-relay-bootstrap、/etc/reality-relay-bootstrap、原服务名和备份目录保持兼容。升级代码不改动配置；首次安装默认 IPv4，已有 IPv6 配置继续保留。脚本更新和内核更新是两个独立选项；Alpine 内核采用项目校验过的固定版本，不承诺自动跟随上游最新版。
+迁移先备份配置与 sr 入口，再将旧代码目录移到新目录，留下旧路径兼容链接。已存在新目录时停止，不覆盖另一份安装。旧部署的运行数据、订阅服务、证书和 SSH 策略继续按原路径识别，不重启服务或轮换身份；新安装使用新的路径与服务名。`RRB_*` 环境变量仍兼容旧自动化。
+
+日常使用 `sr update`：只允许干净 main 分支快进到 origin/main，本地独有提交或修改会阻止更新。菜单打开时不联网更新。脚本与内核分开更新；Alpine 内核采用项目校验过的固定版本。
+
+如果首次安装停在 SSH 验证，面板会提示「安装尚未完成」，执行 `sr install` 继续；更新代码和注册 sr 本身不等于部署完成。
 
 IPv6-only VPS 请按 [分阶段流程](install-flow.md) 准备 config.env：填写 IPv6、将 SERVER_IP_IPV4 留空、设置 ENABLE_IPV6_LISTEN=true 与 PROXY_IP_VERSION=ipv6，再执行已有配置的安装流程。
 
@@ -29,10 +33,16 @@ IPv6 在手动选择启用后才探测。关闭 IPv6 要求已有 IPv4，关闭�
 - 关闭密码认证需要再次验证公钥登录。临时开启密码认证不设置密码、不解锁账号；重跑完整安装的最终加固阶段会重新关闭密码认证。
 - fail2ban 设置仅作用于 sshd jail；停用不关闭其他 jail。白名单、封禁参数和端口写入专用配置。
 
-SSH 变更保留当前终端并另开窗口验证；自定义 AuthorizedKeysFile、Match 内 Include 等复杂配置会提示手工处理。备份位于 /root/reality-relay-bootstrap-backups/surelay-*，包含敏感信息，权限仅 root 可读。
+SSH 变更保留当前终端并另开窗口验证；自定义 AuthorizedKeysFile、Match 内 Include 等复杂配置会提示手工处理。备份位于 /root/surelay-backups/surelay-*，包含敏感信息，权限仅 root 可读。
 
 ## 备份与恢复
 
 “备份节点配置”保存节点参数、出口文件与身份密钥，恢复前再创建当前状态备份。恢复使用当前服务器的路径，不导入备份中的任意目标路径；SSH、防火墙开关和登录防护设置不随节点恢复覆盖。恢复不同节点身份会使原有订阅或节点失效。
 
 “高级配置”在临时副本中编辑，校验后应用。SSH、路径及身份重置字段需通过专用操作处理。重置重装继续使用原先的预览、备份和 RESET 确认流程。
+
+## 卸载
+
+`sr uninstall` 或主菜单 `8) 卸载 SuRelay` 先展示删除清单，输入 `UNINSTALL` 后备份并核验，再停用节点/订阅、删除项目配置和专用文件，清理项目代理端口规则及当前安装的 sr 入口。不会自动重新安装。
+
+保留 SSH 配置、公钥、账户、系统软件包、自定义业务端口规则、其他站点、Cloudflare DNS、代码目录及历史备份；卸载不恢复成密码登录。重装入口仍为 `bash install.sh --reset`，确认词是 `RESET`。

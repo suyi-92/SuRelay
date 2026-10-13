@@ -18,7 +18,7 @@ SUBSCRIPTION_BASE_URL=""
 http://服务器IP:51040/sub/<VLESS_UUID>?target=ClashMeta
 ```
 
-`<VLESS_UUID>` 来自 `/etc/reality-relay-bootstrap/vless-uuid.txt`。内置订阅服务是 HTTP；如需 HTTPS，请在外层接入带证书的反向代理，并把 `SUBSCRIPTION_BASE_URL` 设置为反代外部地址。
+`<VLESS_UUID>` 来自 `/etc/surelay/vless-uuid.txt`。内置订阅服务是 HTTP；如需 HTTPS，请在外层接入带证书的反向代理，并把 `SUBSCRIPTION_BASE_URL` 设置为反代外部地址。
 
 如果启用了自有域名：
 
@@ -39,9 +39,9 @@ https://edge.example.com/sub/<VLESS_UUID>?target=ClashMeta
 
 ```bash
 sudo bash bootstrap.sh --phase output-nodes
-/root/reality-relay-bootstrap-nodes.txt
-/root/reality-relay-bootstrap-clash.yaml
-/root/reality-relay-bootstrap-vless.txt
+/root/surelay-nodes.txt
+/root/surelay-clash.yaml
+/root/surelay-vless.txt
 ```
 
 这些文件包含 VLESS UUID、Reality public key、short-id 等节点信息，权限为 600，不要公开。
@@ -52,7 +52,7 @@ sudo bash bootstrap.sh --phase output-nodes
 sudo bash install.sh -6 2001:db8::10
 ```
 
-它会保留现有 UUID、Reality key、端口与出口映射，刷新已启用的订阅并更新 CF A/AAAA，同时在 `/root` 生成 `reality-relay-bootstrap-v6-vless.txt`、`reality-relay-bootstrap-v6-nodes.txt` 和 `reality-relay-bootstrap-v6-clash.yaml`。v6 Mihomo/Clash 文件显式启用 `ipv6: true` 与 `udp: true`；VLESS UDP 通过现有 TCP/Reality 会话承载，不需要再开放 UDP 监听端口。
+它会保留现有 UUID、Reality key、端口与出口映射，刷新已启用的订阅并更新 CF A/AAAA，同时在 `/root` 生成 `surelay-v6-vless.txt`、`surelay-v6-nodes.txt` 和 `surelay-v6-clash.yaml`。v6 Mihomo/Clash 文件显式启用 `ipv6: true` 与 `udp: true`；VLESS UDP 通过现有 TCP/Reality 会话承载，不需要再开放 UDP 监听端口。
 
 如果同时配置了 IPv4 和 IPv6，两个订阅链接都返回同一份完整节点；IPv4 节点名称保持不变，IPv6 节点名称追加 `-IPv6`。
 如果 Clash Verge 或浏览器无法导入 IPv6 字面量订阅地址，有 IPv4 时直接用 IPv4 订阅地址即可，它会返回同一份完整节点。
@@ -103,7 +103,7 @@ Test-NetConnection 服务器IP -Port 51043
 
 ## Clash/Mihomo 测出口 IP
 
-导入 `/root/reality-relay-bootstrap-clash.yaml` 后，在本地执行：
+导入 `/root/surelay-clash.yaml` 后，在本地执行：
 
 ```powershell
 curl.exe -x http://127.0.0.1:7890 https://ifconfig.me

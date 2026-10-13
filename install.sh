@@ -3,12 +3,16 @@
 set -Eeuo pipefail
 umask 077
 
-REPO_URL="${RRB_REPO_URL:-https://github.com/suyi-92/reality-relay-bootstrap.git}"
-INSTALL_DIR="${RRB_INSTALL_DIR:-/opt/reality-relay-bootstrap}"
+REPO_URL="${RRB_REPO_URL:-https://github.com/suyi-92/SuRelay.git}"
+INSTALL_DIR="${RRB_INSTALL_DIR:-/opt/SuRelay}"
+# Existing deployments must be updated before creating a second checkout.
+if [[ -z "${RRB_INSTALL_DIR:-}" && ! -e "$INSTALL_DIR" && -d /opt/reality-relay-bootstrap ]]; then
+  INSTALL_DIR=/opt/reality-relay-bootstrap
+fi
 DEFAULT_BRANCH="${RRB_BRANCH:-main}"
 RUN_PHASES="${RRB_RUN_PHASES:-true}"
 RRB_VERBOSE="${RRB_VERBOSE:-false}"
-INSTALL_LOG_FILE="${RRB_INSTALL_LOG_FILE:-/tmp/reality-relay-bootstrap-install.log}"
+INSTALL_LOG_FILE="${RRB_INSTALL_LOG_FILE:-/tmp/surelay-install.log}"
 INSTALL_MODE="full"
 IPV6_NODE_ADDRESS=""
 INPUT_TTY=""
@@ -41,12 +45,14 @@ usage() {
 用法：
   sudo bash install.sh
   sudo bash install.sh --update
+  sudo bash install.sh --uninstall
   sudo bash install.sh --reset
   sudo bash install.sh -6 [IPv6地址]
   sudo bash install.sh --add-ipv6-node [IPv6地址]
 
 选项：
       --update              更新脚本并安装 sr 命令，保留现有服务、配置和节点身份
+      --uninstall           备份后卸载本项目部署，保留 SSH 和系统软件包
       --reset               备份并卸载项目配置与服务，再重新填写配置安装
   -6, --add-ipv6-node [地址]  在已有部署上启用 IPv6 监听，并单独生成 v6 VLESS 节点
       --ipv6-address <地址>   与 -6 相同，但要求显式提供 IPv6 地址
@@ -62,6 +68,11 @@ EOF
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --uninstall)
+        [[ "$INSTALL_MODE" == "full" ]] || die "--uninstall 不能与其他维护模式合用。"
+        INSTALL_MODE="uninstall"
+        shift
+        ;;
       --update)
         [[ "$INSTALL_MODE" == "full" ]] || die "--update 不能与其他维护模式合用。"
         INSTALL_MODE="update"
@@ -149,7 +160,8 @@ read_secret_default() (
   exec {tty_fd}<>"$INPUT_TTY"
   tty_state="$(stty -g <&"$tty_fd")" || die "无法读取敏感输入终端状态。"
   # Keep echo disabled throughout typing/pasting; isolate cleanup from the installer's traps.
-  trap 'stty "$tty_state" <&"$tty_fd" 2>/dev/null || true' EXIT
+  # A terminating parent can send HUP while the terminal is being restored.
+  trap 'trap "" HUP INT TERM; stty "$tty_state" <&"$tty_fd" 2>/dev/null || true' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -239,8 +251,7 @@ collect_admin_pubkeys() {
   local key_pattern='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+[A-Za-z0-9+/]+={0,2}([[:space:]].*)?$'
   : >"$keys_file"
 
-  line
-  printf '%b\n' "${CYAN}${BOLD}管理员 SSH 公钥${RESET}"
+  section "管理员 SSH 公钥"
   printf '%b\n' "${DIM}请一次性粘贴多行 SSH 公钥，每行一把；输入完成后，再输入一个空行结束。${RESET}"
   printf '%b\n' "${DIM}至少输入一把公钥。若明确跳过本次录入，请单独输入大写 SKIP；后续 SSH 部署将使用 root 已有的 authorized_keys。${RESET}"
   exec {keys_fd}<"$INPUT_TTY"
@@ -355,7 +366,7 @@ ensure_entry_dependencies() {
   # shellcheck disable=SC1090
   source "${RRB_OS_RELEASE_FILE:-/etc/os-release}"
   info "安装 git/curl/python3 基础依赖。"
-  local package_log="/tmp/reality-relay-bootstrap-install-packages.log"
+  local package_log="/tmp/surelay-install-packages.log"
   case "$ID" in
     alpine)
       apk add --no-cache --wait 60 bash git curl ca-certificates python3 >"$package_log" 2>&1 </dev/null \
@@ -442,14 +453,14 @@ ENABLE_IPV6_LISTEN=$(shell_quote "$enable_ipv6_listen")
 SFTP_PUBKEY=""
 CSV_PATH="./home-proxies.csv"
 UPSTREAM_NODES_PATH="./upstream-nodes.txt"
-RRB_STATE_DIR="/etc/reality-relay-bootstrap"
+RRB_STATE_DIR="/etc/surelay"
 ENABLE_CUSTOM_DOMAIN=$(shell_quote "$enable_custom_domain")
 CUSTOM_DOMAIN=$(shell_quote "$custom_domain")
 CUSTOM_DOMAIN_PROVIDER="cloudflare"
 LE_EMAIL=$(shell_quote "$le_email")
 LE_STAGING="false"
 CLOUDFLARE_API_TOKEN=$(shell_quote "$cloudflare_api_token")
-CLOUDFLARE_API_TOKEN_FILE="/etc/reality-relay-bootstrap/cloudflare.ini"
+CLOUDFLARE_API_TOKEN_FILE="/etc/surelay/cloudflare.ini"
 CLOUDFLARE_ZONE_NAME=$(shell_quote "$cloudflare_zone_name")
 CLOUDFLARE_ACCOUNT_ID=""
 CLOUDFLARE_CREATE_ZONE="false"
@@ -460,18 +471,18 @@ CLOUDFLARE_DNS_TTL="1"
 CLOUDFLARE_DNS_PROPAGATION_SECONDS="60"
 NGINX_FALLBACK_HOST="127.0.0.1"
 NGINX_FALLBACK_PORT=$(shell_quote "$nginx_fallback_port")
-NGINX_FALLBACK_ROOT="/var/www/reality-fallback"
+NGINX_FALLBACK_ROOT="/var/www/surelay-fallback"
 NGINX_FALLBACK_CONF="auto"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 
 PROXY_PROTOCOL="vless-reality"
 PROXY_IP_VERSION=$(shell_quote "$proxy_ip_version")
 RESET_PROXY_KEYS=$(shell_quote "$reset_proxy_keys")
-VLESS_UUID_PATH="/etc/reality-relay-bootstrap/vless-uuid.txt"
+VLESS_UUID_PATH="/etc/surelay/vless-uuid.txt"
 VLESS_FLOW="xtls-rprx-vision"
-REALITY_PRIVATE_KEY_PATH="/etc/reality-relay-bootstrap/reality-private.key"
-REALITY_PUBLIC_KEY_PATH="/etc/reality-relay-bootstrap/reality-public.key"
-REALITY_SHORT_ID_PATH="/etc/reality-relay-bootstrap/reality-short-id.txt"
+REALITY_PRIVATE_KEY_PATH="/etc/surelay/reality-private.key"
+REALITY_PUBLIC_KEY_PATH="/etc/surelay/reality-public.key"
+REALITY_SHORT_ID_PATH="/etc/surelay/reality-short-id.txt"
 REALITY_SERVER_NAME=$(shell_quote "$reality_server_name")
 REALITY_HANDSHAKE_SERVER=$(shell_quote "$reality_handshake_server")
 REALITY_HANDSHAKE_PORT=$(shell_quote "$reality_handshake_port")
@@ -487,7 +498,7 @@ SUBSCRIPTION_PORT=$(shell_quote "$subscription_port")
 SUBSCRIPTION_INTERNAL_PORT="51040"
 SUBSCRIPTION_TARGET=$(shell_quote "$subscription_target")
 SUBSCRIPTION_BASE_URL=$(shell_quote "$subscription_base_url")
-SUBSCRIPTION_DIR="/etc/reality-relay-bootstrap/subscription"
+SUBSCRIPTION_DIR="/etc/surelay/subscription"
 EOF_CONFIG
   chmod 600 "$project_dir/config.env"
 }
@@ -523,7 +534,7 @@ run_install_phase() {
     RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" >>"$INSTALL_LOG_FILE" || status=$?
   fi
   if (( status != 0 )); then
-    warn "阶段失败：$label（退出码 $status）；请查看 $INSTALL_LOG_FILE 和 /var/log/reality-relay-bootstrap.log。"
+    warn "阶段失败：$label（退出码 $status）；请查看 $INSTALL_LOG_FILE 和 /var/log/surelay.log。"
     return "$status"
   fi
   info "完成：$label"
@@ -570,8 +581,9 @@ run_install_flow() {
     if [[ "$INSTALL_MODE" == "reset" || "${RRB_RESET_INSTALL:-false}" == "true" ]]; then
       warn "重装已停在公钥验证；解决登录后使用 RRB_RESET_INSTALL=true bash install.sh 继续。"
     else
-      warn "已停在 ssh-phase1；验证后按 README 执行 ssh-final。"
+      warn "安装已暂停，节点尚未部署；修改配置后运行 sr install 继续。"
     fi
+    INSTALL_PAUSED=true
     return 0
   fi
 
@@ -672,6 +684,10 @@ main() {
   ensure_entry_dependencies
   project_dir="$(ensure_project)"
   (export RRB_PROJECT_DIR="$project_dir"; source "$project_dir/scripts/00-lib.sh"; require_supported_os)
+  if [[ "$INSTALL_MODE" == "uninstall" ]]; then
+    python3 "$project_dir/scripts/17-reset-install.py" --project-dir "$project_dir" --uninstall --apply
+    return 0
+  fi
   if [[ "$INSTALL_MODE" == "update" ]]; then
     # A local invocation has not gone through ensure_project's remote update.
     bash "$project_dir/surelay.sh" update
@@ -696,7 +712,9 @@ main() {
   fi
   configure_install "$project_dir"
   run_install_flow "$project_dir"
-  info "输入 sr 打开 SuRelay 管理菜单。"
+  if [[ "${INSTALL_PAUSED:-false}" != true && "$RUN_PHASES" == true ]]; then
+    info "安装完成。输入 sr 打开 SuRelay 管理菜单。"
+  fi
 }
 
 main "$@"

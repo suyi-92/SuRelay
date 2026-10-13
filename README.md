@@ -4,34 +4,38 @@
 
 ## 旧安装如何更新
 
-之前使用本项目一键安装的服务器，以 root 执行：
+在 VPS 上以 root 执行：
 
-~~~bash
-cd /opt/reality-relay-bootstrap &&
-git pull --ff-only &&
-bash surelay.sh --install-command &&
-sr
-~~~
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh) --update
+```
 
-自定义安装目录请替换第一行路径。更新保留现有配置、公钥、出口、UUID、Reality 密钥和订阅地址，不需要重装；已有 IPv6 设置也保留。Git 提示本地修改或分叉时先处理现场，不要 reset。之后可直接运行 **sr update** 更新脚本，再运行 **sr** 使用新版菜单。**sr status** 查看状态，**sr help** 查看帮助。
+旧默认目录自动迁移到 `/opt/SuRelay`，保留配置、节点和订阅。完成后输入 `sr`，以后用 `sr update` 更新。首次部署见下方「安装」。
 
-也可以重新运行下方远程一键入口并在末尾追加 **--update**：只更新代码和安装 sr，不重跑部署或 SSH 加固。首次安装不要加 --update。
+## 如何卸载（含旧安装）
 
-项目显示名称已改为 SuRelay；仓库地址、原安装路径及运行数据路径继续兼容 reality-relay-bootstrap。
+运行 `sr uninstall`，或选择 `sr → 8) 卸载 SuRelay`。旧版本没有 sr 时执行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh) --uninstall
+```
+
+展示清单并备份后，输入 `UNINSTALL` 才卸载。保留 SSH 配置、公钥、系统软件包、代码目录和备份；节点与订阅停止。
 
 ## 管理菜单
 
 | 选项 | 功能 |
 | --- | --- |
-| 1. 节点与订阅 | 查看订阅/节点、导出配置、刷新订阅、修改名称和主入口端口 |
-| 2. 出口管理 | HTTP/SOCKS5 与上游 VLESS 的添加、修改、删除和连通性检查 |
-| 3. IPv6 设置 | 查看、探测启用、更换地址、关闭 IPv6 节点 |
-| 4. 域名与证书 | 配置 CF 域名和凭据、同步 DNS、检查续期、停用域名模式 |
-| 5. 服务与诊断 | 状态、启动/停止/重启代理与订阅、日志、配置和监听检查 |
-| 6. VPS 安全 | UFW 自定义端口规则、SSH 端口、公钥与密码认证、fail2ban |
-| 7. 高级维护 | 分别更新脚本/内核、节点备份恢复、高级配置、重置重装 |
+| 1) 节点与订阅 | 查看订阅/节点、导出配置、刷新订阅、修改名称和主入口端口 |
+| 2) 出口管理 | HTTP/SOCKS5 与上游 VLESS 的添加、修改、删除和连通性检查 |
+| 3) IPv6 设置 | 查看、探测启用、更换地址、关闭 IPv6 节点 |
+| 4) 域名与证书 | 配置 CF 域名和凭据、同步 DNS、检查续期、停用域名模式 |
+| 5) 服务与诊断 | 状态、启动/停止/重启代理与订阅、日志、配置和监听检查 |
+| 6) VPS 安全 | UFW 自定义端口规则、SSH 端口、公钥与密码认证、fail2ban |
+| 7) 高级维护 | 更新脚本/内核、备份恢复、高级配置、继续安装、目录迁移和重置 |
+| 8) 卸载 SuRelay | 预览清单、备份并卸载部署，保留 SSH |
 
-0 返回或退出，Ctrl+C 取消当前操作。打开菜单只读取状态；修改前显示当前值或变更内容，确认后应用。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
+`0)` 返回或退出，Ctrl+C 取消当前操作。面板支持彩色状态，`NO_COLOR=1 sr` 使用纯文本。打开菜单只读取状态；修改前显示当前值或变更内容，确认后应用。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
 
 在 Ubuntu 22.04/24.04、Debian 10–13 和 Alpine 3.19（OpenRC，x86_64/aarch64）VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box VLESS + Reality。默认保留现有节点身份，SSH 分两阶段加固。
 
@@ -40,20 +44,20 @@ sr
 Ubuntu/Debian 在 VPS 上以 root 执行远程入口，无需提前进入项目目录：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh)
 ```
 
 Alpine 3.19 默认 shell 是 ash，需要先安装 Bash。以 root 执行：
 
 ```sh
 apk add --no-cache bash curl ca-certificates
-curl -fsSL https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh -o /tmp/reality-relay-install.sh
-bash /tmp/reality-relay-install.sh
+curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh -o /tmp/surelay-install.sh
+bash /tmp/surelay-install.sh
 ```
 
 Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以及可用的 IPv4/IPv6 netfilter 权限。`INSTALL_SINGBOX_METHOD="auto"` 会选择固定版本的官方二进制；服务通过 OpenRC 管理。已有配置若写死 `apt`，先改为 `auto`。详细差异、日志和验证范围见 [Alpine 部署说明](docs/alpine.md)。
 
-一键脚本默认安装到 `/opt/reality-relay-bootstrap`。下文的服务器操作都按此路径给出；如果使用了 `RRB_INSTALL_DIR` 或手动下载到其他位置，请替换每处 `cd` 的路径。编辑示例使用 `nano`，保存按 `Ctrl+O`、回车，退出按 `Ctrl+X`；未安装时 Debian/Ubuntu 执行 `sudo apt install nano`，Alpine 以 root 执行 `apk add nano`。
+一键脚本默认安装到 `/opt/SuRelay`。下文的服务器操作都按此路径给出；如果使用了 `RRB_INSTALL_DIR` 或手动下载到其他位置，请替换每处 `cd` 的路径。编辑示例使用 `nano`，保存按 `Ctrl+O`、回车，退出按 `Ctrl+X`；未安装时 Debian/Ubuntu 执行 `sudo apt install nano`，Alpine 以 root 执行 `apk add nano`。
 
 首次只填写三组信息：
 
@@ -72,7 +76,7 @@ NAT VPS 若只有高位业务端口，支持把 `DIRECT_PORT` 设置为服务商
 **重跑安装会沿用已有 `config.env` 和出口列表，不重新提问或覆盖它们。** 已安装后，需要修改配置并重新运行安装流程：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo nano config.env
 sudo bash install.sh
 ```
@@ -82,7 +86,7 @@ sudo bash install.sh
 首次只下载项目、生成配置而不部署，可在 VPS 上以 root 执行：
 
 ```bash
-RRB_RUN_PHASES=false bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/reality-relay-bootstrap/main/install.sh)
+RRB_RUN_PHASES=false bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh)
 ```
 
 生成后，按上面的“进入目录 → 编辑 `config.env` → 运行安装”步骤继续部署。
@@ -92,13 +96,13 @@ RRB_RUN_PHASES=false bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/
 需要清空旧部署、重新填写配置并生成全新节点时，在服务器项目目录执行：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash install.sh --reset
 ```
 
-Alpine 以 root 执行 `bash install.sh --reset`，无需 sudo。远程入口也支持追加 `--reset`；Alpine 下载 `install.sh` 后执行 `bash /tmp/reality-relay-install.sh --reset`。
+Alpine 以 root 执行 `bash install.sh --reset`，无需 sudo。远程入口也支持追加 `--reset`；Alpine 下载 `install.sh` 后执行 `bash /tmp/surelay-install.sh --reset`。
 
-脚本先显示卸载清单，输入大写 `RESET` 后，将旧文件备份到 `/root/reality-relay-bootstrap-backups/reset-*` 并核验，然后停止旧节点/订阅、删除项目配置与专用服务、清理项目代理端口规则，再进入全新安装。**旧节点、订阅 token、出口列表会失效或清空，域名模式可能需要重新签发证书。**
+脚本先显示卸载清单，输入大写 `RESET` 后，将旧文件备份到 `/root/surelay-backups/reset-*` 并核验，然后停止旧节点/订阅、删除项目配置与专用服务、清理项目代理端口规则，再进入全新安装。**旧节点、订阅 token、出口列表会失效或清空，域名模式可能需要重新签发证书。**
 
 系统软件包、当前 SSH 通道及公钥、其他站点/证书/防火墙规则保留。重装仍需另开终端验证 root 公钥登录。`--reset` 不能与 `-6` 或 `RRB_RUN_PHASES=false` 合用；备份失败或路径归属不明时停止。详细清理范围、预览及恢复步骤见 [重置安装说明](docs/reset-install.md)。
 
@@ -114,18 +118,18 @@ CF 在这里提供 DNS 和证书验证，记录必须为**灰云 / DNS only**。
 首次安装留空 IPv6 的服务器，可先在 VPS 控制台确认已分配公网 IPv6，再执行以下命令自动探测并确认：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash install.sh -6
 ```
 
 也可直接填写 VPS 的真实公网 IPv6（替换下面的示例地址；脚本会修改 `config.env` 并应用，无需手工编辑）：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash install.sh -6 2001:db8::10
 ```
 
-该模式复用现有 UUID、Reality keypair、short-id 和端口，不重跑 SSH；验证双栈监听后刷新已启用的订阅，并在 CF 模式更新 A/AAAA。若订阅或 DNS 发布失败，已验证的本地 IPv6 配置会保留，按下方“常用维护”中的对应步骤重试。同时保留 `/root/reality-relay-bootstrap-v6-vless.txt`、`/root/reality-relay-bootstrap-v6-nodes.txt` 和 `/root/reality-relay-bootstrap-v6-clash.yaml` 三份本地 v6 文件。
+该模式复用现有 UUID、Reality keypair、short-id 和端口，不重跑 SSH；验证双栈监听后刷新已启用的订阅，并在 CF 模式更新 A/AAAA。若订阅或 DNS 发布失败，已验证的本地 IPv6 配置会保留，按下方“常用维护”中的对应步骤重试。同时保留 `/root/surelay-v6-vless.txt`、`/root/surelay-v6-nodes.txt` 和 `/root/surelay-v6-clash.yaml` 三份本地 v6 文件。
 
 如果客户端通过域名拉取订阅时仍卡在 IPv4，可先导入输出的本地 IPv6 节点，或在支持 IPv6 的**客户端电脑**上强制经 IPv6 下载 YAML 后导入（无需进入 VPS 项目目录，文件保存到当前目录）：
 
@@ -150,11 +154,11 @@ https://edge.example.com/sub/<token>?target=ClashMeta
 重新显示并导出本地文件：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase output-nodes
 ```
 
-生成 `/root/reality-relay-bootstrap-vless.txt`（分享链接）、`/root/reality-relay-bootstrap-clash.yaml`（可本地导入的完整配置）和 `/root/reality-relay-bootstrap-nodes.txt`（字段明细），权限均为 600。
+生成 `/root/surelay-vless.txt`（分享链接）、`/root/surelay-clash.yaml`（可本地导入的完整配置）和 `/root/surelay-nodes.txt`（字段明细），权限均为 600。
 
 ## 新增或删除出口
 
@@ -165,7 +169,7 @@ sudo bash bootstrap.sh --phase output-nodes
 先进入目录，检查密钥保留设置，再编辑出口列表：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo nano home-proxies.csv
 ```
 
@@ -183,7 +187,7 @@ home-01,socks5,proxy.example.com,1080,user,password,tcp,51043
 保存退出后，应用配置并验证：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase firewall
 sudo bash bootstrap.sh --phase validate
@@ -194,7 +198,7 @@ sudo bash bootstrap.sh --phase validate
 先进入目录，检查密钥保留设置，再编辑上游列表：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo nano upstream-nodes.txt
 ```
 
@@ -214,7 +218,7 @@ relay-01,vless://11111111-2222-4333-8444-555555555555@upstream.example.com:443?s
 保存退出后，应用配置并验证：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase firewall
 sudo bash bootstrap.sh --phase validate
@@ -229,7 +233,7 @@ sudo bash bootstrap.sh --phase validate
 参照 [示例配置](config.example.env) 修改 `DIRECT_PORT`、`PROXY_IP_VERSION`、`INSTALL_SINGBOX_METHOD` 等，保存后应用：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo nano config.env
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase firewall
@@ -243,7 +247,7 @@ SSH、SFTP 参数由 SSH 阶段处理，不属于上述节点配置；修改它�
 沿用已保存的配置重新生成订阅，无需编辑文件。新增或删除出口请先完成上面的出口应用步骤。
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase subscription
 ```
 
@@ -252,7 +256,7 @@ sudo bash bootstrap.sh --phase subscription
 沿用已保存的地址和域名配置，无需编辑文件：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase cloudflare-dns
 ```
 
@@ -261,7 +265,7 @@ sudo bash bootstrap.sh --phase cloudflare-dns
 在 `config.env` 中调整 `CUSTOM_DOMAIN`、`CLOUDFLARE_*`、`LE_EMAIL` 等，再应用；`singbox` 阶段会同时更新节点、订阅、CF DNS、证书和 Nginx fallback：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo nano config.env
 sudo bash bootstrap.sh --phase singbox
 sudo bash bootstrap.sh --phase firewall
@@ -271,7 +275,7 @@ sudo bash bootstrap.sh --phase validate
 配置未变、只需重试证书与 Nginx fallback 时，无需编辑文件：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase custom-domain
 ```
 
@@ -280,14 +284,14 @@ sudo bash bootstrap.sh --phase custom-domain
 保留当前 SSH 窗口，在新终端验证公钥登录成功后执行，无需编辑配置：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final
 ```
 
 ### 查看详细校验结果
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash bootstrap.sh --phase validate --verbose
 ```
 
@@ -300,7 +304,7 @@ sudo bash bootstrap.sh --phase validate --verbose
 新版脚本会实时写入 APT 输出。需要查看当前步骤时，保留安装窗口，另开 SSH 窗口执行：
 
 ```bash
-tail -f /var/log/reality-relay-bootstrap.log
+tail -f /var/log/surelay.log
 ```
 
 ### APT 提示锁被占用
@@ -316,7 +320,7 @@ sudo systemctl status apt-daily.service apt-daily-upgrade.service --no-pager
 等待更新结束后，从项目目录重跑；已有配置和出口列表会保留：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo bash install.sh
 ```
 
@@ -327,12 +331,12 @@ sudo bash install.sh
 先阅读 [恢复说明](docs/recovery.md)，保留当前还能登录的 SSH 窗口，再执行：
 
 ```bash
-cd /opt/reality-relay-bootstrap
+cd /opt/SuRelay
 sudo CONFIRM_ROLLBACK=yes bash bootstrap.sh --phase rollback
 ```
 
 云厂商安全组必须放行 SSH、443 和实际出口入口的 **TCP** 端口，IPv4/IPv6 分别检查。无 CF 时还需订阅 HTTP 端口；CF 模式且 `SUBSCRIPTION_PORT` 留空时无需公网开放 51040。VLESS 的 UDP 封装在 TCP/Reality 中，不需要额外放行同号 UDP。
 
-安装日志：`/tmp/reality-relay-bootstrap-install.log`；阶段日志：`/var/log/reality-relay-bootstrap.log`；配置备份：`/root/reality-relay-bootstrap-backups/`。
+安装日志：`/tmp/surelay-install.log`；阶段日志：`/var/log/surelay.log`；配置备份：`/root/surelay-backups/`。
 
 订阅 URL/token、节点链接、`config.env`、出口列表及 Reality 私钥都不要公开。未启用域名时内置订阅为 HTTP，建议在云安全组限制来源；完整路径和权限见 [路径说明](docs/path-map.md)。

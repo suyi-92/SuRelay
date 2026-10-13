@@ -51,7 +51,7 @@ from pathlib import Path
 desired = {line.strip() for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()}
 stale = []
 for line in Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace").splitlines():
-    if "reality-relay-bootstrap" not in line:
+    if "surelay" not in line and "reality-relay-bootstrap" not in line:
         continue
     number_match = re.search(r"^\[\s*(\d+)\]", line)
     port_match = re.search(r"\]\s+(\d+)/(tcp|udp)", line)
@@ -85,12 +85,12 @@ info "准备开放实际使用的 VLESS+Reality TCP 端口：${PORTS[*]}"
 for port in "${PORTS[@]}"; do
   validate_port_value="$port"
   [[ "$validate_port_value" =~ ^[0-9]+$ ]] || die "端口不是数字：$port"
-  run ufw allow "${port}/tcp" comment "reality-relay-bootstrap sing-box VLESS+Reality ${port}"
+  run ufw allow "${port}/tcp" comment "surelay sing-box VLESS+Reality ${port}"
 done
 
 if subscription_public_enabled; then
   info "准备开放订阅 HTTP 端口：$SUBSCRIPTION_PORT"
-  run ufw allow "${SUBSCRIPTION_PORT}/tcp" comment "reality-relay-bootstrap subscription ${SUBSCRIPTION_PORT}"
+  run ufw allow "${SUBSCRIPTION_PORT}/tcp" comment "surelay subscription ${SUBSCRIPTION_PORT}"
 elif [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" ]]; then
   info "未设置公网订阅端口；订阅服务仅本机监听 tcp/$SUBSCRIPTION_LISTEN_PORT 并通过 $DIRECT_PORT fallback 反代。"
 fi

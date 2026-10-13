@@ -41,7 +41,7 @@ class CustomDomainConfigTest(unittest.TestCase):
         self.assertEqual(env["REALITY_SERVER_NAME"], "edge.example.com")
         self.assertEqual(env["REALITY_HANDSHAKE_SERVER"], "127.0.0.1")
         self.assertEqual(env["REALITY_HANDSHAKE_PORT"], "8443")
-        self.assertEqual(env["NGINX_FALLBACK_ROOT"], "/var/www/reality-fallback")
+        self.assertEqual(env["NGINX_FALLBACK_ROOT"], "/var/www/surelay-fallback")
         self.assertEqual(env["SUBSCRIPTION_PORT"], "")
         self.assertEqual(env["SUBSCRIPTION_INTERNAL_PORT"], "51040")
         self.assertEqual(env["SUBSCRIPTION_LISTEN_PORT"], "51040")

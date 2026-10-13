@@ -48,7 +48,7 @@ class PlatformTest(unittest.TestCase):
             with self.subTest(distro=distro):
                 result = self.run_shell('load_config; printf "%s\\n" "$INSTALL_SINGBOX_METHOD" "$NGINX_FALLBACK_CONF"', distro=distro)
                 self.assert_ok(result)
-                self.assertEqual(result.stdout.splitlines(), [method, f"/etc/nginx/{confdir}/reality-relay-bootstrap.conf"])
+                self.assertEqual(result.stdout.splitlines(), [method, f"/etc/nginx/{confdir}/surelay.conf"])
                 self.assertEqual(self.config.read_bytes(), original)
 
     def test_nat_custom_domain_shell_defaults_match_public_port(self):
@@ -177,7 +177,7 @@ install_openrc_service demo /usr/local/bin/sing-box /etc/sing-box '' ''' + args)
         self.assert_ok(result)
         self.assertEqual(result.stdout.splitlines(), arguments)
         self.assertFalse((self.root / "SHOULD_NOT_EXIST").exists())
-        self.assertEqual((self.root / "init").read_bytes(), (ROOT / "templates/rrb-service.openrc").read_bytes())
+        self.assertEqual((self.root / "init").read_bytes(), (ROOT / "templates/surelay-service.openrc").read_bytes())
 
     def test_ssh_log_check_requires_actual_delivery(self):
         body = r'''

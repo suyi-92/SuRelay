@@ -1,12 +1,12 @@
 #!/sbin/openrc-run
-# Managed by reality-relay-bootstrap. Arguments are in /etc/conf.d/$RC_SVCNAME.
-description="Reality Relay Bootstrap: ${RC_SVCNAME}"
+# Managed by surelay. Arguments are in /etc/conf.d/$RC_SVCNAME.
+description="SuRelay: ${RC_SVCNAME}"
 supervisor="supervise-daemon"
 pidfile="/run/${RC_SVCNAME}.pid"
 respawn_delay=3
 respawn_max=5
 respawn_period=60
-output_log="/var/log/reality-relay/${RC_SVCNAME}.log"
+output_log="/var/log/surelay/${RC_SVCNAME}.log"
 error_log="$output_log"
 
 depend() {
@@ -15,7 +15,7 @@ depend() {
 }
 
 start_pre() {
-    checkpath --directory --mode 0700 /var/log/reality-relay || return 1
+    checkpath --directory --mode 0700 /var/log/surelay || return 1
     checkpath --file --mode 0600 "$output_log" || return 1
     if [ -n "${rrb_check_config:-}" ]; then
         "$command" check -c "$rrb_check_config" || return 1

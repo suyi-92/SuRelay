@@ -527,7 +527,7 @@ manager = Mock()
 manager.env = {"DIRECT_PORT":"443", "SSH_PORT":"22", "SUBSCRIPTION_LISTEN_PORT":"51040",
                "HOME_PORT_START":"51043", "HOME_PORT_END":"65535"}
 manager.exit_files.return_value = ([], [])
-manager.save_exits.side_effect = lambda home, upstream: print("SAVED-COUNT:" + str(len(upstream)))
+manager.save_exits.side_effect = lambda home, upstream: print("SAVED-COUNT:" + str(len(upstream)) + " NAME:" + upstream[-1]["tag"])
 panel = Panel(manager)
 actions = [("添加上游", panel.add_upstream)]
 ''', NO_COLOR="1")
@@ -540,12 +540,14 @@ actions = [("添加上游", panel.add_upstream)]
         self.send("\033[200~" + url + "\n\033[201~\r")
         self.expect("Original-One")
         self.expect("2/3  出口名称")
+        self.expect("Original-One")
         self.send("\r")
         self.expect("3/3  本机入口端口")
         self.send("\r")
         self.expect("保存出口")
         self.send("\r")
         self.expect("SAVED-COUNT:1")
+        self.expect("NAME:Original-One")
         self.assertNotIn("已接收".encode(), self.all_output)
         self.assertNotIn("空行回车结束".encode(), self.all_output)
         self.send("\r")

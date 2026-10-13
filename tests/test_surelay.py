@@ -147,6 +147,7 @@ class ManagementTest(unittest.TestCase):
                 with self.assertRaises(core.Error):
                     validator(bad)
             context = str(ask.call_args_list[1].kwargs["context"])
+            self.assertEqual(ask.call_args_list[1].args[1], "Original-One" if index == 1 else "Original-Two")
             self.assertIn("Original-One" if index == 1 else "Original-Two", context)
             self.assertIn("one.example:443" if index == 1 else "two.example:443", context)
             self.assertNotIn("vless://", context + confirm.call_args.args[0])

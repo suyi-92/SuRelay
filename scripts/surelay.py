@@ -387,8 +387,9 @@ class Panel:
         url = ask("VLESS 节点链接", step="1/3", help="粘贴一个节点的 vless:// 链接，回车后设置名称。",
                   validate=validate_url)
         node = upstream_info(url)
-        name = GEN.safe_tag("", f"relay-{len(upstream) + 1:02}", {r["tag"] for r in [*home, *upstream]})
-        context = [("原节点", unquote(urlsplit(url).fragment) or "未命名节点"),
+        fragment = urlsplit(url).fragment
+        name = GEN.safe_tag(fragment, f"relay-{len(upstream) + 1:02}", {r["tag"] for r in [*home, *upstream]})
+        context = [("原节点", unquote(fragment) or "未命名节点"),
                    ("上游地址", endpoint(node["server"], node["server_port"]))]
         name = ask("出口名称", name, context=context, step="2/3",
                    help="客户端显示的名称，可用字母、数字、横线和下划线。",

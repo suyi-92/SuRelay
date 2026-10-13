@@ -154,6 +154,19 @@ class ManagementTest(unittest.TestCase):
             self.assertEqual(window.buffer, "https://edge.example.com:24037/sub/11111111-2222-4333-8444-555555555555?target=ClashMeta")
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
 
+    def test_panel_uses_available_subscription_formats_without_client_specific_menus(self):
+        from surelay_terminal import Terminal
+        output = surelay.module("surelay_output", "11-output-nodes.py")
+        window = Terminal()
+        formats = [(f"Client-{i}", f"https://example.com/sub/fixture?target=Format{i}") for i in range(12)]
+        with patch.object(surelay, "module", return_value=output), \
+             patch.object(output, "subscription_links", return_value=formats), \
+             patch.object(surelay, "current_terminal", return_value=window):
+            surelay.Panel(self.m).subscription_link()
+        self.assertEqual(window.link_kind, "订阅")
+        self.assertEqual([url for _, _, url in window.links], [url for _, url in formats])
+        self.assertEqual([fields for _, fields, _ in window.links], [[("适用客户端", label)] for label, _ in formats])
+
     def test_launcher_handles_spaces_and_refuses_other_program(self):
         project = self.root / "folder with spaces"
         project.mkdir()

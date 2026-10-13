@@ -15,7 +15,9 @@ from typing import Any, Dict, List
 from urllib.parse import quote, urlencode
 
 
-SUBSCRIPTION_TARGETS = {"ClashMeta"}
+# One entry per supported output format, not per client application. Clients
+# consuming the same format share a URL; the panel renders this catalog.
+SUBSCRIPTION_TARGETS = {"ClashMeta": "Mihomo / Clash Meta"}
 
 
 def load_generator(path: Path):
@@ -149,7 +151,9 @@ def build_client_nodes(env: Dict[str, str], rows: List[Dict[str, Any]], gen) -> 
     return primary
 
 
-def subscription_url(env: Dict[str, str], token: str) -> str:
+def subscription_url(env: Dict[str, str], token: str, target: str = "ClashMeta") -> str:
+    if target not in SUBSCRIPTION_TARGETS:
+        raise ValueError(f"不支持的订阅格式：{target}")
     if env.get("ENABLE_SUBSCRIPTION_SERVER", "true") != "true":
         return ""
     base = env.get("SUBSCRIPTION_BASE_URL", "").rstrip("/")
@@ -157,7 +161,14 @@ def subscription_url(env: Dict[str, str], token: str) -> str:
         host = env.get("SERVER_IP_IPV4") or env.get("SERVER_IP_IPV6") or env.get("SERVER_IP", "")
         host = f"[{host.strip('[]')}]" if ":" in host else host
         base = f"http://{host}:{env['SUBSCRIPTION_LISTEN_PORT']}"
-    return f"{base}/sub/{token}?target=ClashMeta"
+    return f"{base}/sub/{token}?{urlencode({'target': target})}"
+
+
+def subscription_links(env: Dict[str, str], token: str):
+    """Return the available format labels and URLs for all presentation modes."""
+    if env.get("ENABLE_SUBSCRIPTION_SERVER", "true") != "true":
+        return []
+    return [(label, subscription_url(env, token, target)) for target, label in SUBSCRIPTION_TARGETS.items()]
 
 
 def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]], project_dir: Path) -> None:
@@ -174,9 +185,8 @@ def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]], proje
         if ipv6:
             command += f" {shlex.quote(ipv6)}"
         print(f"IPv6 节点：{reason}；VPS 需有可用公网 IPv6。\n开启：{command}")
-    url = subscription_url(env, nodes[0]["uuid"])
-    if url:
-        print(f"{cyan}{bold}订阅链接（Mihomo / Clash Meta）{reset}\n{cyan}{url}{reset}")
+    for label, url in subscription_links(env, nodes[0]["uuid"]):
+        print(f"{cyan}{bold}订阅链接（{label}）{reset}\n{cyan}{url}{reset}")
     print(f"\n{divider}\n{green}{bold}本地节点（复制 vless:// 链接导入）{reset}")
     for node in nodes:
         print(f"{green}{node_to_vless_uri(node)}{reset}\n")

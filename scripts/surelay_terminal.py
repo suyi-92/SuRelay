@@ -91,6 +91,7 @@ class Terminal:
         self.trail = []
         self.buffer = ""
         self.frame = []
+        self.flow = None
         self.cursor = None
         self.size = (0, 0)
         self.streaming = False
@@ -190,13 +191,23 @@ class Terminal:
                 "danger": "31", "ok": "32", "warn": "33", "text": "0"}[style]
         return f"{ESC}{code}m{text}{ESC}0m"
 
-    def render(self, body, hint, cursor=None):
+    def render(self, body, hint, cursor=None, flow=None):
+        """Draw ordinary rows plus an optional continuous, soft-wrapped block.
+
+        flow is (body row offset, text). It uses the terminal's full width:
+        cursor addressing or gutters between its rows would turn a copied URL
+        into several hard lines. Keep the whole block untouched on idle/feedback
+        redraws so mouse selection and the terminal's wrap markers survive.
+        """
         width, height = self.dimensions()
-        # Keep one unused column and row so drawing cannot scroll the terminal.
+        columns = width
+        # Ordinary rows leave a spare column; flow may fill it but never uses
+        # the bottom row, so even a pending autowrap cannot scroll the screen.
         width = max(2, width - 1)
         if (width, height) != self.size:
             self.emit(ESC + "2J")
             self.frame = []
+            self.flow = None
             self.size = width, height
         content_width = self.content_width()
         title = "SuRelay  ·  VPS 管理"
@@ -211,14 +222,27 @@ class Terminal:
         rows += [rule, (hints[0], "muted"), (hints[1] if len(hints) > 1 else "", "muted")]
         rows = rows[:max(1, height - 1)]
         rendered = ["  " + self.paint(clip(clean(text), content_width), style) for text, style in rows]
-        changed = [f"{ESC}{i + 1};1H{line}{ESC}K" for i, line in enumerate(rendered)
-                   if i >= len(self.frame) or self.frame[i] != line]
+        flow = (flow[0] + 3, flow[1], len(wrap(flow[1], columns))) if flow else None
+        flow_rows = set(range(flow[0], flow[0] + flow[2])) if flow else set()
+        stale_rows = (set(range(self.flow[0], self.flow[0] + self.flow[2]))
+                      if self.flow and self.flow != flow else set())
+        # Erase the entire former flow row before ordinary text: erasing only
+        # its tail leaves a stale soft-wrap marker in terminals such as xterm.
+        changed = [f"{ESC}{i + 1};1H" + (ESC + "2K" if i in stale_rows else "") + line + ESC + "K"
+                   for i, line in enumerate(rendered)
+                   if i not in flow_rows and (i in stale_rows or i >= len(self.frame) or self.frame[i] != line)]
+        if flow and flow != self.flow:
+            # Clear before writing, never after: at an exact width boundary the
+            # cursor still occupies the final character (pending autowrap).
+            changed.extend(f"{ESC}{i + 1};1H{ESC}2K" for i in sorted(flow_rows))
+            changed.append(f"{ESC}{flow[0] + 1};1H" + self.paint(flow[1], "accent"))
         suffix = ""
         if changed or cursor != self.cursor:
             suffix = ESC + "?25l" if cursor is None else f"{ESC}{cursor[0]};{cursor[1]}H{ESC}?25h"
         if changed or suffix:
             self.emit("".join(changed) + suffix)
         self.frame = rendered
+        self.flow = flow
         self.cursor = cursor
         self.last_draw = time.monotonic()
 
@@ -435,8 +459,12 @@ class Terminal:
                         print(clean(self.buffer))
 
     def set_links(self, links, kind="节点"):
-        """Keep exact copy payloads separate from wrapped display rows."""
-        self.links = list(links)
+        """Accept any number of formats/nodes, keeping each exact URL intact."""
+        links = list(links)
+        if any(not url or any(c.isspace() or unicodedata.category(c)[0] == "C" for c in url)
+               for _, _, url in links):
+            raise ValueError("链接包含空白或控制字符，请检查配置。")
+        self.links = links
         self.link_kind = kind
         self.buffer = "\n".join(url for _, _, url in self.links)
 
@@ -447,7 +475,7 @@ class Terminal:
         self.emit("\033]52;c;" + payload + "\a")
 
     def wait_links(self):
-        selected, action, start, notice = 0, 0, 0, ""
+        selected, start, notice = 0, 0, ""
         with self.keys():
             while True:
                 if self.too_small():
@@ -458,62 +486,52 @@ class Terminal:
                 fields = [(self.link_kind + "名称", name), *fields]
                 label_width = max(cells(label) for label, _ in fields)
                 rows = []
-                if len(self.links) > 1:
-                    rows.append((f"第 {selected + 1} 个{self.link_kind}，共 {len(self.links)} 个", "muted"))
                 for index, (label, value) in enumerate(fields):
                     prefix = label + " " * (label_width - cells(label) + 2)
                     for part_index, part in enumerate(wrap(value, max(2, width - label_width - 2))):
                         indent = prefix if part_index == 0 else " " * (label_width + 2)
                         rows.append((indent + part, "heading" if index == 0 else "text"))
-                information_capacity = capacity - 4  # Three actions and one separator row.
-                start = min(start, max(0, len(rows) - information_capacity))
-                body = rows[start:start + information_capacity] + [("", "text")]
-                body += self.menu_rows([f"复制{self.link_kind}链接", "查看完整链接"], action)
-                hint = "↑↓ / 数字选择 · Enter 确认 · Esc 返回"
+                rows += [("", "text"), (self.link_kind + "链接 · 选中复制", "heading")]
+                link_start = len(rows)
+                # These chunks only measure the viewport. Concatenate the
+                # visible span again before emitting it, with no added bytes.
+                link_lines = wrap(url, self.dimensions()[0])
+                rows += [("", "text")] * len(link_lines)
+                last_start = max(0, len(rows) - capacity)
+                start = min(start, last_start)
+                first, end = max(start, link_start), min(start + capacity, len(rows))
+                flow = ((first - start, "".join(link_lines[first - link_start:end - link_start]))
+                        if first < end else None)
+                navigation = []
                 if len(self.links) > 1:
-                    hint += f" · ←→ 切换{self.link_kind}"
-                if len(rows) > information_capacity:
-                    hint += " · PgUp/PgDn 查看信息"
-                self.render(body, notice or hint)
+                    item = "格式" if self.link_kind == "订阅" else self.link_kind
+                    navigation.append(f"←→ {item} {selected + 1}/{len(self.links)}")
+                if last_start:
+                    navigation.append(f"↑↓ 翻页 {start + 1}–{min(start + capacity, len(rows))}/{len(rows)}")
+                hint = notice or "Enter / c 复制链接 · Esc / 0 返回"
+                self.render(rows[start:start + capacity], hint + "\n" + " · ".join(navigation), flow=flow)
                 key = self.key()
-                if key == "\x1b":
+                if key in ("\x1b", "0"):
                     return
                 if key in ("q", "Q"):
                     raise EOFError
                 if not key:
                     continue
                 notice = ""
-                execute = None
                 if key in (LEFT, RIGHT):
                     selected = (selected + (1 if key == RIGHT else -1)) % len(self.links)
                     start = 0
-                elif key in (DOWN, "\t"):
-                    action = (action + 1) % 3
-                elif key == UP:
-                    action = (action - 1) % 3
-                elif key in ("1", "2", "0"):
-                    action = {"1": 0, "2": 1, "0": 2}[key]
-                elif key in (PAGE_DOWN, PAGE_UP):
-                    start = max(0, min(len(rows) - information_capacity,
-                                       start + (information_capacity if key == PAGE_DOWN else -information_capacity)))
+                elif key in (DOWN, PAGE_DOWN):
+                    start = min(last_start, start + (capacity if key == PAGE_DOWN else 1))
+                elif key in (UP, PAGE_UP):
+                    start = max(0, start - (capacity if key == PAGE_UP else 1))
                 elif key in (HOME, ESC + "1~"):
                     start = 0
                 elif key in (END, ESC + "4~"):
-                    start = max(0, len(rows) - information_capacity)
-                elif key in ("\r", "\n"):
-                    execute = action
-                elif key in ("c", "C"):
-                    execute = 0
-                elif key in ("p", "P"):
-                    execute = 1
-                if execute == 2:
-                    return
-                if execute == 0:
+                    start = last_start
+                elif key in ("\r", "\n", "1", "c", "C"):
                     self.copy_link(url)
-                    notice = "复制请求已发送，可到客户端粘贴。\n未生效时，请选「查看完整链接」。"
-                elif execute == 1:
-                    with self.external():
-                        print(url)
+                    notice = "已发送复制请求；未生效请选中链接复制。"
 
     def read_line(self, label, default="", secret=False, multiline=False):
         if multiline and self.pending[0] == label and self.pending[1]:
@@ -613,6 +631,7 @@ class Terminal:
             if not saved[3] & termios.ICANON:
                 self.emit(ESC + "?2004h")
             self.frame = []
+            self.flow = None
 
     def run(self, args, env, input=None):
         """Stream noninteractive commands into the result pane, never the shell."""

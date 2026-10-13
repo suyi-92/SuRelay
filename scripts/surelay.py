@@ -172,12 +172,15 @@ class Panel:
         if self.m.env["ENABLE_SUBSCRIPTION_SERVER"] != "true":
             print("订阅服务未启用。")
             return
-        url = output.subscription_url(self.m.env, GEN.read_vless_uuid(self.m.env))
+        formats = output.subscription_links(self.m.env, GEN.read_vless_uuid(self.m.env))
         if current_terminal():
-            fields = [("适用客户端", "Mihomo / Clash Meta"), ("使用方法", "在客户端添加订阅，可刷新节点。")]
-            current_terminal().set_links([(self.m.env["SERVER_ALIAS"], fields, url)], kind="订阅")
+            links = [(self.m.env["SERVER_ALIAS"], [("适用客户端", label)], url) for label, url in formats]
+            current_terminal().set_links(links, kind="订阅")
         else:
-            print(url)
+            for label, url in formats:
+                if len(formats) > 1:
+                    print(label)
+                print(url)
 
     def node_links(self):
         output = module("surelay_output", "11-output-nodes.py")

@@ -31,6 +31,44 @@ class PlainTerminalTest(unittest.TestCase):
         self.assertEqual(terminal.wrap("节点abcd", 4), ["节点", "abcd"])
         self.assertEqual(terminal.clean("\033[31m正常\033[0m\033[2J\033]0;bad\a"), "正常")
 
+    def test_soft_wrapped_link_is_continuous_and_not_repainted_for_feedback(self):
+        for length in (49, 50, 51, 99, 100, 101, 350):
+            with self.subTest(length=length):
+                window = terminal.Terminal()
+                stream = window.output = io.StringIO()
+                url = "https://example.com/".ljust(length, "a")
+                body = [("链接", "heading")] + [("", "text")] * 7
+                with patch.object(window, "dimensions", return_value=(50, 18)):
+                    window.render(body, "Enter / c 复制", flow=(1, url))
+                    self.assertIn(url, stream.getvalue())
+                    self.assertNotIn("\n", stream.getvalue())
+                    stream.seek(0)
+                    stream.truncate()
+                    window.render(body, "Enter / c 复制", flow=(1, url))
+                    self.assertEqual(stream.getvalue(), "")
+                    window.render(body, "已发送复制请求", flow=(1, url))
+                    self.assertNotIn(url, stream.getvalue())
+                    addressed = [int(row) for row in re.findall(r"\033\[(\d+);1H", stream.getvalue())]
+                    self.assertTrue(all(row >= 16 for row in addressed), addressed)
+
+    def test_link_display_rejects_whitespace_and_terminal_controls(self):
+        for suffix in ("\n", "\r", " ", "\033[2J", "\033]52;c;bad\a"):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                terminal.Terminal().set_links([("fixture", [], "https://example.com/" + suffix)])
+
+    def test_leaving_link_view_erases_old_wrap_markers_before_menu_text(self):
+        window = terminal.Terminal()
+        stream = window.output = io.StringIO()
+        with patch.object(window, "dimensions", return_value=(50, 18)):
+            window.render([("", "text")] * 4, "复制", flow=(0, "https://example.com/".ljust(150, "x")))
+            stream.seek(0)
+            stream.truncate()
+            window.render([("1) 返回菜单", "text")], "选择")
+        # EL0 after writing spaces only erases the tail and can retain wrap
+        # markers. EL2 at column 1 must precede all former link rows.
+        for row in (4, 5, 6):
+            self.assertIn(f"\033[{row};1H\033[2K", stream.getvalue())
+
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
 class WindowTest(unittest.TestCase):
@@ -227,29 +265,59 @@ actions = [("链接列表", links)]
 ''', NO_COLOR="1")
         self.expect("链接列表")
         self.send("1\r")
-        self.expect("复制节点链接")
+        self.expect(first)
         self.assertNotIn(b"\033]52;", self.all_output)
-        self.assertNotIn(b"vless://", self.all_output)
         self.send("\r")
-        self.expect("复制请求已发送")
+        self.expect("已发送复制请求")
+        self.assertEqual(self.all_output.count(first.encode()), 1)
         self.send("\033[C")
         self.expect("NODE-TWO")
+        self.expect(second)
         self.pending = b""
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 50, 0, 0))
         self.expect("\033[2J")
         self.send("c")
-        self.expect("复制请求已发送")
+        self.expect("已发送复制请求")
         payloads = re.findall(rb"\033\]52;c;([^\a]+)\a", self.all_output)
         self.assertEqual([base64.b64decode(p).decode() for p in payloads], [first, second])
-        self.send("2\r")
-        self.expect("按 Enter 返回 SuRelay")
-        self.assertIn((second + "\r\n按 Enter 返回 SuRelay").encode(), self.all_output)
-        self.send("\r")
-        self.expect("复制节点链接")
-        self.send("0\r")
+        self.send("\033[F")
+        self.expect("#IPv6")
+        self.send("0")
         self.expect("链接列表")
         self.send("q")
         self.finish()
+        self.assertEqual(self.all_output.count(b"\x1b[?1049h"), 1)
+        self.assertNotIn("按 Enter 返回 SuRelay".encode(), self.all_output)
+        self.assertNotIn(b"\n", self.all_output.split(b"CLEAN_EXIT")[0])
+
+    def test_many_formats_and_long_link_remain_in_panel(self):
+        url = "https://example.com/sub/" + "x" * 2100 + "?target=fixture#END-LINK"
+        links = [("fixture", [("适用客户端", f"FORMAT-{i:02}")], url + str(i)) for i in range(12)]
+        self.start(f'''
+def links():
+    window.set_links({links!r}, kind="订阅")
+actions = [("格式列表", links)]
+''', NO_COLOR="1")
+        self.expect("格式列表")
+        self.send("\r")
+        self.expect("FORMAT-00")
+        self.expect("https://example.com/sub/")
+        self.send("\033[D")
+        self.expect("FORMAT-11")
+        self.send("\033[F")
+        self.expect("END-LINK11")
+        self.send("c")
+        self.expect("已发送复制请求")
+        payloads = re.findall(rb"\033\]52;c;([^\a]+)\a", self.all_output)
+        self.assertEqual([base64.b64decode(p).decode() for p in payloads], [url + "11"])
+        self.send("\033[C")
+        self.expect("FORMAT-00")
+        self.expect("https://example.com/sub/")
+        self.send("0")
+        self.expect("格式列表")
+        self.send("q")
+        self.finish()
+        self.assertEqual(self.all_output.count(b"\x1b[?1049h"), 1)
 
     def test_long_confirmation_is_readable_before_enter_applies(self):
         message = "\n".join(f"确认内容 {i:02}" for i in range(30))

@@ -19,6 +19,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClientOutputTest(unittest.TestCase):
+    def test_advertised_subscription_formats_match_server(self):
+        def load(name, filename):
+            spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / filename)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        output = load("catalog_output", "11-output-nodes.py")
+        server = load("catalog_server", "13-subscription-server.py")
+        env = {"SUBSCRIPTION_BASE_URL": "https://example.com", "ENABLE_SUBSCRIPTION_SERVER": "true"}
+        links = output.subscription_links(env, "fixture")
+        self.assertEqual(set(output.SUBSCRIPTION_TARGETS), set(server.TARGET_FILES))
+        self.assertEqual(len(links), len(server.TARGET_FILES))
+        for label, url in links:
+            target = parse_qs(urlsplit(url).query)["target"][0]
+            self.assertEqual(label, output.SUBSCRIPTION_TARGETS[target])
+            self.assertIn(target, server.TARGET_FILES)
+        self.assertEqual(output.subscription_links({**env, "ENABLE_SUBSCRIPTION_SERVER": "false"}, "fixture"), [])
+        with self.assertRaises(ValueError):
+            output.subscription_url(env, "fixture", "Unsupported")
+
     def generate(self, directory, **overrides):
         root = Path(directory)
         (root / "vless-uuid.txt").write_text("11111111-2222-4333-8444-555555555555\n")

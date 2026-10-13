@@ -113,6 +113,13 @@ class Cancelled(Error):
     """Return from a declined preview without opening another result screen."""
 
 
+class PanelExit(SystemExit):
+    """Exit every menu without a second result prompt; optionally reload code."""
+    def __init__(self, restart_root=None):
+        super().__init__(0)
+        self.restart_root = restart_root
+
+
 def confirm(message, *, action="确认执行", danger=False):
     window = current_terminal()
     if window:
@@ -186,6 +193,8 @@ def window_menu(title, actions, before=None):
                         print(f"未完成：{exc}")
                     except KeyboardInterrupt:
                         print("操作已取消。")
+                    except PanelExit:
+                        raise
                     except SystemExit as exc:
                         if exc.code in (None, 0) and (window.buffer or window.external_count == external):
                             window.wait()
@@ -766,8 +775,27 @@ class Panel:
         ])
 
     def update_code(self):
-        self.m.update_code()
-        raise SystemExit(0)
+        window = current_terminal()
+        if not window:
+            self.m.update_code()
+            raise SystemExit(0)
+        window.buffer = ""
+        window.render([("正在更新 SuRelay…", "muted")], "Ctrl+C 取消")
+        try:
+            with window.capture(streaming=False):
+                self.m.update_code()
+        except BaseException:
+            # Keep diagnostics available with p, but don't flood the result
+            # pane with Git output or migration details after an error/cancel.
+            window.details, window.buffer = window.buffer, ""
+            raise
+        window.buffer = ""
+        try:
+            choice = window.choose([("重启管理面板", None)],
+                                   "SuRelay 更新完成。\n重新打开后即可使用最新版。", navigation=False, back="关闭面板")
+        except (EOFError, KeyboardInterrupt):
+            choice = None
+        raise PanelExit(self.m.root if choice == 0 else None)
 
     def update_core(self):
         self.m.backup()
@@ -837,6 +865,7 @@ def main():
     if not manager.config.exists() and args.command == "menu":
         raise Error(f"未找到配置：{manager.config}。首次部署运行 sr install；更新脚本不会自动安装节点。")
     import fcntl
+    restart_root = None
     with open("/run/surelay.lock", "w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -853,7 +882,14 @@ def main():
             if not sys.stdin.isatty():
                 raise Error("菜单需要交互终端；只查看状态可使用 sr status。")
             with Terminal(enabled=not args.plain):
-                panel.main()
+                try:
+                    panel.main()
+                except PanelExit as result:
+                    restart_root = result.restart_root
+    # Restore echo/screen and release the process lock before starting the
+    # updated entry point. migrate() may have changed the project directory.
+    if restart_root is not None:
+        os.execv(sys.executable, [sys.executable, str(restart_root / "scripts/surelay.py")])
     return 0
 
 

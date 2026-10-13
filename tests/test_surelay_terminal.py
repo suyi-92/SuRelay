@@ -10,6 +10,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -201,7 +202,7 @@ class PlainTerminalTest(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
 class WindowTest(unittest.TestCase):
-    def start(self, body, **env):
+    def start(self, body, *, direct=False, **env):
         import fcntl
         import pty
         import termios
@@ -218,14 +219,17 @@ sys.path.insert(0, {str(ROOT / "scripts")!r})
 from surelay import ask, confirm, menu
 from surelay_core import run
 from surelay_terminal import Terminal
-{body}
+'''
+        script += body
+        if not direct:
+            script += '''
 try:
     with Terminal() as window:
         menu("SuRelay", actions, lambda: print("节点  Fixture"))
 except (EOFError, KeyboardInterrupt):
     pass
-print("CLEAN_EXIT", flush=True)
 '''
+        script += '\nprint("CLEAN_EXIT", flush=True)\n'
         self.process = subprocess.Popen([sys.executable, "-u", "-c", script], stdin=self.slave,
                                         stdout=self.slave, stderr=self.slave, preexec_fn=controlling_terminal,
                                         env={**os.environ, "TERM": "xterm-256color", **env})
@@ -263,6 +267,126 @@ print("CLEAN_EXIT", flush=True)
         self.assertEqual(termios.tcgetattr(self.slave), self.original)
         self.assertIn(b"\x1b[?25h\x1b[?1049l", self.all_output)
         self.assertNotIn(b"Traceback", self.all_output)
+
+    def start_update(self, *, fail=False, pid_path=""):
+        # Exercise main's real lock and terminal lifetime; only the backend
+        # update and host file paths are replaced with disposable fixtures.
+        self.start(f'''
+import builtins, fcntl, tempfile
+from pathlib import Path
+from unittest.mock import Mock, patch
+import surelay
+from surelay_terminal import current
+original = termios.tcgetattr(0)
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    lock_path = root / "surelay.lock"
+    manager = Mock(root=root / "old")
+    manager.config = root / "config.env"
+    manager.config.touch()
+    def update():
+        print("MIGRATION_DETAIL")
+        code = "print('GIT_PROGRESS_DETAIL')"
+        if {bool(pid_path)!r}:
+            code += "; import os, time; from pathlib import Path; Path(" + repr({pid_path!r}) + ").write_text(str(os.getpid())); time.sleep(60)"
+        if {fail!r}:
+            code += "; raise SystemExit(1)"
+        run([sys.executable, "-u", "-c", code])
+        manager.root = root / "migrated"
+        print("MIGRATION_DONE")
+    manager.update_code.side_effect = update
+    def fixture_open(path, *args, **kwargs):
+        assert path == "/run/surelay.lock", path
+        return builtins.open(lock_path, *args, **kwargs)
+    def restart(executable, argv):
+        assert current() is None
+        assert termios.tcgetattr(0) == original
+        with builtins.open(lock_path, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert argv == [sys.executable, str(root / "migrated/scripts/surelay.py")], argv
+        assert executable == sys.executable
+        print("RESTARTED_AFTER_CLEANUP", flush=True)
+    def main_menu(panel):
+        menu("SuRelay", [("高级维护", lambda: menu("高级维护", [("更新 SuRelay", panel.update_code)]))])
+    with patch.object(surelay, "Manager", return_value=manager), \\
+         patch.object(surelay, "open", side_effect=fixture_open, create=True), \\
+         patch.object(surelay.Panel, "main", main_menu), \\
+         patch.object(os, "geteuid", return_value=0), \\
+         patch.object(os, "execv", side_effect=restart), \\
+         patch.object(sys, "argv", ["sr"]):
+        try:
+            assert surelay.main() == 0
+        except (EOFError, KeyboardInterrupt):
+            pass  # same outer exit handling as the sr entry point
+''', direct=True)
+        self.expect("高级维护")
+        self.send("1\r")
+        self.expect("更新 SuRelay")
+        self.send("1\r")
+        self.expect("正在更新 SuRelay")
+
+    def test_update_restarts_migrated_entry_after_restoring_terminal_and_lock(self):
+        self.start_update()
+        self.expect("SuRelay 更新完成")
+        self.expect("1) 重启管理面板")
+        self.expect("0) 关闭面板")
+        self.send("\r")
+        self.expect("RESTARTED_AFTER_CLEANUP")
+        self.finish()
+        self.assertNotIn(b"GIT_PROGRESS_DETAIL", self.all_output)
+        self.assertNotIn(b"MIGRATION_DETAIL", self.all_output)
+        self.assertNotIn("Enter 返回".encode(), self.all_output)
+
+    def test_update_close_controls_exit_without_another_result_prompt(self):
+        for key in ("0\r", "\033", "q", "\x03"):
+            with self.subTest(key=repr(key)):
+                try:
+                    self.start_update()
+                    self.expect("0) 关闭面板")
+                    self.send(key)
+                    self.finish()
+                    self.assertNotIn(b"RESTARTED_AFTER_CLEANUP", self.all_output)
+                    self.assertNotIn("Enter 返回".encode(), self.all_output)
+                finally:
+                    self.doCleanups()
+
+    def test_update_failure_keeps_logs_hidden_until_details_requested(self):
+        self.start_update(fail=True)
+        self.expect("未完成：")
+        self.expect("p 详情")
+        self.assertNotIn(b"GIT_PROGRESS_DETAIL", self.all_output)
+        self.assertNotIn(b"MIGRATION_DETAIL", self.all_output)
+        self.assertNotIn("更新完成".encode(), self.all_output)
+        self.send("p")
+        self.expect("MIGRATION_DETAIL")
+        self.expect("GIT_PROGRESS_DETAIL")
+        self.expect("按 Enter 返回 SuRelay")
+        self.send("\r")
+        self.expect("p 详情")
+        self.send("\r")
+        self.expect("1) 更新 SuRelay")
+        self.send("q")
+        self.finish()
+
+    def test_quiet_update_can_cancel_child_and_return_to_menu(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "child.pid"
+            self.start_update(pid_path=str(pid_path))
+            deadline = time.monotonic() + 5
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(pid_path.exists(), "Update child did not start")
+            pid = int(pid_path.read_text())
+            self.send("\x03")
+            self.expect("操作已取消")
+            self.expect("p 详情")
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+            self.assertNotIn(b"GIT_PROGRESS_DETAIL", self.all_output)
+            self.send("\r")
+            self.expect("1) 更新 SuRelay")
+            self.send("q")
+            self.finish()
 
     def test_navigation_updates_existing_rows_and_restores_terminal(self):
         self.start('''
@@ -645,7 +769,7 @@ actions = [("输入名称", edit)]
         self.send("1\r")
         self.expect("Ctrl+U 清空")
         self.send("resize-value")
-        self.expect("│ resize-value")
+        self.expect("resize-value")
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
         self.expect("窗口过小")
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))

@@ -90,6 +90,7 @@ class Terminal:
         self.active = False
         self.trail = []
         self.buffer = ""
+        self.details = ""
         self.frame = []
         self.flow = None
         self.cursor = None
@@ -163,20 +164,21 @@ class Terminal:
 
     @contextmanager
     def page(self, title):
-        saved = self.trail, self.buffer, self.streaming, self.pending, self.links, self.link_kind
+        saved = self.trail, self.buffer, self.streaming, self.pending, self.links, self.link_kind, self.details
         self.trail = [*self.trail, title] if not self.trail or self.trail[-1] != title else self.trail[:]
         self.buffer, self.streaming, self.pending = "", False, ("", [])
         self.links = []
+        self.details = ""
         self.link_kind = "节点"
         try:
             yield
         finally:
-            self.trail, self.buffer, self.streaming, self.pending, self.links, self.link_kind = saved
+            self.trail, self.buffer, self.streaming, self.pending, self.links, self.link_kind, self.details = saved
 
     @contextmanager
-    def capture(self):
+    def capture(self, *, streaming=True):
         previous = self.streaming
-        self.streaming = True
+        self.streaming = streaming
         try:
             with redirect_stdout(self.sink), redirect_stderr(self.sink):
                 yield
@@ -210,7 +212,15 @@ class Terminal:
 
         def row(text="", style="text"):
             text = clip(clean(text), width)
-            return (self.paint("│", "border") + "  " + self.paint(text, style)
+            if style in {"input", "input_placeholder"}:
+                # Placeholder dimming belongs to the text, never the two
+                # sides of the active field. All four edges remain cyan.
+                painted = (self.paint(text[:1], "accent")
+                           + self.paint(text[1:-1], "muted" if style == "input_placeholder" else "accent")
+                           + self.paint(text[-1:], "accent"))
+            else:
+                painted = self.paint(text, style)
+            return (self.paint("│", "border") + "  " + painted
                     + " " * (width - cells(text) + 2) + self.paint("│", "border"))
 
         brand = " SuRelay "
@@ -332,7 +342,7 @@ class Terminal:
             rows.append((f" {'›' if i == selected else ' '} {number}) {name}", style))
         return rows
 
-    def choose(self, actions, status="", selected=0, *, navigation=True):
+    def choose(self, actions, status="", selected=0, *, navigation=True, back=None):
         if navigation:
             self.menu_count += 1
         count = len(actions) + 1
@@ -352,7 +362,7 @@ class Terminal:
                     body.append(("", "text"))
                 focus = len(body)
                 for i, (text, style) in enumerate(self.menu_rows([name for name, _ in actions], selected,
-                                                              "退出" if len(self.trail) == 1 else "返回")):
+                                                              back or ("退出" if len(self.trail) == 1 else "返回"))):
                     parts = wrap(text, self.content_width())
                     body.extend((part, style) for part in parts)
                     if i == selected:
@@ -361,7 +371,7 @@ class Terminal:
                 start = min(start, last_start)
                 if follow_selection:
                     start = max(0, focus - capacity + 1)
-                hint = "↑↓ / 数字选择 · Enter 确认 · Esc 返回"
+                hint = "↑↓ / 数字选择 · Enter 确认 · Esc " + (back or "返回")
                 if last_start:
                     hint += f"\nPgUp/PgDn 翻页 · {start + 1}–{min(start + capacity, len(body))}/{len(body)}"
                 self.render(body[start:start + capacity], hint)
@@ -471,7 +481,7 @@ class Terminal:
                 capacity = self.content_capacity()
                 lines = self.output_rows()
                 start = min(start, max(0, len(lines) - capacity))
-                hint = "Enter 返回 · p 原文"
+                hint = "Enter 返回 · p " + ("详情" if self.details else "原文")
                 if len(lines) > capacity:
                     hint += f" · ↑↓ / PgUp PgDn 翻页 · 行 {start + 1}–{min(start + capacity, len(lines))}/{len(lines)}"
                 self.render(lines[start:start + capacity], hint)
@@ -490,7 +500,7 @@ class Terminal:
                     start = max(0, len(lines) - capacity)
                 elif key in ("p", "P"):
                     with self.external():
-                        print(clean(self.buffer))
+                        print(clean(self.details or self.buffer))
 
     def set_links(self, links, kind="节点"):
         """Accept any number of formats/nodes, keeping each exact URL intact."""
@@ -626,7 +636,7 @@ class Terminal:
                 display = field if value else clip(placeholder, field_width)
                 body.append(("╭" + "─" * (width - 2) + "╮", "accent"))
                 input_row = len(body)
-                body.append(("│ " + display + " " * (width - cells(display) - 3) + "│", "accent" if value else "muted"))
+                body.append(("│ " + display + " " * (width - cells(display) - 3) + "│", "input" if value else "input_placeholder"))
                 body.append(("╰" + "─" * (width - 2) + "╯", "accent"))
                 body += note_rows[note_start:note_start + note_capacity] + [("", "text")] * max(0, note_capacity - len(note_rows))
                 hint = "Enter 确认 · Esc 取消 · Ctrl+U 清空"

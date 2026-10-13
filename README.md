@@ -1,4 +1,37 @@
-# Reality Relay Bootstrap
+# SuRelay
+
+轻量 Reality 部署、中转与 VPS 安全管理。安装后输入 **sr** 打开终端控制面板。
+
+## 旧安装如何更新
+
+之前使用本项目一键安装的服务器，以 root 执行：
+
+~~~bash
+cd /opt/reality-relay-bootstrap &&
+git pull --ff-only &&
+bash surelay.sh --install-command &&
+sr
+~~~
+
+自定义安装目录请替换第一行路径。更新保留现有配置、公钥、出口、UUID、Reality 密钥和订阅地址，不需要重装；已有 IPv6 设置也保留。Git 提示本地修改或分叉时先处理现场，不要 reset。之后可直接运行 **sr update** 更新脚本，再运行 **sr** 使用新版菜单。**sr status** 查看状态，**sr help** 查看帮助。
+
+也可以重新运行下方远程一键入口并在末尾追加 **--update**：只更新代码和安装 sr，不重跑部署或 SSH 加固。首次安装不要加 --update。
+
+项目显示名称已改为 SuRelay；仓库地址、原安装路径及运行数据路径继续兼容 reality-relay-bootstrap。
+
+## 管理菜单
+
+| 选项 | 功能 |
+| --- | --- |
+| 1. 节点与订阅 | 查看订阅/节点、导出配置、刷新订阅、修改名称和主入口端口 |
+| 2. 出口管理 | HTTP/SOCKS5 与上游 VLESS 的添加、修改、删除和连通性检查 |
+| 3. IPv6 设置 | 查看、探测启用、更换地址、关闭 IPv6 节点 |
+| 4. 域名与证书 | 配置 CF 域名和凭据、同步 DNS、检查续期、停用域名模式 |
+| 5. 服务与诊断 | 状态、启动/停止/重启代理与订阅、日志、配置和监听检查 |
+| 6. VPS 安全 | UFW 自定义端口规则、SSH 端口、公钥与密码认证、fail2ban |
+| 7. 高级维护 | 分别更新脚本/内核、节点备份恢复、高级配置、重置重装 |
+
+0 返回或退出，Ctrl+C 取消当前操作。打开菜单只读取状态；修改前显示当前值或变更内容，确认后应用。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
 
 在 Ubuntu 22.04/24.04、Debian 10–13 和 Alpine 3.19（OpenRC，x86_64/aarch64）VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box VLESS + Reality。默认保留现有节点身份，SSH 分两阶段加固。
 
@@ -24,7 +57,7 @@ Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以�
 
 首次只填写三组信息：
 
-1. **基础信息**：节点名称、服务器公网 IPv4/IPv6（至少一个）、SSH 端口。填写或保留探测到的公网 IPv6 地址，就会自动启用 IPv6 监听和节点；留空则暂不启用。
+1. **基础信息**：节点名称、服务器公网 IPv4（自动探测、可修改）、SSH 端口。首次安装不探测或启用 IPv6；需要时安装后使用 **sr → IPv6 设置**，或下文的 -6 维护指令。
 2. **Cloudflare（可选）**：域名、Zone、证书邮箱和 API Token；Token 输入显示 `*`。域名应已在 CF 激活，Token 需要对应 Zone 的 DNS 编辑和 Zone 读取权限；[首次配置说明](docs/cloudflare-domain-preflight.md)。
 3. **管理员公钥**：每行一把，空行结束；明确输入 `SKIP` 才会复用服务器已有公钥。
 

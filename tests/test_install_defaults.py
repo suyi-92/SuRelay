@@ -51,7 +51,7 @@ class InstallFlowTest(unittest.TestCase):
         result = self.run_bash('''
 prompt_log="$1/prompts"
 public_ipv4() { printf '192.0.2.10'; }
-public_ipv6() { printf '%s' "$TEST_IPV6"; }
+public_ipv6() { printf 'Unexpected IPv6 probe' >&2; exit 99; }
 read_default() {
   printf '%s\n' "$1" >>"$prompt_log"
   case "$1" in
@@ -70,12 +70,12 @@ printf '%s\n' "$DIRECT_PORT" "$NGINX_FALLBACK_PORT" "$RESET_PROXY_KEYS" "$ENABLE
 ''', root, TEST_IPV6=ipv6)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((root / "prompts").read_text().splitlines(), [
-            "SERVER_ALIAS", "SERVER_IP_IPv4", "SERVER_IP_IPv6（填入即启用）", "SSH_PORT",
+            "SERVER_ALIAS", "SERVER_IP_IPv4", "SSH_PORT",
             "ENABLE_CUSTOM_DOMAIN", "CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "LE_EMAIL",
             "CLOUDFLARE_API_TOKEN", "ADMIN_PUBKEY",
         ])
         self.assertEqual((root / "defaults").read_text().splitlines(), [
-            "443", "8443", "false", "true", "ClashMeta", "true", "true" if ipv6 else "false", ipv6,
+            "443", "8443", "false", "true", "ClashMeta", "true", "false", "",
         ])
         self.assertNotIn("fake-cf-token", result.stdout + result.stderr)
         self.assertEqual(len((root / "home-proxies.csv").read_text().splitlines()), 1)

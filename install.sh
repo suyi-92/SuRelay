@@ -40,11 +40,13 @@ usage() {
   cat <<'EOF'
 用法：
   sudo bash install.sh
+  sudo bash install.sh --update
   sudo bash install.sh --reset
   sudo bash install.sh -6 [IPv6地址]
   sudo bash install.sh --add-ipv6-node [IPv6地址]
 
 选项：
+      --update              更新脚本并安装 sr 命令，保留现有服务、配置和节点身份
       --reset               备份并卸载项目配置与服务，再重新填写配置安装
   -6, --add-ipv6-node [地址]  在已有部署上启用 IPv6 监听，并单独生成 v6 VLESS 节点
       --ipv6-address <地址>   与 -6 相同，但要求显式提供 IPv6 地址
@@ -60,13 +62,20 @@ EOF
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --update)
+        [[ "$INSTALL_MODE" == "full" ]] || die "--update 不能与其他维护模式合用。"
+        INSTALL_MODE="update"
+        shift
+        ;;
       --reset)
         [[ "$INSTALL_MODE" != "ipv6-node" ]] || die "--reset 不能与 -6 同时使用。"
+        [[ "$INSTALL_MODE" == "full" ]] || die "--reset 不能与其他维护模式合用。"
         INSTALL_MODE="reset"
         shift
         ;;
       -6|--add-ipv6-node)
         [[ "$INSTALL_MODE" != "reset" ]] || die "--reset 不能与 -6 同时使用。"
+        [[ "$INSTALL_MODE" == "full" ]] || die "-6 不能与其他维护模式合用。"
         INSTALL_MODE="ipv6-node"
         if [[ $# -ge 2 && "${2:-}" != -* ]]; then
           IPV6_NODE_ADDRESS="$2"
@@ -77,6 +86,7 @@ parse_args() {
         ;;
       --ipv6-address)
         [[ "$INSTALL_MODE" != "reset" ]] || die "--reset 不能与 -6 同时使用。"
+        [[ "$INSTALL_MODE" == "full" ]] || die "--ipv6-address 不能与其他维护模式合用。"
         [[ $# -ge 2 && -n "${2:-}" ]] || die "--ipv6-address 后必须填写 IPv6 地址。"
         INSTALL_MODE="ipv6-node"
         IPV6_NODE_ADDRESS="$2"
@@ -372,9 +382,11 @@ ensure_project() {
   info "当前是一键远程执行模式，将项目安装到：$INSTALL_DIR"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     info "检测到已有项目目录，拉取最新代码。"
+    [[ -z "$(git -C "$INSTALL_DIR" status --porcelain)" ]] || die "项目有未提交修改；保留现场，停止更新。"
+    [[ "$(git -C "$INSTALL_DIR" branch --show-current)" == "$DEFAULT_BRANCH" ]] || die "当前分支不是 $DEFAULT_BRANCH，停止自动更新。"
     run_logged git -C "$INSTALL_DIR" fetch --all --prune
-    run_logged git -C "$INSTALL_DIR" checkout "$DEFAULT_BRANCH"
-    run_logged git -C "$INSTALL_DIR" pull --ff-only
+    [[ -z "$(git -C "$INSTALL_DIR" rev-list "origin/$DEFAULT_BRANCH..HEAD")" ]] || die "存在本地独有提交，停止更新。"
+    run_logged git -C "$INSTALL_DIR" merge --ff-only "origin/$DEFAULT_BRANCH"
   else
     mkdir -p "$(dirname "$INSTALL_DIR")"
     run_logged git clone --branch "$DEFAULT_BRANCH" "$REPO_URL" "$INSTALL_DIR"
@@ -609,8 +621,8 @@ configure_install() {
   local enable_custom_domain custom_domain cloudflare_zone_name le_email cloudflare_api_token
   server_alias="$(read_default "SERVER_ALIAS" "")"
   server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
-  printf 'IPv6：填写或保留探测到的公网地址即启用；无地址可留空，安装后用 install.sh -6 补充。\n'
-  server_ip_ipv6="$(read_default "SERVER_IP_IPv6（填入即启用）" "$(public_ipv6)")"
+  # IPv6 is an explicit post-install action through sr or install.sh -6.
+  server_ip_ipv6=""
   ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-22}")"
 
   section "Cloudflare 域名（灰云 DNS）"
@@ -629,7 +641,7 @@ configure_install() {
   fi
   [[ -n "$server_alias" ]] || server_alias="$custom_domain"
   [[ -n "$server_alias" ]] || die "SERVER_ALIAS 不能为空。"
-  [[ -n "$server_ip_ipv4" || -n "$server_ip_ipv6" ]] || die "IPv4 和 IPv6 至少填写一个。"
+  [[ -n "$server_ip_ipv4" ]] || die "首次简洁安装需要公网 IPv4；IPv6-only 请按 README 使用高级配置部署。"
   if [[ -n "$server_ip_ipv6" ]]; then
     server_ip_ipv6="$(normalize_ipv6 "$server_ip_ipv6")"
   fi
@@ -652,14 +664,21 @@ main() {
   if [[ "$INSTALL_MODE" == "reset" && "$RUN_PHASES" != "true" ]]; then
     die "--reset 必须执行完整重装，不能与 RRB_RUN_PHASES=false 同时使用。"
   fi
-  if [[ "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ]]; then
+  if [[ "$INSTALL_MODE" != "update" && ( "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ) ]]; then
     init_input_tty
   fi
-  info "Reality Relay Bootstrap"
+  info "SuRelay"
   local project_dir
   ensure_entry_dependencies
   project_dir="$(ensure_project)"
   (export RRB_PROJECT_DIR="$project_dir"; source "$project_dir/scripts/00-lib.sh"; require_supported_os)
+  if [[ "$INSTALL_MODE" == "update" ]]; then
+    # A local invocation has not gone through ensure_project's remote update.
+    bash "$project_dir/surelay.sh" update
+    info "更新完成。输入 sr 打开 SuRelay；节点与订阅保持原样。"
+    return 0
+  fi
+  bash "$project_dir/surelay.sh" --install-command
   if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
     run_ipv6_node_flow "$project_dir"
     return 0
@@ -677,6 +696,7 @@ main() {
   fi
   configure_install "$project_dir"
   run_install_flow "$project_dir"
+  info "输入 sr 打开 SuRelay 管理菜单。"
 }
 
 main "$@"

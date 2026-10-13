@@ -13,7 +13,9 @@ if [[ "$ENABLE_UFW" != "true" ]]; then
 fi
 
 backup_path /etc/ufw || true
-pkg_install ufw
+if [[ "${RRB_SKIP_PACKAGE_INSTALL:-false}" != true ]] || ! command -v ufw >/dev/null 2>&1; then
+  pkg_install ufw
+fi
 ensure_ufw_ipv6
 
 run ufw allow "${SSH_PORT}/tcp" comment "reality-relay-bootstrap SSH current port"

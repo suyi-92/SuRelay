@@ -85,8 +85,8 @@ class ClientOutputTest(unittest.TestCase):
             self.assertEqual([link.fragment for link in links], ["edge", "home-01", "relay-01"])
             self.assertIn("ipv6: false", yaml)
             self.assertIn("http://192.0.2.10:51040/sub/", output)
-            self.assertIn("IPv6 节点：未配置公网地址", output)
-            self.assertIn(f"cd {shlex.quote(directory)} && sudo bash install.sh -6", output)
+            self.assertNotIn("IPv6 节点", output)
+            self.assertNotIn("sudo bash install.sh -6", output)
 
     def test_ipv6_only_brackets_subscription_and_local_addresses(self):
         with tempfile.TemporaryDirectory() as directory:

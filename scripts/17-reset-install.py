@@ -130,6 +130,7 @@ class ResetDeployment:
             if str(state) != '/etc/reality-relay-bootstrap' and value == f'/etc/reality-relay-bootstrap/{name}':
                 value = ''
             self.add(self.config_path({key: value}, key, str(state / name), parent=state))
+        self.add('/etc/fail2ban/jail.d/zz-surelay.local', marker='Managed by SuRelay.')
         for name in ('home-proxies.csv', 'upstream-nodes.txt'):
             self.add(state / name)
         subscription = self.config_path(env, 'SUBSCRIPTION_DIR', str(state / 'subscription'), parent=state)

@@ -167,7 +167,7 @@ def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]], proje
     print(f"\n{divider}\n{bold}节点与订阅{reset}\n{divider}")
     if any(":" in node["server"] for node in nodes):
         print("IPv6 节点：已生成（客户端和 VPS 均需 IPv6 可达）。")
-    else:
+    elif env.get("SERVER_IP_IPV6", "").strip():
         ipv6 = env.get("SERVER_IP_IPV6", "").strip()
         reason = "未启用监听" if ipv6 else "未配置公网地址"
         command = f"cd {shlex.quote(str(project_dir))} && sudo bash install.sh -6"

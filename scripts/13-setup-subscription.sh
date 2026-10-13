@@ -28,7 +28,9 @@ if [[ "$ENABLE_SUBSCRIPTION_SERVER" != "true" ]]; then
   exit 0
 fi
 
-pkg_install python3
+if [[ "${RRB_SKIP_PACKAGE_INSTALL:-false}" != true ]] || ! command -v python3 >/dev/null 2>&1; then
+  pkg_install python3
+fi
 
 if is_dry_run; then
   log "DRY-RUN: mkdir -p $SUBSCRIPTION_DIR"

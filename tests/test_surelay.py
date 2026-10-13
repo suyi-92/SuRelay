@@ -128,6 +128,72 @@ class ManagementTest(unittest.TestCase):
                 panel.setting("SERVER_ALIAS", "节点名称")
             apply.assert_not_called()
 
+    def test_upstream_wizard_identifies_each_node_without_raw_link_history(self):
+        panel = surelay.Panel(self.m)
+        first = "vless://11111111-2222-4333-8444-555555555555@one.example:443?security=none&type=tcp#Original-One"
+        second = first.replace("one.example", "two.example").replace("Original-One", "Original-Two")
+        with patch.object(surelay, "ask", side_effect=[first, second, "", "relay-01", "51043", "relay-02", "51044"]) as ask, \
+             patch.object(surelay, "confirm") as confirm, patch.object(self.m, "save_exits") as save:
+            panel.add_upstream()
+        first_context = str(ask.call_args_list[3].kwargs["context"])
+        second_context = str(ask.call_args_list[5].kwargs["context"])
+        self.assertIn("one.example:443", first_context)
+        self.assertIn("two.example:443", second_context)
+        self.assertNotIn("vless://", first_context + second_context)
+        self.assertIn("Original-One", first_context)
+        self.assertIn("Original-Two", second_context)
+        self.assertNotIn("vless://", confirm.call_args.args[0])
+        self.assertEqual([r["node_url"] for r in save.call_args.args[1]], [first, second])
+
+    def test_socks_form_distinguishes_remote_port_and_local_entry_and_keeps_password(self):
+        row = {"tag": "proxy-one", "type": "socks5", "server": "proxy.example", "server_port": "1080",
+               "username": "old-user", "password": "old-secret", "listen_port": "51043"}
+        seen = []
+        def answer(label, default="", **kwargs):
+            seen.append((label, kwargs))
+            return "-" if label == "代理用户名" else default
+        with patch.object(surelay, "ask", side_effect=answer), patch.object(surelay, "pick", return_value=0):
+            result = surelay.Panel(self.m).home_inputs(row, editing=True)
+        self.assertEqual(result["username"], "")
+        self.assertEqual(result["password"], "old-secret")
+        self.assertIn("远端代理", next(k["help"] for name, k in seen if name == "远端代理端口"))
+        self.assertIn("客户端连接", next(k["help"] for name, k in seen if name == "本机入口端口"))
+        self.assertNotIn("old-secret", str([k["context"] for _, k in seen]))
+
+    def test_cancelling_upstream_setup_keeps_existing_exits(self):
+        url = "vless://11111111-2222-4333-8444-555555555555@upstream.example:443?security=none&type=tcp"
+        with patch.object(surelay, "ask", side_effect=[url, "", "relay-01", KeyboardInterrupt()]), \
+             patch.object(self.m, "save_exits") as save:
+            with self.assertRaises(KeyboardInterrupt):
+                surelay.Panel(self.m).add_upstream()
+        save.assert_not_called()
+
+    def test_diagnostic_menu_actions_use_their_own_scope(self):
+        panel = surelay.Panel(self.m)
+        captured = {}
+        def capture(title, actions, *args):
+            captured.update(actions)
+        with patch.object(surelay, "menu", side_effect=capture), patch.object(surelay, "run") as run, \
+             patch.object(self.m, "phase") as phase:
+            panel.exits()
+            panel.services()
+            captured["检查出口连通性"]()
+            self.assertEqual(run.call_args.args[0][-2:], ["--mode", "exits"])
+            captured["检查配置与监听"]()
+            self.assertEqual(run.call_args.args[0][-2:], ["--mode", "config"])
+            phase.assert_not_called()
+
+    def test_firewall_choices_and_preview_use_readable_rules(self):
+        panel = surelay.Panel(self.m)
+        rule = {"port": "8080", "protocol": "tcp", "sources": ["192.0.2.0/24"], "note": "web"}
+        with patch.object(panel.s, "custom_rules", return_value=(None, [rule])), \
+             patch.object(surelay, "pick", return_value=0) as pick, patch.object(surelay, "confirm") as confirm, \
+             patch.object(panel.s, "edit_rule") as edit:
+            panel.change_rule(False)
+        self.assertEqual(pick.call_args.args[1], ["web · 8080/TCP · 来源 192.0.2.0/24"])
+        self.assertIn("8080/TCP", confirm.call_args.args[0])
+        edit.assert_called_once_with(None, 0)
+
     def test_panel_links_are_read_only_and_contain_only_client_endpoints(self):
         from urllib.parse import urlsplit
         from surelay_terminal import Terminal

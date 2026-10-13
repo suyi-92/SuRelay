@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from surelay_core import Error, GEN, Manager, ROOT, Snapshot, atomic, install_command, module, port, run
 from surelay_security import Security, firewall_rule
@@ -30,14 +31,82 @@ def divider():
     print(color("─" * min(60, max(24, shutil.get_terminal_size().columns - 2)), "muted"))
 
 
-def ask(label, default="", secret=False, multiline=False):
+def ask(label, default="", secret=False, multiline=False, *, help="", context=(), step="",
+        default_label="当前值", empty_hint="", validate=None):
     prompt = f"{label}" + (f" [{default}]" if default and not secret else "") + "："
     window = current_terminal()
+    def checked(value):
+        value = (value if secret else value.strip()) or str(default)
+        try:
+            return validate(value) if validate else value
+        except (Error, GEN.ConfigError) as exc:
+            raise ValueError(str(exc)) from exc
     if window:
-        value = window.read_line(label, default, secret, multiline)
-    else:
-        value = getpass.getpass(prompt) if secret else input(prompt)
-    return (value if secret else value.strip()) or str(default)
+        return window.read_line(label, default, secret, multiline, help=help, context=context, step=step,
+                                default_label=default_label, empty_hint=empty_hint, validate=checked)
+    for key, value in context:
+        print(f"{key}：{value}")
+    if help:
+        print(help)
+    if empty_hint:
+        print(empty_hint)
+    while True:
+        try:
+            return checked(getpass.getpass(prompt) if secret else input(prompt))
+        except ValueError as exc:
+            print(f"请重新输入：{exc}")
+
+
+def pick(label, options, *, context=(), default=0):
+    """Choose a value in-place without treating the selector as a submenu."""
+    if not options:
+        raise Error("暂无可选项目。")
+    window = current_terminal()
+    if window:
+        with window.page(label):
+            status = "\n".join(f"{key}：{value}" for key, value in context)
+            index = window.choose([(name, None) for name in options], status, default, navigation=False)
+        if index is None:
+            raise Cancelled("操作已取消。")
+        return index
+    print(label)
+    for index, name in enumerate(options, 1):
+        print(f"{index}) {name}")
+    value = ask("请选择（0 取消）", str(default + 1), context=context)
+    if value == "0":
+        raise Cancelled("操作已取消。")
+    if not value.isdigit() or not 1 <= int(value) <= len(options):
+        raise Error("请选择列表中的编号。")
+    return int(value) - 1
+
+
+def endpoint(host, port):
+    return f"[{host.strip('[]')}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def required(value):
+    if not value:
+        raise Error("此项不能为空。")
+    return value
+
+
+def positive_integer(value):
+    if not value.isdigit() or int(value) < 1:
+        raise Error("请填写大于 0 的整数。")
+    return str(int(value))
+
+
+def exit_name(value):
+    if not GEN.TAG_RE.fullmatch(value):
+        raise Error("出口名称只可使用字母、数字、横线和下划线。")
+    return value
+
+
+def upstream_info(url):
+    try:
+        return GEN.parse_upstream_node("preview", 51043, url, 1)
+    except (GEN.ConfigError, ValueError) as exc:
+        raise Error(str(exc).replace(url, "[链接]").replace("upstream-nodes.txt 第 1 行", "链接")) from exc
 
 
 class Cancelled(Error):
@@ -201,7 +270,10 @@ class Panel:
 
     def setting(self, key, label, validate=lambda value: value):
         self.m.reload()
-        value = validate(ask(label, self.m.env[key]))
+        help = ("修改客户端中显示的直连节点名称，保存后刷新订阅。" if key == "SERVER_ALIAS" else
+                "客户端连接这台 VPS 使用的端口；域名模式下订阅地址也会一起更新。")
+        value = validate(ask(label, self.m.env[key], help=help,
+                             context=[("当前节点", self.m.env["SERVER_ALIAS"])], validate=validate))
         if not value:
             raise Error(f"{label}不能为空。")
         if value == self.m.env[key]:
@@ -215,24 +287,27 @@ class Panel:
         self.m.apply(values, domain=key == "DIRECT_PORT" and self.m.env["ENABLE_CUSTOM_DOMAIN"] == "true")
 
     def show_exits(self):
-        print(f"固定出口：服务器直连，入口 {self.m.env['DIRECT_PORT']}/tcp")
+        print(f"直连出口 · 服务器本机网络 · 本机入口 {self.m.env['DIRECT_PORT']}/tcp")
         rows = self.m.rows()
+        if not rows:
+            print("尚未添加转发出口。")
         for i, row in enumerate(rows, 1):
-            print(f"{i}) {row['tag']} | {row['type']} | {row['server']}:{row['server_port']} | 入口 {row['listen_port']}/tcp")
+            print(f"{i}) {row['tag']} · {row['type'].upper()}\n   远端 {endpoint(row['server'], row['server_port'])} · 本机入口 {row['listen_port']}/tcp")
         return rows
 
     def select_exit(self):
-        rows = self.show_exits()
-        value = ask("出口编号")
-        if not value.isdigit() or not 1 <= int(value) <= len(rows):
-            raise Error("出口编号无效。")
-        return rows[int(value) - 1]
+        rows = self.m.rows()
+        if not rows:
+            raise Error("还没有可修改的出口，请先添加 HTTP/SOCKS5 或 VLESS 出口。")
+        index = pick("选择要操作的出口", [f"{r['tag']} · {r['type'].upper()} · {endpoint(r['server'], r['server_port'])} · 本机 {r['listen_port']}"
+                                         for r in rows])
+        return rows[index]
 
     def exits(self):
         menu("出口管理", [
             ("查看出口列表", self.show_exits), ("添加 HTTP/SOCKS5 出口", self.add_home),
             ("添加上游 VLESS", self.add_upstream), ("修改出口", self.edit_exit),
-            ("删除出口", self.delete_exit), ("检查出口连通性", lambda: self.m.phase("validate")),
+            ("删除出口", self.delete_exit), ("检查出口连通性", lambda: self.diagnostics("exits")),
         ])
 
     def next_port(self, home, upstream):
@@ -242,43 +317,94 @@ class Panel:
             used.add(int(self.m.env["SUBSCRIPTION_LISTEN_PORT"]))
         return str(GEN.next_available_port(int(self.m.env["HOME_PORT_START"]), int(self.m.env["HOME_PORT_END"]), used))
 
-    def home_inputs(self, existing=None):
+    def home_inputs(self, existing=None, *, editing=False):
         row = dict(existing or {})
-        for key, label, default in (
-            ("tag", "出口名称（字母/数字/横线/下划线）", "home-01"),
-            ("type", "代理类型 socks5/http", "socks5"), ("server", "代理地址", ""),
-            ("server_port", "代理端口", "1080"), ("username", "用户名（- 清空）", ""),
-            ("password", "密码（回车保留，- 清空）", ""), ("listen_port", "本机入口端口", ""),
-        ):
-            value = ask(label, row.get(key, default), secret=key == "password")
+        original = row.get("tag", "新出口")
+        def context():
+            items = [("正在修改" if editing else "正在添加", row.get("tag", original))]
+            if row.get("server"):
+                items.append(("远端代理", row.get("type", "socks5").upper() + " · " + endpoint(row["server"], row.get("server_port", "待填写"))))
+            return items
+        definitions = [
+            ("tag", "出口名称", "home-01", "用于区分出口，也会显示在客户端节点列表中。", exit_name),
+            ("type", "代理协议", "socks5", "", None),
+            ("server", "远端代理地址", "", "填写代理提供方的 IP 或域名，例如 proxy.example.com；不要带协议或端口。", self.proxy_host),
+            ("server_port", "远端代理端口", "1080", "代理提供方给出的端口，用于这台 VPS 连接远端代理。", port),
+            ("username", "代理用户名", "", "填写代理提供方的认证账号；无需认证可留空，输入 - 清空。", None),
+            ("password", "代理密码", "", "填写该代理账号的密码；输入时隐藏，输入 - 清空。", None),
+            ("listen_port", "本机入口端口", "", "客户端连接这台 VPS 的端口，流量从这里转发至上面的远端代理。", port),
+        ]
+        for index, (key, label, default, help, validator) in enumerate(definitions, 1):
+            if key == "type":
+                selected = pick("2/7  选择远端代理协议", ["SOCKS5", "HTTP"], context=context(),
+                                default=1 if row.get(key) == "http" else 0)
+                row[key] = ("socks5", "http")[selected]
+                continue
+            value = ask(label, row.get(key, default), secret=key == "password", help=help, context=context(),
+                        step=f"{index}/7", default_label="当前值" if editing else "建议值",
+                        empty_hint="回车留空，不使用此项认证。" if key in {"username", "password"} else "",
+                        validate=validator)
             row[key] = "" if key in {"username", "password"} and value == "-" else value
         row.setdefault("network", "tcp")
         return row
 
+    @staticmethod
+    def proxy_host(value):
+        value = required(value.strip("[]"))
+        if any(c.isspace() for c in value) or any(c in value for c in "/@?#"):
+            raise Error("只填写 IP 或域名，不要带协议、认证信息、路径或端口。")
+        if ":" in value:
+            try:
+                ipaddress.IPv6Address(value)
+            except ValueError as exc:
+                raise Error("域名和端口请分开填写；IPv6 地址可以直接输入。") from exc
+        return value
+
     def add_home(self):
         home, upstream = self.m.exit_files()
-        row = self.home_inputs({"listen_port": self.next_port(home, upstream)})
-        confirm(f"添加出口 {row['tag']}，入口 {row['listen_port']}/tcp？")
+        name = GEN.safe_tag("", "home-01", {r["tag"] for r in [*home, *upstream]})
+        row = self.home_inputs({"tag": name, "listen_port": self.next_port(home, upstream)})
+        confirm(f"添加出口 {row['tag']}\n远端代理：{row['type'].upper()} · {endpoint(row['server'], row['server_port'])}\n"
+                f"本机入口：{row['listen_port']}/tcp\n保存后生成对应节点并刷新订阅。", action="保存出口")
         self.m.save_exits([*home, row], upstream)
 
     def add_upstream(self):
         home, upstream = self.m.exit_files()
-        print("每行粘贴一条 VLESS 链接，空行结束。")
-        urls = []
+        urls, parsed = [], []
+        def validate_url(value):
+            if value:
+                upstream_info(value)
+            return value
         while True:
-            value = ask("VLESS", multiline=True)
+            context = [("已接收", f"{len(urls)} 个节点")]
+            if parsed:
+                last = parsed[-1]
+                context.append(("上一节点", endpoint(last["server"], last["server_port"])))
+            value = ask("VLESS 节点链接", multiline=True, context=context, step="1/2 导入节点",
+                        help="粘贴 vless:// 链接，可一次粘贴多行。随后逐个设置名称和本机入口端口。",
+                        empty_hint="空行回车结束导入，进入节点设置。", validate=validate_url)
             if not value:
                 break
             urls.append(value)
+            parsed.append(upstream_info(value))
         if not urls:
             return
-        for url in urls:
+        added = []
+        for index, (url, node) in enumerate(zip(urls, parsed), 1):
             name = GEN.safe_tag("", f"relay-{len(upstream) + 1:02}", {r["tag"] for r in [*home, *upstream]})
-            name = ask("出口名称", name)
-            listen = port(ask("本机入口端口", self.next_port(home, upstream)))
+            context = [("正在设置", f"第 {index}/{len(urls)} 个 · {unquote(urlsplit(url).fragment) or '未命名节点'}"),
+                       ("上游地址", endpoint(node["server"], node["server_port"]))]
+            name = ask("出口名称", name, context=context, step="1/2",
+                       help="这是转发后在客户端显示的名称；可用字母、数字、横线和下划线。",
+                       default_label="建议值", validate=exit_name)
+            context = [("正在设置", f"第 {index}/{len(urls)} 个 · {name}"), *context[1:]]
+            listen = port(ask("本机入口端口", self.next_port(home, upstream), context=context, step="2/2",
+                              help="客户端连接这台 VPS 的端口；上游节点的远端端口保持不变。",
+                              default_label="建议值", validate=port))
             GEN.parse_upstream_node(name, int(listen), url, 1)
             upstream.append({"tag": name, "listen_port": listen, "node_url": url})
-        confirm(f"添加 {len(urls)} 个出口并刷新订阅？")
+            added.append(f"{name} · 本机 {listen} → {endpoint(node['server'], node['server_port'])}")
+        confirm("将添加以下出口并刷新订阅：\n" + "\n".join(added), action="保存出口")
         self.m.save_exits(home, upstream)
 
     def edit_exit(self):
@@ -287,14 +413,20 @@ class Panel:
         group = home if selected["source"] == "home" else upstream
         index = next(i for i, row in enumerate(group) if row["tag"] == selected["tag"])
         if selected["source"] == "home":
-            group[index] = self.home_inputs(group[index])
+            group[index] = self.home_inputs(group[index], editing=True)
         else:
             row = dict(group[index])
-            row["tag"] = ask("出口名称", row["tag"])
-            row["listen_port"] = port(ask("本机入口端口", row["listen_port"]))
-            row["node_url"] = ask("上游 VLESS（回车保留）", row["node_url"], secret=True)
+            context = [("正在修改", selected["tag"]), ("上游地址", endpoint(selected["server"], selected["server_port"]))]
+            row["tag"] = ask("出口名称", row["tag"], context=context, step="1/3", validate=exit_name,
+                             help="修改客户端节点列表中显示的出口名称。")
+            row["listen_port"] = port(ask("本机入口端口", row["listen_port"], context=context, step="2/3", validate=port,
+                                           help="客户端连接这台 VPS 的端口；不修改上游服务器的端口。"))
+            row["node_url"] = ask("上游 VLESS 链接", row["node_url"], secret=True, context=context, step="3/3",
+                                  help="替换此出口连接的远端节点；回车保留现有链接。",
+                                  validate=lambda value: (upstream_info(value), value)[1])
             group[index] = row
-        confirm(f"应用出口 {selected['tag']} 的修改？")
+        confirm(f"保存出口：{selected['tag']} → {group[index]['tag']}\n本机入口：{group[index]['listen_port']}/tcp\n保存后刷新订阅。",
+                action="保存修改")
         self.m.save_exits(home, upstream)
 
     def delete_exit(self):
@@ -306,7 +438,7 @@ class Panel:
 
     def ipv6(self):
         menu("IPv6 设置", [
-            ("查看当前配置", lambda: print(f"IPv6：{self.m.env['SERVER_IP_IPV6'] or '未配置'}；监听：{self.m.env['ENABLE_IPV6_LISTEN']}")),
+            ("查看当前配置", lambda: print(f"公网 IPv6：{self.m.env['SERVER_IP_IPV6'] or '未配置'}\nIPv6 节点：{'已启用' if self.m.env['ENABLE_IPV6_LISTEN'] == 'true' else '未启用'}")),
             ("启用 IPv6 节点", self.enable_ipv6), ("修改 IPv6 地址", self.enable_ipv6),
             ("关闭 IPv6 节点", self.disable_ipv6),
         ])
@@ -317,7 +449,8 @@ class Panel:
         if not default:
             output = run(["ip", "-6", "-o", "addr", "show", "scope", "global"], capture=True)
             default = output.split()[3].split("/")[0] if output else ""
-        value = ask("公网 IPv6", default)
+        value = ask("公网 IPv6 地址", default, help="填写分配给这台 VPS 的公网 IPv6，用于新增 IPv6 入口节点。",
+                    context=[("当前节点", self.m.env["SERVER_ALIAS"])], default_label="检测值")
         address = ipaddress.IPv6Address(value.strip("[]"))
         if not address.is_global:
             raise Error("请填写可路由的公网 IPv6 地址。")
@@ -339,7 +472,7 @@ class Panel:
 
     def domain(self):
         menu("域名与证书", [
-            ("查看当前配置", lambda: print(f"域名：{self.m.env['CUSTOM_DOMAIN'] or '未配置'}；启用：{self.m.env['ENABLE_CUSTOM_DOMAIN']}\nZone：{self.m.env['CLOUDFLARE_ZONE_NAME']}")),
+            ("查看当前配置", lambda: print(f"节点域名：{self.m.env['CUSTOM_DOMAIN'] or '未配置'}\n域名模式：{'已启用' if self.m.env['ENABLE_CUSTOM_DOMAIN'] == 'true' else '未启用'}\nCloudflare 根域名：{self.m.env['CLOUDFLARE_ZONE_NAME'] or '未配置'}")),
             ("配置或修改 CF 域名", self.configure_domain), ("更新 CF 凭据", self.cf_credentials),
             ("同步 DNS 记录", lambda: self.m.phase("cloudflare-dns")),
             ("检查或续期证书", self.certificate), ("停用域名模式", self.disable_domain),
@@ -347,11 +480,17 @@ class Panel:
 
     def configure_domain(self):
         env = self.m.env
-        domain = ask("域名", env["CUSTOM_DOMAIN"]).lower()
+        context = [("当前节点", env["SERVER_ALIAS"])]
+        domain = ask("节点域名", env["CUSTOM_DOMAIN"], context=context, step="1/4", validate=required,
+                     help="用于节点连接和 HTTPS 订阅，例如 relay.example.com。填写托管在 Cloudflare 的域名。").lower()
+        context = [("正在配置", domain)]
         values = {"ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": domain,
-                  "CLOUDFLARE_ZONE_NAME": ask("Cloudflare Zone", env["CLOUDFLARE_ZONE_NAME"] or ".".join(domain.split(".")[-2:])),
-                  "LE_EMAIL": ask("证书邮箱", env["LE_EMAIL"]),
-                  "CLOUDFLARE_API_TOKEN": ask("CF API Token（回车保留）", env["CLOUDFLARE_API_TOKEN"], secret=True),
+                  "CLOUDFLARE_ZONE_NAME": ask("Cloudflare 根域名", env["CLOUDFLARE_ZONE_NAME"] or ".".join(domain.split(".")[-2:]),
+                                             context=context, step="2/4", help="Cloudflare 中托管的 Zone，例如 example.com。请核对建议值。", validate=required),
+                  "LE_EMAIL": ask("证书通知邮箱", env["LE_EMAIL"], context=context, step="3/4",
+                                  help="用于申请和接收 TLS 证书相关通知。", validate=required),
+                  "CLOUDFLARE_API_TOKEN": ask("Cloudflare API Token", env["CLOUDFLARE_API_TOKEN"], secret=True,
+                                              context=context, step="4/4", help="需要此域名的 Zone 读取和 DNS 编辑权限；输入内容隐藏。", validate=required),
                   "REALITY_SERVER_NAME": domain, "REALITY_HANDSHAKE_SERVER": env["NGINX_FALLBACK_HOST"],
                   "REALITY_HANDSHAKE_PORT": env["NGINX_FALLBACK_PORT"],
                   "SUBSCRIPTION_BASE_URL": "https://" + domain + (":" + env["DIRECT_PORT"] if env["DIRECT_PORT"] != "443" else ""),
@@ -363,7 +502,8 @@ class Panel:
             self.m.remove_old_dns(old, ["A", "AAAA"])
 
     def cf_credentials(self):
-        value = ask("新 CF API Token", secret=True)
+        value = ask("新的 Cloudflare API Token", secret=True, context=[("域名", self.m.env["CUSTOM_DOMAIN"] or "未配置")],
+                    help="替换域名解析使用的凭据，需要 Zone 读取和 DNS 编辑权限。", validate=required)
         if not value:
             raise Error("Token 不能为空。")
         confirm("更新 CF 凭据并验证域名配置？")
@@ -390,10 +530,8 @@ class Panel:
     def service_action(self, action):
         names = ["sing-box", self.m.env["SUBSCRIPTION_SERVICE"]]
         label = {"start": "启动", "stop": "停止", "restart": "重启"}[action]
-        choice = ask(f"{label}服务：1 代理 / 2 订阅 / 3 全部", "3")
-        if choice not in {"1", "2", "3"}:
-            raise Error("服务选择无效。")
-        targets = names if choice == "3" else [names[int(choice) - 1]]
+        choice = pick(f"选择要{label}的服务", ["代理服务 · sing-box", "订阅服务", "代理与订阅服务"], default=2)
+        targets = names if choice == 2 else [names[choice]]
         for name in targets:
             self.m.service(name, action)
         print(f"已{label}所选服务。")
@@ -403,8 +541,11 @@ class Panel:
             ("查看详细状态", self.detail_status),
             ("启动服务", lambda: self.service_action("start")), ("停止服务", lambda: self.service_action("stop")),
             ("重启服务", lambda: self.service_action("restart")), ("查看日志", self.logs),
-            ("检查配置与监听", lambda: self.m.phase("validate")),
+            ("检查配置与监听", lambda: self.diagnostics("config")),
         ])
+
+    def diagnostics(self, mode):
+        run(["python3", self.m.root / "scripts/surelay_diagnostics.py", "--project-dir", self.m.root, "--mode", mode])
 
     def detail_status(self):
         self.status()
@@ -416,11 +557,12 @@ class Panel:
                 run(["systemctl", "status", service, "--no-pager", "--lines=5"], check=False)
 
     def logs(self):
-        choice = ask("日志：1 SuRelay / 2 sing-box / 3 订阅", "1")
-        if choice == "1":
-            run(["tail", "-n", "80", "/var/log/surelay.log"], check=False)
-        elif choice in {"2", "3"}:
-            name = "sing-box" if choice == "2" else self.m.env["SUBSCRIPTION_SERVICE"]
+        choice = pick("选择要查看的日志", ["SuRelay 部署日志", "代理服务 · sing-box", "订阅服务"])
+        if choice == 0:
+            paths = [Path("/var/log/surelay.log"), Path("/var/log/reality-relay-bootstrap.log")]
+            run(["tail", "-n", "80", next((p for p in paths if p.exists()), paths[0])], check=False)
+        else:
+            name = "sing-box" if choice == 1 else self.m.env["SUBSCRIPTION_SERVICE"]
             if self.m.alpine():
                 paths = [Path(folder) / f"{name}.log" for folder in ("/var/log/surelay", "/var/log/reality-relay")]
                 run(["tail", "-n", "80", next((p for p in paths if p.exists()), paths[0])], check=False)
@@ -430,15 +572,21 @@ class Panel:
     def security(self):
         menu("VPS 安全", [
             ("查看安全状态", self.security_status), ("防火墙与端口", self.firewall),
-            ("修改 SSH 端口", lambda: self.s.change_ssh_port(ask("新 SSH 端口", self.m.env["SSH_PORT"]), self.confirm_login)),
+            ("修改 SSH 端口", lambda: self.s.change_ssh_port(ask("新的 SSH 登录端口", self.m.env["SSH_PORT"], validate=port,
+                help="修改这台 VPS 的 SSH 监听端口。验证新端口登录成功后才撤下旧端口。"), self.confirm_login)),
             ("管理 SSH 公钥", self.keys), ("SSH 登录设置", self.ssh_login),
             ("登录防护（fail2ban）", self.fail2ban),
         ])
 
     def security_status(self):
+        labels = {"port": "SSH 端口", "permitrootlogin": "root 登录", "pubkeyauthentication": "公钥认证",
+                  "passwordauthentication": "密码认证", "authenticationmethods": "认证方式"}
+        values = {"yes": "允许", "no": "禁止", "publickey": "公钥", "any": "任一已启用方式",
+                  "prohibit-password": "仅公钥", "without-password": "仅公钥"}
         for line in self.s.effective().splitlines():
-            if line.split()[0] in {"port", "permitrootlogin", "pubkeyauthentication", "passwordauthentication", "authenticationmethods"}:
-                print(line)
+            key, _, value = line.partition(" ")
+            if key in labels:
+                print(f"{labels[key]}：{values.get(value, value)}")
         print(f"SSH 公钥数量：{len(self.s.keys()[2])}")
         if shutil.which("ufw"):
             run(["ufw", "status", "verbose"], check=False)
@@ -467,18 +615,18 @@ class Panel:
         return lines, indexes
 
     def key_selection(self):
-        lines, indexes = self.show_keys()
-        choice = ask("公钥编号")
-        if not choice.isdigit() or not 1 <= int(choice) <= len(indexes):
-            raise Error("公钥编号无效。")
-        return lines, indexes[int(choice) - 1]
+        _, lines, indexes = self.s.keys()
+        if not indexes:
+            raise Error("还没有已授权的 SSH 公钥。")
+        choice = pick("选择 SSH 公钥", [self.s.validate_key(lines[index]).strip() for index in indexes])
+        return lines, indexes[choice]
 
     def add_keys(self):
         _, lines, _ = self.s.keys()
-        print("每行一把公钥，空行结束。")
         added = []
         while True:
-            value = ask("公钥", multiline=True)
+            value = ask("SSH 公钥", multiline=True, help="粘贴 ssh-ed25519 或 ssh-rsa 等公钥，可一次粘贴多行。",
+                        empty_hint="空行回车结束录入。", context=[("已接收", f"{len(added)} 把新公钥")])
             if not value:
                 break
             print(self.s.validate_key(value))
@@ -495,7 +643,8 @@ class Panel:
 
     def replace_key(self):
         lines, index = self.key_selection()
-        key = ask("新公钥")
+        key = ask("替换用的 SSH 公钥", context=[("待替换指纹", self.s.validate_key(lines[index]).strip())],
+                  help="先添加新公钥；在新窗口验证登录成功后，才移除所选旧公钥。", validate=required)
         print(self.s.validate_key(key))
         if key in lines:
             raise Error("该公钥已存在。")
@@ -529,26 +678,40 @@ class Panel:
         print("上述为本机规则与监听；云厂商安全组需在控制台核对。")
 
     def rule_input(self):
-        return firewall_rule(ask("端口或范围"), ask("协议 tcp/udp/both", "tcp"),
-                             ask("来源 IP/网段，any 为所有地址", "any"),
-                             ask("地址族 4/6/both", "both"), ask("备注", "application"))
+        ports = ask("本机端口或端口范围", step="1/5", help="开放这台 VPS 的入站端口，例如 8080 或 8000:8010。",
+                    validate=lambda value: firewall_rule(value, "tcp", "any", "both", "application")["port"])
+        context = [("正在配置", f"本机端口 {ports}")]
+        proto = ("tcp", "udp", "both")[pick("2/5  选择协议", ["TCP", "UDP", "TCP 与 UDP"], context=context)]
+        source = ask("允许访问的来源", "any", context=context, step="3/5",
+                     help="填写 IP 或网段；any 允许所有来源访问。", default_label="建议值",
+                     validate=lambda value: value if value == "any" else str(ipaddress.ip_network(value, strict=False)))
+        family = ("4", "6", "both")[pick("4/5  选择地址族", ["仅 IPv4", "仅 IPv6", "IPv4 与 IPv6"], context=context, default=2)]
+        note = ask("规则备注", "application", context=context, step="5/5", help="为这条规则起一个便于识别的名称。", default_label="建议值")
+        return firewall_rule(ports, proto, source, family, note)
 
     def add_rule(self):
         rule = self.rule_input()
-        confirm(f"开放本机端口：{rule}？")
+        confirm("将开放本机端口：\n" + self.rule_label(rule), action="开放端口")
         self.s.edit_rule(rule)
+
+    @staticmethod
+    def rule_label(rule):
+        protocol = "TCP/UDP" if rule["protocol"] == "both" else rule["protocol"].upper()
+        source = "、".join(rule["sources"])
+        return f"{rule['note']} · {rule['port']}/{protocol} · 来源 {source}"
 
     def change_rule(self, replace):
         _, rules = self.s.custom_rules()
-        for i, rule in enumerate(rules, 1):
-            print(f"{i}) {rule}")
-        choice = ask("自定义规则编号")
-        if not choice.isdigit() or not 1 <= int(choice) <= len(rules):
-            raise Error("自定义规则编号无效；其他软件的规则仅展示。")
+        if not rules:
+            raise Error("暂无 SuRelay 自定义规则；其他软件的规则不在这里修改。")
+        choice = pick("选择要修改的规则" if replace else "选择要删除的规则", [self.rule_label(r) for r in rules])
         replacement = self.rule_input() if replace else None
-        confirm("修改所选规则？" if replace else "删除所选自定义规则？",
+        preview = self.rule_label(rules[choice])
+        if replacement:
+            preview += "\n修改为：\n" + self.rule_label(replacement)
+        confirm(("修改所选规则：\n" if replace else "删除所选自定义规则：\n") + preview,
                 action="应用修改" if replace else "删除规则", danger=not replace)
-        self.s.edit_rule(replacement, int(choice) - 1)
+        self.s.edit_rule(replacement, choice)
 
     def enable_firewall(self):
         confirm("保留 SSH 和项目业务端口，然后启用 UFW？")
@@ -580,13 +743,15 @@ class Panel:
         self.s.fail2ban_settings({"enabled": "false"})
 
     def unban(self):
-        value = str(ipaddress.ip_address(ask("解除封禁的 IP")))
+        value = str(ipaddress.ip_address(ask("解除封禁的 IP 地址", help="从 SSH 登录防护的封禁列表中移除此 IP。",
+                                             validate=lambda value: str(ipaddress.ip_address(value)))))
         run(["fail2ban-client", "set", "sshd", "unbanip", value])
         print(f"已解除 {value} 的 SSH 封禁。")
 
     def whitelist(self):
-        run(["fail2ban-client", "get", "sshd", "ignoreip"])
-        value = ask("新的白名单，IP/网段以空格分隔；本机回环始终保留")
+        current = run(["fail2ban-client", "get", "sshd", "ignoreip"], capture=True)
+        value = ask("新的 SSH 防护白名单", context=[("当前白名单", current)],
+                    help="用空格分隔多个 IP 或网段；将替换当前白名单，本机回环始终保留。", empty_hint="回车仅保留本机回环。")
         values = ["127.0.0.1/8", "::1", *value.split()]
         for item in values:
             ipaddress.ip_network(item, strict=False)
@@ -594,9 +759,17 @@ class Panel:
         self.s.fail2ban_settings({"ignoreip": " ".join(dict.fromkeys(values))})
 
     def ban_settings(self):
-        values = {key: ask(label, default) for key, label, default in (
-            ("bantime", "封禁秒数", "3600"), ("findtime", "统计窗口秒数", "600"), ("maxretry", "允许失败次数", "5"))}
-        confirm(f"应用 SSH 防护参数：{values}？")
+        definitions = [("bantime", "封禁时长（秒）", "3600", "触发防护后，禁止此 IP 登录多久。"),
+                       ("findtime", "统计窗口（秒）", "600", "在多长时间内累计登录失败次数。"),
+                       ("maxretry", "允许失败次数", "5", "统计窗口内达到此次数后封禁 IP。")]
+        values = {}
+        for index, (key, label, fallback, help) in enumerate(definitions, 1):
+            result = run(["fail2ban-client", "get", "sshd", key], capture=True, check=False)
+            current = result.stdout.strip() if result.returncode == 0 else ""
+            default = current if current.isdigit() else fallback
+            values[key] = ask(label, default, step=f"{index}/3", help=help,
+                              default_label="当前值" if current.isdigit() else "建议值", validate=positive_integer)
+        confirm(f"SSH 登录防护：\n封禁 {values['bantime']} 秒\n在 {values['findtime']} 秒内允许失败 {values['maxretry']} 次", action="应用参数")
         self.s.fail2ban_settings(values)
 
     def advanced(self):
@@ -616,7 +789,8 @@ class Panel:
         run(["bash", self.m.root / "scripts/18-update-core.sh"], env={"RRB_PROJECT_DIR": str(self.m.root), "RRB_VERBOSE": "true"})
 
     def restore(self):
-        path = ask("SuRelay 节点备份目录")
+        path = ask("备份目录路径", help="填写此前“备份节点配置”生成的完整目录，例如 /root/surelay-backups/surelay-xxxx。",
+                   validate=required)
         confirm("恢复节点配置、出口与密钥；现有节点和订阅身份可能变化，SSH 设置保持不变？",
                 action="恢复备份", danger=True)
         self.m.restore_nodes(path)

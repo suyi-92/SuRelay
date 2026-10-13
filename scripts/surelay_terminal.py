@@ -314,9 +314,11 @@ class Terminal:
             rows.append((f" {'›' if i == selected else ' '} {number}) {name}", style))
         return rows
 
-    def choose(self, actions, status="", selected=0):
-        self.menu_count += 1
+    def choose(self, actions, status="", selected=0, *, navigation=True):
+        if navigation:
+            self.menu_count += 1
         count = len(actions) + 1
+        start, follow_selection = 0, True
         with self.keys():
             while True:
                 if self.too_small():
@@ -331,20 +333,36 @@ class Terminal:
                     body.extend((part, style) for part in wrap(line, self.content_width()))
                 if body:
                     body.append(("", "text"))
-                offset = len(body)
-                body += self.menu_rows([name for name, _ in actions], selected,
-                                       "退出" if len(self.trail) == 1 else "返回")
-                start = max(0, offset + selected - capacity + 1)
-                self.render(body[start:start + capacity], " ↑↓ / 数字选择 · Enter 确认 · Esc 返回 · q 退出")
+                focus = len(body)
+                for i, (text, style) in enumerate(self.menu_rows([name for name, _ in actions], selected,
+                                                              "退出" if len(self.trail) == 1 else "返回")):
+                    parts = wrap(text, self.content_width())
+                    body.extend((part, style) for part in parts)
+                    if i == selected:
+                        focus = len(body) - 1
+                last_start = max(0, len(body) - capacity)
+                start = min(start, last_start)
+                if follow_selection:
+                    start = max(0, focus - capacity + 1)
+                hint = "↑↓ / 数字选择 · Enter 确认 · Esc 返回"
+                if last_start:
+                    hint += f"\nPgUp/PgDn 翻页 · {start + 1}–{min(start + capacity, len(body))}/{len(body)}"
+                self.render(body[start:start + capacity], hint)
                 key = self.key()
                 if key == UP:
                     selected = (selected - 1) % count
+                    follow_selection = True
                 elif key in (DOWN, "\t"):
                     selected = (selected + 1) % count
+                    follow_selection = True
+                elif key in (PAGE_UP, PAGE_DOWN):
+                    start = max(0, min(last_start, start + (capacity if key == PAGE_DOWN else -capacity)))
+                    follow_selection = False
                 elif isinstance(key, str) and key in "0123456789" and key:
                     number = int(key)
                     if number <= len(actions):
                         selected = number - 1 if number else len(actions)
+                        follow_selection = True
                 elif key in ("\r", "\n"):
                     return None if selected == len(actions) else selected
                 elif key == "\x1b":
@@ -408,10 +426,11 @@ class Terminal:
             if heading and text in self.trail:
                 heading = False
                 continue
-            style = ("danger" if text.startswith(("ERROR", "FAIL", "未完成")) else
+            style = ("danger" if text.startswith(("ERROR", "FAIL", "未完成", "失败", "检查未完成")) else
                      "warn" if text.startswith(("WARN", "操作已取消")) else
+                     "ok" if text.startswith("通过  ") else
                      "accent" if text.startswith(("INFO", "https://", "http://", "vless://")) else
-                     "heading" if heading else "text")
+                     "heading" if heading or text.startswith("检查完成") or re.match(r"\d+/\d+  ", text) else "text")
             if text:
                 heading = False
             rows.extend((part, style) for part in wrap(line, self.content_width()))
@@ -533,29 +552,46 @@ class Terminal:
                     self.copy_link(url)
                     notice = "已发送复制请求；未生效请选中链接复制。"
 
-    def read_line(self, label, default="", secret=False, multiline=False):
+    def read_line(self, label, default="", secret=False, multiline=False, *, help="", context=(), step="",
+                  default_label="当前值", empty_hint="", validate=None):
         if multiline and self.pending[0] == label and self.pending[1]:
-            return self.pending[1].pop(0)
+            candidate = self.pending[1].pop(0)
+            try:
+                return validate(candidate) if validate else candidate
+            except ValueError as exc:
+                # Discard the remaining paste after an invalid entry; it must
+                # not become answers for fields on the following form.
+                initial_notice = str(exc)
+        else:
+            initial_notice = ""
         self.pending = ("", [])
-        value, position, queued, notice, prompt_start = "", 0, [], "", 0
+        value, position, queued, notice, prompt_start = "", 0, [], initial_notice, 0
         with self.keys():
             while True:
                 if self.too_small():
                     continue
                 width, height = self.content_width(), self.dimensions()[1]
                 capacity, field_width = max(3, height - 7), max(2, width - 4)
-                labels = [(line, "heading") for line in wrap(label, width)]
-                if default and not secret:
-                    labels += [(line, "muted") for line in wrap(f"当前：{default}（回车保留）", width)]
+                labels = []
+                for key, item in context:
+                    labels.extend((line, "muted") for line in wrap(f"{key}  {item}", width))
+                if labels:
+                    labels.append(("", "text"))
+                heading = f"{step}  {label}" if step else label
+                labels += [(line, "accent") for line in wrap(heading, width)]
+                if help:
+                    labels += [(line, "muted") for line in wrap(help, width)]
+                if default:
+                    labels += [(line, "muted") for line in wrap(
+                        f"{default_label}：{'已设置（内容隐藏）' if secret else default} · 回车使用", width)]
+                elif empty_hint:
+                    labels += [(line, "muted") for line in wrap(empty_hint, width)]
                 label_capacity = capacity - 2
                 prompt_start = min(prompt_start, max(0, len(labels) - label_capacity))
                 visible_labels = labels[prompt_start:prompt_start + label_capacity]
-                history = wrap(self.buffer.strip("\n"), width) if self.buffer else []
-                space = min(4, capacity - len(visible_labels) - 3)
-                body = [(line, "muted") for line in (history[-space:] if space > 0 else [])]
-                if body:
-                    body.append(("", "text"))
-                body += visible_labels + [("", "text")]
+                # Prompt context is deliberate metadata, never the tail of raw
+                # command output or previously pasted credentials/links.
+                body = visible_labels + [("", "text")]
                 visible = "*" * len(value) if secret else value
                 left = position
                 while left > 0 and cells(visible[left - 1:position]) < field_width:
@@ -572,10 +608,14 @@ class Terminal:
                         prompt_start = min(len(labels) - label_capacity, prompt_start + label_capacity)
                         notice = "请阅读完整提示，再按 Enter 确认。"
                         continue
+                    try:
+                        result = validate(value) if validate else value
+                    except ValueError as exc:
+                        notice = str(exc)
+                        continue
                     if multiline:
                         self.pending = (label, queued)
-                    self.buffer += label + "：" + ("[已隐藏]" if secret else value or str(default)) + "\n"
-                    return value
+                    return result
                 if key == "\x1b":
                     raise KeyboardInterrupt
                 if key in (PAGE_UP, PAGE_DOWN):

@@ -186,6 +186,106 @@ actions = [("修改设置", edit)]
         self.send("q")
         self.finish()
 
+    def test_form_context_replaces_raw_history_and_invalid_port_stays_in_field(self):
+        self.start('''
+from surelay_core import port
+def edit():
+    window.buffer = "vless://private-uuid@hidden.example/RAW-HISTORY"
+    value = ask("远端代理端口", "1080", context=[("正在设置", "proxy-one")], step="4/7",
+                help="填写代理提供方的端口，用于连接远端代理。", validate=port)
+    window.buffer = ""
+    print("SAVED:" + value)
+actions = [("代理表单", edit)]
+''', NO_COLOR="1")
+        self.expect("代理表单")
+        self.send("\r")
+        self.expect("正在设置  proxy-one")
+        self.expect("4/7  远端代理端口")
+        self.expect("代理提供方")
+        self.assertNotIn(b"RAW-HISTORY", self.all_output)
+        self.send("65536\r")
+        self.expect("端口必须为 1–65535")
+        self.assertNotIn(b"SAVED:", self.all_output)
+        self.send("\x15" + "1081\r")
+        self.expect("SAVED:1081")
+        self.send("\r")
+        self.expect("代理表单")
+        self.send("q")
+        self.finish()
+
+    def test_inline_selection_preserves_result_screen_and_cancel_returns(self):
+        self.start('''
+from surelay import pick
+def edit():
+    value = pick("选择服务", ["代理服务", "订阅服务"])
+    print("SELECTED:" + str(value))
+actions = [("服务选择", edit)]
+''', NO_COLOR="1")
+        self.expect("服务选择")
+        self.send("\r")
+        self.expect("订阅服务")
+        self.send("2\r")
+        self.expect("SELECTED:1")
+        self.expect("Enter 返回")
+        self.send("\r")
+        self.expect("服务选择")
+        self.send("\r")
+        self.expect("订阅服务")
+        self.send("0\r")
+        self.expect("服务选择")
+        self.send("q")
+        self.finish()
+        self.assertEqual(self.all_output.count(b"SELECTED:"), 1)
+
+    def test_invalid_multiline_entry_cannot_fill_following_fields(self):
+        self.start('''
+def entry(value):
+    if value and not value.startswith("vless://"):
+        raise ValueError("请填写 VLESS 链接")
+    return value
+def edit():
+    first = ask("链接", multiline=True, validate=entry)
+    second = ask("链接", multiline=True, validate=entry)
+    name = ask("出口名称", "relay-01")
+    print("NAME:" + name)
+actions = [("批量导入", edit)]
+''', NO_COLOR="1")
+        self.expect("批量导入")
+        self.send("\r")
+        self.expect("Ctrl+U 清空")
+        self.send("\033[200~vless://fixture\nbad-link\nUNEXPECTED-NAME\033[201~\r")
+        self.expect("请填写 VLESS 链接")
+        self.send("\r")
+        self.expect("出口名称")
+        self.send("\r")
+        self.expect("NAME:relay-01")
+        self.assertNotIn(b"UNEXPECTED-NAME", self.all_output)
+        self.send("\r")
+        self.expect("批量导入")
+        self.send("q")
+        self.finish()
+
+    def test_all_panel_menu_groups_open_and_return_in_one_window(self):
+        self.start('''
+from unittest.mock import Mock
+from surelay import Panel
+panel = Panel(Mock())
+panel.status = lambda: print("节点  Fixture")
+actions = [("全部管理界面", panel.main)]
+''', NO_COLOR="1")
+        self.expect("全部管理界面")
+        self.send("\r")
+        self.expect("卸载 SuRelay")
+        for number, item in enumerate(["查看订阅链接", "检查出口连通性", "关闭 IPv6 节点", "停用域名模式",
+                                       "检查配置与监听", "登录防护（fail2ban）", "迁移旧安装目录"], 1):
+            self.send(str(number) + "\r")
+            self.expect(item)
+            self.send("0\r")
+            self.expect("卸载 SuRelay")
+        self.send("q")
+        self.finish()
+        self.assertEqual(self.all_output.count(b"\033[?1049h"), 1)
+
     def test_multiline_paste_cannot_answer_a_later_confirmation(self):
         self.start('''
 def keys():

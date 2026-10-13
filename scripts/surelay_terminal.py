@@ -1,6 +1,7 @@
 """Dependency-free terminal window for the interactive SuRelay panel."""
 from __future__ import annotations
 
+import base64
 import codecs
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from contextvars import ContextVar
@@ -97,11 +98,15 @@ class Terminal:
         self.menu_count = 0
         self.external_count = 0
         self.pending = ("", [])
+        self.links = []
         self.sink = Output(self)
 
     def dimensions(self):
         size = os.get_terminal_size(self.output.fileno())
         return size.columns, size.lines
+
+    def content_width(self):
+        return max(2, min(100, self.dimensions()[0] - 5))
 
     def emit(self, text):
         self.output.write(text)
@@ -149,13 +154,14 @@ class Terminal:
 
     @contextmanager
     def page(self, title):
-        saved = self.trail, self.buffer, self.streaming, self.pending
+        saved = self.trail, self.buffer, self.streaming, self.pending, self.links
         self.trail = [*self.trail, title] if not self.trail or self.trail[-1] != title else self.trail[:]
         self.buffer, self.streaming, self.pending = "", False, ("", [])
+        self.links = []
         try:
             yield
         finally:
-            self.trail, self.buffer, self.streaming, self.pending = saved
+            self.trail, self.buffer, self.streaming, self.pending, self.links = saved
 
     @contextmanager
     def capture(self):
@@ -177,8 +183,9 @@ class Terminal:
     def paint(self, text, style):
         if "NO_COLOR" in os.environ:
             return text
-        code = {"title": "1;36", "muted": "2", "selected": "1;7;36", "danger": "31",
-                "ok": "32", "warn": "33", "text": "0"}[style]
+        code = {"title": "1;36", "heading": "1", "accent": "36", "muted": "37",
+                "border": "90", "selected": "1;30;46", "danger_selected": "1;37;41",
+                "danger": "31", "ok": "32", "warn": "33", "text": "0"}[style]
         return f"{ESC}{code}m{text}{ESC}0m"
 
     def render(self, body, hint, cursor=None):
@@ -189,14 +196,19 @@ class Terminal:
             self.emit(ESC + "2J")
             self.frame = []
             self.size = width, height
-        title = "  SuRelay  ·  VPS 管理"
-        trail = "  " + " / ".join("首页" if t == "SuRelay" else t for t in self.trail)
+        content_width = self.content_width()
+        title = "SuRelay  ·  VPS 管理"
+        trail = " / ".join("首页" if t == "SuRelay" else t for t in self.trail)
+        if cells(trail) > content_width:
+            trail = "… / " + " / ".join(self.trail[-2:])
         capacity = max(1, height - 7)
-        rows = [(title, "title"), (trail, "muted"), ("─" * width, "muted")]
+        rule = ("─" * content_width, "border")
+        rows = [(title, "title"), (trail, "muted"), rule]
         rows += body[:capacity] + [("", "text")] * max(0, capacity - len(body))
-        rows += [("─" * width, "muted"), (hint, "muted"), ("", "text")]
+        hints = wrap(hint.strip(), content_width)
+        rows += [rule, (hints[0], "muted"), (hints[1] if len(hints) > 1 else "", "muted")]
         rows = rows[:max(1, height - 1)]
-        rendered = [self.paint(clip(clean(text), width), style) for text, style in rows]
+        rendered = ["  " + self.paint(clip(clean(text), content_width), style) for text, style in rows]
         changed = [f"{ESC}{i + 1};1H{line}{ESC}K" for i, line in enumerate(rendered)
                    if i >= len(self.frame) or self.frame[i] != line]
         suffix = ""
@@ -276,15 +288,22 @@ class Terminal:
                     continue
                 width, height = self.dimensions()
                 capacity = max(1, height - 7)
-                body = [(line, "ok" if "● 运行中" in line else "warn" if "未运行" in line else "text")
-                        for line in wrap(status.rstrip(), max(2, width - 3))] if status else []
+                body = []
+                for line in clean(status).strip().splitlines():
+                    line = line.strip()
+                    style = ("warn" if "未运行" in line or "尚未" in line else "ok" if "● 运行中" in line
+                             else "heading" if line.startswith("节点") else "muted")
+                    body.extend((part, style) for part in wrap(line, self.content_width()))
                 if body:
                     body.append(("", "text"))
                 offset = len(body)
                 for i, (name, _) in enumerate([*actions, ("退出" if len(self.trail) == 1 else "返回", None)]):
                     number = str(i + 1) if i < len(actions) else "0"
-                    style = "selected" if i == selected else "danger" if name.startswith(("卸载", "重置")) else "text"
-                    body.append((f" {'›' if i == selected else ' '} {number}) {name}", style))
+                    danger = name.startswith(("卸载", "重置"))
+                    style = ("danger_selected" if danger else "selected") if i == selected else "danger" if danger else "text"
+                    line = f" {'›' if i == selected else ' '} {number}) {name}"
+                    line += " " * max(0, min(44, self.content_width()) - cells(line))
+                    body.append((line, style))
                 start = max(0, offset + selected - capacity + 1)
                 self.render(body[start:start + capacity], " ↑↓ / 数字选择 · Enter 确认 · Esc 返回 · q 退出")
                 key = self.key()
@@ -303,17 +322,38 @@ class Terminal:
                 elif key in ("q", "Q"):
                     raise EOFError
 
-    def output_lines(self):
-        width, _ = self.dimensions()
-        return wrap(self.buffer.rstrip("\n") or "操作已完成。", max(2, width - 2))
+    def output_rows(self):
+        rows, heading = [], False
+        for line in clean(self.buffer).strip("\n").splitlines():
+            if not line.strip() and (not rows or not rows[-1][0]):
+                continue
+            text = line.lstrip()
+            if re.fullmatch(r"[─━=-]{4,}", text):
+                heading = True
+                continue
+            if heading and text in self.trail:
+                heading = False
+                continue
+            style = ("danger" if text.startswith(("ERROR", "FAIL", "未完成")) else
+                     "warn" if text.startswith(("WARN", "操作已取消")) else
+                     "accent" if text.startswith(("INFO", "https://", "http://", "vless://")) else
+                     "heading" if heading else "text")
+            if text:
+                heading = False
+            rows.extend((part, style) for part in wrap(line, self.content_width()))
+        while rows and not rows[-1][0].strip():
+            rows.pop()
+        return rows or [("操作已完成。", "ok")]
 
     def refresh_output(self):
         if self.streaming:
             _, height = self.dimensions()
-            self.render([(line, "text") for line in self.output_lines()[-max(1, height - 7):]],
+            self.render(self.output_rows()[-max(1, height - 7):],
                         " 正在执行… · Ctrl+C 取消")
 
     def wait(self):
+        if self.links:
+            return self.wait_links()
         start = 0
         with self.keys():
             while True:
@@ -321,10 +361,12 @@ class Terminal:
                     continue
                 _, height = self.dimensions()
                 capacity = max(1, height - 7)
-                lines = self.output_lines()
+                lines = self.output_rows()
                 start = min(start, max(0, len(lines) - capacity))
-                self.render([(line, "text") for line in lines[start:start + capacity]],
-                            f" Enter 返回 · ↑↓ / PgUp PgDn 翻页 · p 原文  {start + 1}/{len(lines)}")
+                hint = "Enter 返回 · p 原文"
+                if len(lines) > capacity:
+                    hint += f" · ↑↓ / PgUp PgDn 翻页 · 行 {start + 1}–{min(start + capacity, len(lines))}/{len(lines)}"
+                self.render(lines[start:start + capacity], hint)
                 key = self.key()
                 if key in ("\r", "\n", "\x1b", "0"):
                     return
@@ -342,39 +384,117 @@ class Terminal:
                     with self.external():
                         print(clean(self.buffer))
 
-    def read_line(self, label, default="", secret=False, multiline=False):
-        if multiline and self.pending[0] == label and self.pending[1]:
-            return self.pending[1].pop(0)
-        self.pending = ("", [])
-        value, position, queued, notice = "", 0, [], ""
-        prompt = label + (f" [{default}]" if default and not secret else "")
+    def set_links(self, links):
+        """Keep exact copy payloads separate from wrapped display rows."""
+        self.links = list(links)
+        self.buffer = "\n".join(url for _, _, url in self.links)
+
+    def copy_link(self, url):
+        # OSC 52 crosses SSH to the user's terminal clipboard. Never copy the
+        # rendered frame, query the clipboard, or add a trailing newline.
+        payload = base64.b64encode(url.encode("utf-8")).decode("ascii")
+        self.emit("\033]52;c;" + payload + "\a")
+
+    def wait_links(self):
+        selected, start, notice = 0, 0, ""
         with self.keys():
             while True:
                 if self.too_small():
                     continue
-                width, height = self.dimensions()
-                capacity, field_width = max(3, height - 7), max(2, width - 6)
-                labels = wrap(prompt, max(2, width - 2))[-(capacity - 2):]
-                history = wrap(self.buffer.rstrip("\n"), max(2, width - 2)) if self.buffer else []
-                space = capacity - len(labels) - 2
-                body = [(line, "text") for line in (history[-space:] if space > 0 else [])]
-                body += [(line, "title") for line in labels] + [("", "text")]
+                width = self.content_width()
+                capacity = max(1, self.dimensions()[1] - 7)
+                name, detail, url = self.links[selected]
+                heading = f"{selected + 1} / {len(self.links)}  ·  {name}"
+                rows = [(part, "heading") for part in wrap(heading, width)]
+                rows += [(part, "muted") for part in wrap(detail, width)]
+                rows += [("", "text"), ("链接预览", "accent")]
+                rows += [(part, "text") for part in wrap(url, width)]
+                rows += [("", "text")]
+                message = notice or "按 c 复制完整链接；预览有折行，请勿拖选。"
+                rows += [(part, "accent" if notice else "muted") for part in wrap(message, width)]
+                start = min(start, max(0, len(rows) - capacity))
+                hint = "Enter 返回 · c 复制 · p 原文"
+                if len(self.links) > 1:
+                    hint += " · ←→ 切换节点"
+                if len(rows) > capacity:
+                    hint += f" · ↑↓ 翻页 · 行 {start + 1}–{min(start + capacity, len(rows))}/{len(rows)}"
+                self.render(rows[start:start + capacity], hint)
+                key = self.key()
+                if key in ("\r", "\n", "\x1b", "0"):
+                    return
+                if key in ("q", "Q"):
+                    raise EOFError
+                if key in (LEFT, RIGHT):
+                    selected = (selected + (1 if key == RIGHT else -1)) % len(self.links)
+                    start, notice = 0, ""
+                elif key in (DOWN, PAGE_DOWN):
+                    start = min(max(0, len(rows) - capacity), start + (capacity if key == PAGE_DOWN else 1))
+                elif key in (UP, PAGE_UP):
+                    start = max(0, start - (capacity if key == PAGE_UP else 1))
+                elif key in (HOME, ESC + "1~"):
+                    start = 0
+                elif key in (END, ESC + "4~"):
+                    start = max(0, len(rows) - capacity)
+                elif key in ("c", "C"):
+                    self.copy_link(url)
+                    message = "已发送复制请求；若剪贴板未更新，按 p 查看原文。"
+                    # Make feedback visible even for a very long link.
+                    start = max(0, len(rows) - len(wrap(notice or "按 c 复制完整链接；预览有折行，请勿拖选。", width))
+                                + len(wrap(message, width)) - capacity)
+                    notice = message
+                elif key in ("p", "P"):
+                    with self.external():
+                        print(url)
+
+    def read_line(self, label, default="", secret=False, multiline=False):
+        if multiline and self.pending[0] == label and self.pending[1]:
+            return self.pending[1].pop(0)
+        self.pending = ("", [])
+        value, position, queued, notice, prompt_start = "", 0, [], "", 0
+        with self.keys():
+            while True:
+                if self.too_small():
+                    continue
+                width, height = self.content_width(), self.dimensions()[1]
+                capacity, field_width = max(3, height - 7), max(2, width - 4)
+                labels = [(line, "heading") for line in wrap(label, width)]
+                if default and not secret:
+                    labels += [(line, "muted") for line in wrap(f"当前：{default}（回车保留）", width)]
+                label_capacity = capacity - 2
+                prompt_start = min(prompt_start, max(0, len(labels) - label_capacity))
+                visible_labels = labels[prompt_start:prompt_start + label_capacity]
+                history = wrap(self.buffer.strip("\n"), width) if self.buffer else []
+                space = min(4, capacity - len(visible_labels) - 3)
+                body = [(line, "muted") for line in (history[-space:] if space > 0 else [])]
+                if body:
+                    body.append(("", "text"))
+                body += visible_labels + [("", "text")]
                 visible = "*" * len(value) if secret else value
                 left = position
                 while left > 0 and cells(visible[left - 1:position]) < field_width:
                     left -= 1
                 field = clip(visible[left:], field_width)
-                body.append((" > " + field, "text"))
-                self.render(body, notice or " Enter 确认 · Esc / Ctrl+C 取消 · Ctrl+U 清空",
-                            cursor=(3 + len(body), 4 + cells(visible[left:position])))
+                body.append((" > " + field, "accent"))
+                hint = notice or "Enter 确认 · Esc 取消 · Ctrl+U 清空"
+                if len(labels) > label_capacity:
+                    hint += f" · PgUp/PgDn 提示 {prompt_start + 1}–{prompt_start + len(visible_labels)}/{len(labels)}"
+                self.render(body, hint, cursor=(3 + len(body), 6 + cells(visible[left:position])))
                 key = self.key()
                 if key in ("\r", "\n"):
+                    if prompt_start + label_capacity < len(labels):
+                        prompt_start = min(len(labels) - label_capacity, prompt_start + label_capacity)
+                        notice = "请阅读完整提示，再按 Enter 确认。"
+                        continue
                     if multiline:
                         self.pending = (label, queued)
                     self.buffer += label + "：" + ("[已隐藏]" if secret else value or str(default)) + "\n"
                     return value
                 if key == "\x1b":
                     raise KeyboardInterrupt
+                if key in (PAGE_UP, PAGE_DOWN):
+                    prompt_start = max(0, min(len(labels) - label_capacity,
+                                             prompt_start + (label_capacity if key == PAGE_DOWN else -label_capacity)))
+                    continue
                 if key in ("\x7f", "\b") and position:
                     value, position = value[:position - 1] + value[position:], position - 1
                 elif key == DELETE:

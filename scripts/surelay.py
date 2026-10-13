@@ -146,7 +146,7 @@ class Panel:
     def nodes(self):
         menu("节点与订阅", [
             ("查看订阅链接", self.subscription_link),
-            ("查看节点链接", lambda: self.m.output("--skip-node-files", "--quiet", "--print-summary")),
+            ("查看节点链接", self.node_links),
             ("导出客户端配置", lambda: self.m.phase("output-nodes")),
             ("刷新订阅", lambda: self.m.phase("subscription", RRB_SHOW_RESULT="true")),
             ("修改节点名称", lambda: self.setting("SERVER_ALIAS", "节点名称")),
@@ -158,7 +158,25 @@ class Panel:
         if self.m.env["ENABLE_SUBSCRIPTION_SERVER"] != "true":
             print("订阅服务未启用。")
             return
-        print(output.subscription_url(self.m.env, GEN.read_vless_uuid(self.m.env)))
+        url = output.subscription_url(self.m.env, GEN.read_vless_uuid(self.m.env))
+        if current_terminal():
+            current_terminal().set_links([("在线订阅", "Mihomo / Clash Meta · 导入后可刷新节点", url)])
+        else:
+            print(url)
+
+    def node_links(self):
+        output = module("surelay_output", "11-output-nodes.py")
+        nodes = output.build_client_nodes(self.m.env, self.m.rows(), GEN)
+        links = []
+        for node in nodes:
+            host = f"[{node['server']}]" if ":" in node["server"] else node["server"]
+            detail = f"{host}:{node['port']} · VLESS / Reality"
+            links.append((node["name"], detail, output.node_to_vless_uri(node)))
+        if current_terminal():
+            current_terminal().set_links(links)
+        else:
+            for name, detail, url in links:
+                print(f"{name} · {detail}\n{url}\n")
 
     def setting(self, key, label, validate=lambda value: value):
         self.m.reload()

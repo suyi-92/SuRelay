@@ -1,7 +1,9 @@
 """Interactive panel regressions in a real PTY; never use host services/config."""
+import base64
 import contextlib
 import io
 import os
+import re
 from pathlib import Path
 import select
 import signal
@@ -211,6 +213,65 @@ actions = [("外部编辑器", external)]
         self.expect("按 Enter 返回 SuRelay")
         self.send("\r")
         self.expect("外部编辑器")
+        self.send("q")
+        self.finish()
+
+    def test_link_copy_uses_exact_payload_after_resize_and_node_switch(self):
+        import fcntl
+        import termios
+        first = "vless://fixture@edge.example:443?security=reality&pbk=" + "a" * 320 + "#%E8%8A%82%E7%82%B9"
+        second = "vless://fixture@[2001:db8::10]:443?security=reality&pbk=" + "b" * 320 + "#IPv6"
+        self.start(f'''
+def links():
+    window.set_links([("NODE-ONE", "edge.example:443", {first!r}),
+                      ("NODE-TWO", "[2001:db8::10]:443", {second!r})])
+actions = [("链接列表", links)]
+''', NO_COLOR="1")
+        self.expect("链接列表")
+        self.send("1\r")
+        self.expect("c 复制")
+        self.assertNotIn(b"\033]52;", self.all_output)
+        self.send("c")
+        self.expect("已发送复制请求")
+        self.send("\033[C")
+        self.expect("NODE-TWO")
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 50, 0, 0))
+        self.expect("行 ")
+        self.send("c")
+        self.expect("按 p 查看原文")
+        payloads = re.findall(rb"\033\]52;c;([^\a]+)\a", self.all_output)
+        self.assertEqual([base64.b64decode(p).decode() for p in payloads], [first, second])
+        self.send("p")
+        self.expect("按 Enter 返回 SuRelay")
+        self.assertIn((second + "\r\n按 Enter 返回 SuRelay").encode(), self.all_output)
+        self.send("\r")
+        self.expect("c 复制")
+        self.send("\r")
+        self.expect("链接列表")
+        self.send("q")
+        self.finish()
+
+    def test_long_confirmation_is_readable_before_enter_applies(self):
+        message = "\n".join(f"确认内容 {i:02}" for i in range(30))
+        self.start(f'''
+def edit():
+    confirm({message!r})
+    print("CONFIRMED")
+actions = [("长确认", edit)]
+''')
+        self.expect("长确认")
+        self.send("1\r")
+        self.expect("确认内容 00")
+        self.send("YES\r")
+        self.expect("请阅读完整提示")
+        self.assertNotIn(b"CONFIRMED", self.all_output)
+        self.assertIn("确认内容 29".encode(), self.all_output)
+        self.send("\r")
+        self.expect("Enter 返回")
+        self.send("\033[F")
+        self.expect("CONFIRMED")
+        self.send("\r")
+        self.expect("长确认")
         self.send("q")
         self.finish()
 

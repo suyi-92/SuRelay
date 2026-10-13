@@ -80,6 +80,32 @@ class ManagementTest(unittest.TestCase):
             with self.assertRaises(core.Error):
                 core.port(value)
 
+    def test_panel_links_are_read_only_and_contain_only_client_endpoints(self):
+        from urllib.parse import urlsplit
+        from surelay_terminal import Terminal
+        self.m.update({"ENABLE_IPV6_LISTEN": "true", "SERVER_IP_IPV6": "2001:db8::10",
+                       "ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": "edge.example.com",
+                       "DIRECT_PORT": "24037", "SUBSCRIPTION_BASE_URL": "https://edge.example.com:24037"})
+        (self.root / "home-proxies.csv").write_text(
+            "tag,type,server,server_port,username,password,network,listen_port\n"
+            "home-01,socks5,private-upstream.example,1080,user,private-password,tcp,51043\n")
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        window = Terminal()
+        panel = surelay.Panel(self.m)
+        with patch.object(surelay, "current_terminal", return_value=window):
+            panel.node_links()
+            self.assertEqual([name for name, _, _ in window.links],
+                             ["fixture", "fixture-IPv6", "home-01", "home-01-IPv6"])
+            urls = [url for _, _, url in window.links]
+            self.assertEqual([urlsplit(url).hostname for url in urls],
+                             ["edge.example.com", "2001:db8::10"] * 2)
+            self.assertEqual([urlsplit(url).port for url in urls], [24037, 24037, 51043, 51043])
+            self.assertTrue(all(not any(c.isspace() for c in url) for url in urls))
+            self.assertNotIn("private-", window.buffer)
+            panel.subscription_link()
+            self.assertEqual(window.buffer, "https://edge.example.com:24037/sub/11111111-2222-4333-8444-555555555555?target=ClashMeta")
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
     def test_launcher_handles_spaces_and_refuses_other_program(self):
         project = self.root / "folder with spaces"
         project.mkdir()

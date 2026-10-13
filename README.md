@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install
 | 7) 高级维护 | 更新脚本/内核、备份恢复、高级配置、继续安装、目录迁移和重置 |
 | 8) 卸载 SuRelay | 预览清单、备份并卸载部署，保留 SSH |
 
-面板在同一屏幕内切换菜单和输入：方向键或数字选择，Enter 确认，Esc 返回，q 退出。结果页支持翻页，按 p 显示便于复制的原文。`sr --plain` 使用逐行菜单，`NO_COLOR=1 sr` 关闭颜色。打开菜单只读取状态；修改前显示当前值或变更内容，确认后应用。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
+面板在同一屏幕内切换菜单和输入：方向键或数字选择，Enter 确认，Esc 返回，q 退出。节点与订阅链接按 **c** 复制完整地址，多个节点用左右键切换；终端不支持剪贴板时按 **p** 查看单行原文。`sr --plain` 使用逐行菜单，`NO_COLOR=1 sr` 关闭颜色。打开菜单只读取状态；修改前显示当前值或变更内容，确认后应用。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
 
 在 Ubuntu 22.04/24.04、Debian 10–13 和 Alpine 3.19（OpenRC，x86_64/aarch64）VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box VLESS + Reality。默认保留现有节点身份，SSH 分两阶段加固。
 

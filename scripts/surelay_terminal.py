@@ -108,7 +108,12 @@ class Terminal:
         return size.columns, size.lines
 
     def content_width(self):
-        return max(2, min(100, self.dimensions()[0] - 5))
+        return max(2, min(72, self.dimensions()[0] - 10))
+
+    def content_capacity(self, *, form=False):
+        # Keep short operations compact even in a maximized terminal. The
+        # seven chrome rows include the footer; leave the last screen row free.
+        return max(1, min(24, self.dimensions()[1] - (7 if form else 8)))
 
     def emit(self, text):
         self.output.write(text)
@@ -186,12 +191,45 @@ class Terminal:
     def paint(self, text, style):
         if "NO_COLOR" in os.environ:
             return text
-        code = {"title": "1;36", "heading": "1", "accent": "36", "muted": "37",
+        code = {"title": "1;36", "heading": "1", "accent": "36", "muted": "90",
                 "border": "90", "selected": "1;36", "danger_selected": "1;31",
                 "danger": "31", "ok": "32", "warn": "33", "text": "0"}[style]
         return f"{ESC}{code}m{text}{ESC}0m"
 
-    def render(self, body, hint, cursor=None, flow=None):
+    def render(self, body, hint, cursor=None, flow=None, *, form=False):
+        """Render a centered card; cursor coordinates are relative to its body."""
+        if flow or self.links:
+            return self.render_links(body, hint, flow)
+        columns, height = self.dimensions()
+        width = self.content_width()
+        body = body[:self.content_capacity(form=form)]
+        hints = wrap(hint.strip(), width)
+        title = clean(self.trail[-1]) if self.trail and self.trail[-1] != "SuRelay" else "VPS 管理"
+        if cells(title) > width:
+            title = clip(title, width - 1) + "…"
+
+        def row(text="", style="text"):
+            text = clip(clean(text), width)
+            return (self.paint("│", "border") + "  " + self.paint(text, style)
+                    + " " * (width - cells(text) + 2) + self.paint("│", "border"))
+
+        brand = " SuRelay "
+        top = self.paint("╭─", "border") + self.paint(brand, "title") + self.paint("─" * (width + 3 - cells(brand)) + "╮", "border")
+        rows = [top, row(title, "heading"), row()]
+        rows += [row(text, style) for text, style in body]
+        if not form:
+            rows.append(row())
+        rows += [row(hints[0], "muted"), row(hints[1] if len(hints) > 1 else "", "muted"),
+                 self.paint("╰" + "─" * (width + 4) + "╯", "border")]
+        left = max(0, (columns - width - 6) // 2)
+        top = max(0, (height - len(rows)) // 2)
+        rendered = [""] * top + [" " * left + line for line in rows]
+        rendered = (rendered + [""] * height)[:max(1, height - 1)]
+        if cursor is not None:
+            cursor = (top + 4 + cursor[0], left + 4 + cursor[1])
+        self.draw(rendered, cursor)
+
+    def render_links(self, body, hint, flow=None):
         """Draw ordinary rows plus an optional continuous, soft-wrapped block.
 
         flow is (body row offset, text). It uses the terminal's full width:
@@ -199,16 +237,9 @@ class Terminal:
         into several hard lines. Keep the whole block untouched on idle/feedback
         redraws so mouse selection and the terminal's wrap markers survive.
         """
-        width, height = self.dimensions()
-        columns = width
+        columns, height = self.dimensions()
         # Ordinary rows leave a spare column; flow may fill it but never uses
         # the bottom row, so even a pending autowrap cannot scroll the screen.
-        width = max(2, width - 1)
-        if (width, height) != self.size:
-            self.emit(ESC + "2J")
-            self.frame = []
-            self.flow = None
-            self.size = width, height
         content_width = self.content_width()
         title = "SuRelay  ·  VPS 管理"
         trail = " / ".join("首页" if t == "SuRelay" else t for t in self.trail)
@@ -223,6 +254,16 @@ class Terminal:
         rows = rows[:max(1, height - 1)]
         rendered = ["  " + self.paint(clip(clean(text), content_width), style) for text, style in rows]
         flow = (flow[0] + 3, flow[1], len(wrap(flow[1], columns))) if flow else None
+        self.draw(rendered, flow=flow)
+
+    def draw(self, rendered, cursor=None, flow=None):
+        """Diff whole-screen frames, clearing old cards and soft-wrap markers."""
+        width, height = self.dimensions()
+        if (width - 1, height) != self.size:
+            self.emit(ESC + "2J")
+            self.frame = []
+            self.flow = None
+            self.size = width - 1, height
         flow_rows = set(range(flow[0], flow[0] + flow[2])) if flow else set()
         stale_rows = (set(range(self.flow[0], self.flow[0] + self.flow[2]))
                       if self.flow and self.flow != flow else set())
@@ -323,8 +364,7 @@ class Terminal:
             while True:
                 if self.too_small():
                     continue
-                _, height = self.dimensions()
-                capacity = max(1, height - 7)
+                capacity = self.content_capacity()
                 body = []
                 for line in clean(status).strip().splitlines():
                     line = line.strip()
@@ -379,7 +419,7 @@ class Terminal:
                 if self.too_small():
                     continue
                 lines = wrap(message, self.content_width())
-                capacity = max(1, self.dimensions()[1] - 10)
+                capacity = max(1, self.content_capacity() - 3)
                 start = min(start, max(0, len(lines) - capacity))
                 body = [(line, "text") for line in lines[start:start + capacity]]
                 body.append(("", "text"))
@@ -440,8 +480,7 @@ class Terminal:
 
     def refresh_output(self):
         if self.streaming:
-            _, height = self.dimensions()
-            self.render(self.output_rows()[-max(1, height - 7):],
+            self.render(self.output_rows()[-self.content_capacity():],
                         " 正在执行… · Ctrl+C 取消")
 
     def wait(self):
@@ -452,8 +491,7 @@ class Terminal:
             while True:
                 if self.too_small():
                     continue
-                _, height = self.dimensions()
-                capacity = max(1, height - 7)
+                capacity = self.content_capacity()
                 lines = self.output_rows()
                 start = min(start, max(0, len(lines) - capacity))
                 hint = "Enter 返回 · p 原文"
@@ -565,43 +603,58 @@ class Terminal:
         else:
             initial_notice = ""
         self.pending = ("", [])
-        value, position, queued, notice, prompt_start = "", 0, [], initial_notice, 0
+        value, position, queued, notice, prompt_start, note_start = "", 0, [], initial_notice, 0, 0
         with self.keys():
             while True:
                 if self.too_small():
                     continue
-                width, height = self.content_width(), self.dimensions()[1]
-                capacity, field_width = max(3, height - 7), max(2, width - 4)
+                width = self.content_width()
+                capacity, field_width = self.content_capacity(form=True), max(2, width - 5)
                 labels = []
                 for key, item in context:
                     labels.extend((line, "muted") for line in wrap(f"{key}  {item}", width))
-                if labels:
+                if labels and self.dimensions()[1] > 20:
                     labels.append(("", "text"))
-                heading = f"{step}  {label}" if step else label
-                labels += [(line, "accent") for line in wrap(heading, width)]
                 if help:
                     labels += [(line, "muted") for line in wrap(help, width)]
-                if default:
-                    labels += [(line, "muted") for line in wrap(
-                        f"{default_label}：{'已设置（内容隐藏）' if secret else default} · 回车使用", width)]
-                elif empty_hint:
-                    labels += [(line, "muted") for line in wrap(empty_hint, width)]
-                label_capacity = capacity - 2
+                if default and not secret and cells(clean(default)) > field_width:
+                    labels += [(line, "muted") for line in wrap(f"{default_label}：{default}", width)]
+                # Keep the field label/input anchored below paged context. In
+                # small windows even a long explanation cannot hide the field.
+                heading = f"{step}  {label}" if step else label
+                heading_rows = [(line, "heading") for line in wrap(heading, width)]
+                note = (f"{default_label} · 回车使用" if default else empty_hint)
+                note_rows = [(line, "danger" if notice else "muted") for line in wrap(notice or note, width)]
+                # Reserve two rows for feedback so validation doesn't move the
+                # panel or cursor while typing. Full errors page if necessary.
+                note_capacity = min(2, max(1, capacity - len(heading_rows) - 5))
+                note_start = min(note_start, max(0, len(note_rows) - note_capacity))
+                label_capacity = max(1, capacity - len(heading_rows) - 4 - note_capacity)
                 prompt_start = min(prompt_start, max(0, len(labels) - label_capacity))
                 visible_labels = labels[prompt_start:prompt_start + label_capacity]
                 # Prompt context is deliberate metadata, never the tail of raw
                 # command output or previously pasted credentials/links.
-                body = visible_labels + [("", "text")]
+                body = visible_labels + [("", "text")] + heading_rows
                 visible = "*" * len(value) if secret else value
                 left = position
                 while left > 0 and cells(visible[left - 1:position]) < field_width:
                     left -= 1
                 field = clip(visible[left:], field_width)
-                body.append((" > " + field, "accent"))
-                hint = notice or "Enter 确认 · Esc 取消 · Ctrl+U 清空"
-                if len(labels) > label_capacity:
-                    hint += f" · PgUp/PgDn 提示 {prompt_start + 1}–{prompt_start + len(visible_labels)}/{len(labels)}"
-                self.render(body, hint, cursor=(3 + len(body), 6 + cells(visible[left:position])))
+                placeholder = ("已设置（内容隐藏）" if secret else clean(default)) if default else "请输入…"
+                if cells(placeholder) > field_width:
+                    placeholder = clip(placeholder, field_width - 1) + "…"
+                display = field if value else clip(placeholder, field_width)
+                body.append(("╭" + "─" * (width - 2) + "╮", "accent"))
+                input_row = len(body)
+                body.append(("│ " + display + " " * (width - cells(display) - 3) + "│", "accent" if value else "muted"))
+                body.append(("╰" + "─" * (width - 2) + "╯", "accent"))
+                body += note_rows[note_start:note_start + note_capacity] + [("", "text")] * max(0, note_capacity - len(note_rows))
+                hint = "Enter 确认 · Esc 取消 · Ctrl+U 清空"
+                if len(note_rows) > note_capacity:
+                    hint += f"\nPgUp/PgDn 提示 {note_start + 1}–{min(note_start + note_capacity, len(note_rows))}/{len(note_rows)}"
+                elif len(labels) > label_capacity:
+                    hint += f"\nPgUp/PgDn 说明 {prompt_start + 1}–{prompt_start + len(visible_labels)}/{len(labels)}"
+                self.render(body, hint, cursor=(input_row, 2 + cells(visible[left:position])), form=True)
                 key = self.key()
                 if key in ("\r", "\n"):
                     if prompt_start + label_capacity < len(labels):
@@ -612,6 +665,7 @@ class Terminal:
                         result = validate(value) if validate else value
                     except ValueError as exc:
                         notice = str(exc)
+                        note_start = 0
                         continue
                     if multiline:
                         self.pending = (label, queued)
@@ -619,9 +673,18 @@ class Terminal:
                 if key == "\x1b":
                     raise KeyboardInterrupt
                 if key in (PAGE_UP, PAGE_DOWN):
-                    prompt_start = max(0, min(len(labels) - label_capacity,
-                                             prompt_start + (label_capacity if key == PAGE_DOWN else -label_capacity)))
+                    if len(note_rows) > note_capacity:
+                        note_start = max(0, min(len(note_rows) - note_capacity,
+                                              note_start + (note_capacity if key == PAGE_DOWN else -note_capacity)))
+                    else:
+                        prompt_start = max(0, min(len(labels) - label_capacity,
+                                                 prompt_start + (label_capacity if key == PAGE_DOWN else -label_capacity)))
                     continue
+                # Retain errors during idle/cursor movement, clear them when
+                # the user actually edits the value.
+                if key in ("\x7f", "\b", DELETE, "\x15") or isinstance(key, tuple) or (
+                        isinstance(key, str) and key and all(unicodedata.category(c)[0] != "C" for c in key)):
+                    notice, note_start = "", 0
                 if key in ("\x7f", "\b") and position:
                     value, position = value[:position - 1] + value[position:], position - 1
                 elif key == DELETE:

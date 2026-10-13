@@ -326,13 +326,13 @@ class Panel:
                 items.append(("远端代理", row.get("type", "socks5").upper() + " · " + endpoint(row["server"], row.get("server_port", "待填写"))))
             return items
         definitions = [
-            ("tag", "出口名称", "home-01", "用于区分出口，也会显示在客户端节点列表中。", exit_name),
+            ("tag", "出口名称", "home-01", "显示在客户端节点列表中，用于区分出口。", exit_name),
             ("type", "代理协议", "socks5", "", None),
-            ("server", "远端代理地址", "", "填写代理提供方的 IP 或域名，例如 proxy.example.com；不要带协议或端口。", self.proxy_host),
-            ("server_port", "远端代理端口", "1080", "代理提供方给出的端口，用于这台 VPS 连接远端代理。", port),
+            ("server", "远端代理地址", "", "代理提供方的 IP 或域名，不含协议和端口。", self.proxy_host),
+            ("server_port", "远端代理端口", "1080", "代理提供方的端口，用于 VPS 连接远端代理。", port),
             ("username", "代理用户名", "", "填写代理提供方的认证账号；无需认证可留空，输入 - 清空。", None),
             ("password", "代理密码", "", "填写该代理账号的密码；输入时隐藏，输入 - 清空。", None),
-            ("listen_port", "本机入口端口", "", "客户端连接这台 VPS 的端口，流量从这里转发至上面的远端代理。", port),
+            ("listen_port", "本机入口端口", "", "客户端连接此 VPS 使用的端口，流量将转发至远端代理。", port),
         ]
         for index, (key, label, default, help, validator) in enumerate(definitions, 1):
             if key == "type":
@@ -380,8 +380,8 @@ class Panel:
             if parsed:
                 last = parsed[-1]
                 context.append(("上一节点", endpoint(last["server"], last["server_port"])))
-            value = ask("VLESS 节点链接", multiline=True, context=context, step="1/2 导入节点",
-                        help="粘贴 vless:// 链接，可一次粘贴多行。随后逐个设置名称和本机入口端口。",
+            value = ask("VLESS 节点链接", multiline=True, context=context,
+                        help="粘贴 vless:// 链接，支持一次粘贴多行。",
                         empty_hint="空行回车结束导入，进入节点设置。", validate=validate_url)
             if not value:
                 break
@@ -395,11 +395,11 @@ class Panel:
             context = [("正在设置", f"第 {index}/{len(urls)} 个 · {unquote(urlsplit(url).fragment) or '未命名节点'}"),
                        ("上游地址", endpoint(node["server"], node["server_port"]))]
             name = ask("出口名称", name, context=context, step="1/2",
-                       help="这是转发后在客户端显示的名称；可用字母、数字、横线和下划线。",
+                       help="客户端显示的名称，可用字母、数字、横线和下划线。",
                        default_label="建议值", validate=exit_name)
             context = [("正在设置", f"第 {index}/{len(urls)} 个 · {name}"), *context[1:]]
             listen = port(ask("本机入口端口", self.next_port(home, upstream), context=context, step="2/2",
-                              help="客户端连接这台 VPS 的端口；上游节点的远端端口保持不变。",
+                              help="客户端连接此 VPS 使用的端口。",
                               default_label="建议值", validate=port))
             GEN.parse_upstream_node(name, int(listen), url, 1)
             upstream.append({"tag": name, "listen_port": listen, "node_url": url})

@@ -69,6 +69,93 @@ class PlainTerminalTest(unittest.TestCase):
         for row in (4, 5, 6):
             self.assertIn(f"\033[{row};1H\033[2K", stream.getvalue())
 
+    def test_cards_are_centered_and_shortcuts_stay_next_to_content(self):
+        for columns, height in ((160, 48), (90, 26), (50, 18)):
+            with self.subTest(size=(columns, height)):
+                window = terminal.Terminal()
+                window.output = io.StringIO()
+                window.trail = ["SuRelay", "出口管理"]
+                with patch.object(window, "dimensions", return_value=(columns, height)):
+                    window.render([("1) 查看出口", "selected"), ("0) 返回", "text")], "Enter 确认 · Esc 返回")
+                    lines = [terminal.clean(line) for line in window.frame]
+                    top = next(i for i, line in enumerate(lines) if "╭" in line)
+                    bottom = next(i for i, line in enumerate(lines) if "╰" in line)
+                    left = len(lines[top]) - len(lines[top].lstrip())
+                    right = columns - terminal.cells(lines[top])
+                    self.assertLessEqual(abs(left - right), 1)
+                    self.assertLessEqual(abs(top - (height - bottom - 1)), 1)
+                    self.assertLessEqual(bottom - top, 10)
+                    last_item = next(i for i, line in enumerate(lines) if "0) 返回" in line)
+                    shortcuts = next(i for i, line in enumerate(lines) if "Enter" in line)
+                    self.assertEqual(shortcuts - last_item, 2)
+                    self.assertTrue(all(terminal.cells(line) < columns for line in lines))
+                    window.output.seek(0)
+                    window.output.truncate()
+                    window.render([("1) 查看出口", "selected"), ("0) 返回", "text")], "Enter 确认 · Esc 返回")
+                    self.assertEqual(window.output.getvalue(), "")
+
+    def test_input_cursor_stays_inside_box_across_editing_and_resize(self):
+        window = terminal.Terminal()
+        window.output = io.StringIO()
+        size, frames = [160, 48], []
+        value = "节点" * 45 + "-end"
+        actions = iter([("paste", value), terminal.HOME, terminal.END, "resize", "\x15", "\r"])
+
+        def key():
+            lines = [terminal.clean(line) for line in window.frame]
+            row, column = window.cursor
+            line = lines[row - 1]
+            # Outer border, inner border, text/cursor, inner border, outer border.
+            borders, offset = [], 1
+            for char in line:
+                if char == "│":
+                    borders.append(offset)
+                offset += terminal.cells(char)
+            self.assertEqual(len(borders), 4, line)
+            self.assertTrue(borders[1] < column < borders[2], (column, borders))
+            self.assertLess(row, size[1])
+            self.assertTrue(all(terminal.cells(line) < size[0] for line in lines))
+            frames.append(lines)
+            action = next(actions)
+            if action == "resize":
+                size[:] = [50, 18]
+                return ""
+            return action
+
+        with patch.object(window, "dimensions", side_effect=lambda: tuple(size)), \
+                patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                patch.object(window, "key", side_effect=key):
+            self.assertEqual(window.read_line("出口名称", "relay-01", context=[("节点", "HK")]), "")
+        self.assertIn("relay-01", "".join(frames[0]))
+        self.assertIn("-end", "".join(frames[4]))
+        self.assertNotIn("-end", "".join(frames[5]))
+
+    def test_validation_keeps_box_fixed_and_long_errors_can_be_read(self):
+        window = terminal.Terminal()
+        window.output = io.StringIO()
+        frames, positions = [], []
+        error = "\n".join(f"错误说明 {i}" for i in range(6))
+        actions = iter(["bad", "\r", terminal.PAGE_DOWN, terminal.PAGE_DOWN, "\x15", "ok", "\r"])
+
+        def validate(value):
+            if value != "ok":
+                raise ValueError(error)
+            return value
+
+        def key():
+            frames.append("\n".join(terminal.clean(line) for line in window.frame))
+            positions.append(window.cursor)
+            return next(actions)
+
+        with patch.object(window, "dimensions", return_value=(50, 18)), \
+                patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                patch.object(window, "key", side_effect=key):
+            self.assertEqual(window.read_line("端口", validate=validate), "ok")
+        self.assertEqual(len({row for row, _ in positions}), 1)
+        for i in range(6):
+            self.assertIn(f"错误说明 {i}", "\n".join(frames))
+        self.assertNotIn("错误说明", frames[-1])
+
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
 class WindowTest(unittest.TestCase):
@@ -148,7 +235,7 @@ actions = [("打开节点", child)]
         self.expect("打开节点")
         self.send("q")
         self.finish()
-        self.assertEqual(self.all_output.count("  SuRelay  ·  VPS 管理".encode()), 1)
+        self.assertIn("╭─ SuRelay ".encode(), self.all_output)
         self.assertEqual(self.all_output.count(b"\x1b[?1049h"), 1)
         self.assertNotIn(b"\n", self.all_output.split(b"CLEAN_EXIT")[0])
         self.assertNotIn(b"\x1b[1;36m", self.all_output)
@@ -200,8 +287,8 @@ actions = [("代理表单", edit)]
         self.expect("代理表单")
         self.send("\r")
         self.expect("正在设置  proxy-one")
-        self.expect("4/7  远端代理端口")
         self.expect("代理提供方")
+        self.expect("4/7  远端代理端口")
         self.assertNotIn(b"RAW-HISTORY", self.all_output)
         self.send("65536\r")
         self.expect("端口必须为 1–65535")
@@ -481,7 +568,7 @@ actions = [("输入名称", edit)]
         self.send("1\r")
         self.expect("Ctrl+U 清空")
         self.send("resize-value")
-        self.expect(" > resize-value")
+        self.expect("│ resize-value")
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
         self.expect("窗口过小")
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))

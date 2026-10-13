@@ -40,9 +40,19 @@ def ask(label, default="", secret=False, multiline=False):
     return (value if secret else value.strip()) or str(default)
 
 
-def confirm(message, word="YES"):
-    if ask(f"{message}\n输入 {word} 继续，其他输入取消") != word:
-        raise Error("操作已取消。")
+class Cancelled(Error):
+    """Return from a declined preview without opening another result screen."""
+
+
+def confirm(message, *, action="确认执行", danger=False):
+    window = current_terminal()
+    if window:
+        accepted = window.confirm(message, action=action, danger=danger)
+    else:
+        print(f"{message}\n1) {action}\n0) 取消")
+        accepted = ask("请选择", "0" if danger else "1") == "1"
+    if not accepted:
+        raise Cancelled("操作已取消。")
 
 
 def menu(title, actions, before=None):
@@ -70,6 +80,8 @@ def menu(title, actions, before=None):
                 print("请输入菜单中的编号。")
                 continue
             actions[int(choice) - 1][1]()
+        except Cancelled:
+            continue
         except (Error, OSError, ValueError, GEN.ConfigError) as exc:
             print(color(f"\n未完成：{exc}", "warn"))
         except KeyboardInterrupt:
@@ -99,6 +111,8 @@ def window_menu(title, actions, before=None):
                 with window.capture():
                     try:
                         action()
+                    except Cancelled:
+                        continue
                     except (Error, OSError, ValueError, GEN.ConfigError) as exc:
                         print(f"未完成：{exc}")
                     except KeyboardInterrupt:
@@ -187,7 +201,11 @@ class Panel:
         value = validate(ask(label, self.m.env[key]))
         if not value:
             raise Error(f"{label}不能为空。")
-        confirm(f"{label}：{self.m.env[key]} → {value}，应用并刷新订阅？")
+        if value == self.m.env[key]:
+            print(f"{label}未改变。")
+            return
+        if key != "SERVER_ALIAS":
+            confirm(f"{label}：{self.m.env[key]} → {value}\n保存后刷新订阅。", action="应用修改")
         values = {key: value}
         if key == "DIRECT_PORT" and self.m.env["ENABLE_CUSTOM_DOMAIN"] == "true":
             values["SUBSCRIPTION_BASE_URL"] = "https://" + self.m.env["CUSTOM_DOMAIN"] + (":" + value if value != "443" else "")
@@ -278,7 +296,7 @@ class Panel:
 
     def delete_exit(self):
         row = self.select_exit()
-        confirm(f"删除出口 {row['tag']} 及其入口节点？", row["tag"])
+        confirm(f"删除出口 {row['tag']} 及其入口节点？", action="删除出口", danger=True)
         home, upstream = self.m.exit_files()
         self.m.save_exits([r for r in home if r["tag"] != row["tag"]],
                           [r for r in upstream if r["tag"] != row["tag"]])
@@ -353,12 +371,12 @@ class Panel:
             raise Error("尚未启用域名模式。")
         domain = self.m.env["CUSTOM_DOMAIN"]
         run(["openssl", "x509", "-in", f"/etc/letsencrypt/live/{domain}/fullchain.pem", "-noout", "-dates"], check=False)
-        confirm("检查并在需要时续期当前域名证书？")
         self.m.phase("custom-domain", RRB_SKIP_PACKAGE_INSTALL="false")
 
     def disable_domain(self):
         old = dict(self.m.env)
-        confirm("停用域名模式，切换为 IP 节点与 HTTP 订阅（公网 51040），删除对应项目 DNS 记录？")
+        confirm("停用域名模式，切换为 IP 节点与 HTTP 订阅（公网 51040），删除对应项目 DNS 记录？",
+                action="停用域名模式", danger=True)
         self.m.apply({"ENABLE_CUSTOM_DOMAIN": "false", "CUSTOM_DOMAIN": "",
                       "SUBSCRIPTION_BASE_URL": "", "SUBSCRIPTION_PORT": "51040", "SUBSCRIPTION_LISTEN_PORT": "51040",
                       "REALITY_SERVER_NAME": "www.microsoft.com", "REALITY_HANDSHAKE_SERVER": "www.microsoft.com",
@@ -368,13 +386,14 @@ class Panel:
 
     def service_action(self, action):
         names = ["sing-box", self.m.env["SUBSCRIPTION_SERVICE"]]
-        choice = ask("服务：1 代理 / 2 订阅 / 3 全部", "3")
+        label = {"start": "启动", "stop": "停止", "restart": "重启"}[action]
+        choice = ask(f"{label}服务：1 代理 / 2 订阅 / 3 全部", "3")
         if choice not in {"1", "2", "3"}:
             raise Error("服务选择无效。")
         targets = names if choice == "3" else [names[int(choice) - 1]]
-        confirm(f"{action}：{', '.join(targets)}？")
         for name in targets:
             self.m.service(name, action)
+        print(f"已{label}所选服务。")
 
     def services(self):
         menu("服务与诊断", [
@@ -423,12 +442,14 @@ class Panel:
         if shutil.which("fail2ban-client"):
             run(["fail2ban-client", "status", "sshd"], check=False)
 
-    def confirm_login(self, value=None):
+    def confirm_login(self, value=None, *, purpose=""):
         value = value or self.m.env["SSH_PORT"]
         host = self.m.env["SERVER_IP_IPV4"] or self.m.env["SERVER_IP_IPV6"]
-        print("保留当前窗口，在新终端验证公钥登录。NAT 主机使用服务商分配的公网端口。")
-        print(f"ssh -p {value} -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@{host} whoami")
-        confirm("仅当新窗口输出 root 后继续", "VERIFIED")
+        message = (purpose + "\n" if purpose else "")
+        message += "保留当前窗口，在新终端验证公钥登录。NAT 主机使用服务商分配的公网端口。\n"
+        message += f"ssh -p {value} -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@{host} whoami\n"
+        message += "仅当新窗口输出 root 后继续。"
+        confirm(message, action="已验证登录成功，继续", danger=True)
 
     def keys(self):
         menu("SSH 公钥", [
@@ -466,8 +487,7 @@ class Panel:
 
     def delete_key(self):
         lines, index = self.key_selection()
-        confirm("删除所选公钥？请先使用另一把保留的公钥登录新窗口。")
-        self.confirm_login()
+        self.confirm_login(purpose=f"验证后删除公钥：{self.s.validate_key(lines[index]).strip()}\n请使用另一把保留的公钥登录。")
         self.s.write_keys(lines[:index] + lines[index + 1:])
 
     def replace_key(self):
@@ -478,7 +498,7 @@ class Panel:
             raise Error("该公钥已存在。")
         self.s.write_keys([*lines, key])
         print("新公钥已添加，旧公钥暂时保留。请用新公钥完成登录验证。")
-        self.confirm_login()
+        self.confirm_login(purpose="请使用刚添加的新公钥登录，验证成功后移除旧公钥。")
         self.s.write_keys(lines[:index] + lines[index + 1:] + [key])
 
     def ssh_login(self):
@@ -489,7 +509,7 @@ class Panel:
         ])
 
     def enable_password(self):
-        confirm("临时允许 root 密码认证？此操作不创建或更改密码。", "PASSWORD")
+        confirm("临时允许 root 密码认证？此操作不创建或更改密码。", action="开启密码登录", danger=True)
         self.s.password(True, self.confirm_login)
 
     def firewall(self):
@@ -523,7 +543,8 @@ class Panel:
         if not choice.isdigit() or not 1 <= int(choice) <= len(rules):
             raise Error("自定义规则编号无效；其他软件的规则仅展示。")
         replacement = self.rule_input() if replace else None
-        confirm("修改所选规则？" if replace else "删除所选自定义规则？")
+        confirm("修改所选规则？" if replace else "删除所选自定义规则？",
+                action="应用修改" if replace else "删除规则", danger=not replace)
         self.s.edit_rule(replacement, int(choice) - 1)
 
     def enable_firewall(self):
@@ -541,7 +562,6 @@ class Panel:
         ])
 
     def enable_fail2ban(self):
-        confirm("启用 SSH 登录防护？")
         backup = Snapshot([self.m.config, Path("/etc/fail2ban/jail.d/zz-surelay.local")])
         try:
             self.m.update({"ENABLE_FAIL2BAN": "true"})
@@ -553,13 +573,13 @@ class Panel:
             raise
 
     def disable_fail2ban(self):
-        confirm("停用 SSH jail，其他服务的 jail 保留？")
+        confirm("停用 SSH 登录防护，其他服务的防护保留？", action="停用 SSH 防护", danger=True)
         self.s.fail2ban_settings({"enabled": "false"})
 
     def unban(self):
         value = str(ipaddress.ip_address(ask("解除封禁的 IP")))
-        confirm(f"解除 {value} 的 SSH 封禁？")
         run(["fail2ban-client", "set", "sshd", "unbanip", value])
+        print(f"已解除 {value} 的 SSH 封禁。")
 
     def whitelist(self):
         run(["fail2ban-client", "get", "sshd", "ignoreip"])
@@ -585,18 +605,17 @@ class Panel:
         ])
 
     def update_code(self):
-        confirm("从 origin/main 快进更新 SuRelay，保留配置和节点身份？")
         self.m.update_code()
         raise SystemExit(0)
 
     def update_core(self):
-        confirm("按现有安装方式更新 sing-box？Alpine 使用本项目校验过的固定版本。")
         self.m.backup()
         run(["bash", self.m.root / "scripts/18-update-core.sh"], env={"RRB_PROJECT_DIR": str(self.m.root), "RRB_VERBOSE": "true"})
 
     def restore(self):
         path = ask("SuRelay 节点备份目录")
-        confirm("恢复节点配置、出口与密钥；现有节点和订阅身份可能变化，SSH 设置保持不变？", "RESTORE")
+        confirm("恢复节点配置、出口与密钥；现有节点和订阅身份可能变化，SSH 设置保持不变？",
+                action="恢复备份", danger=True)
         self.m.restore_nodes(path)
 
     def edit_config(self):

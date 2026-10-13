@@ -80,6 +80,54 @@ class ManagementTest(unittest.TestCase):
             with self.assertRaises(core.Error):
                 core.port(value)
 
+    def test_plain_confirmation_uses_menu_choices_with_safe_destructive_default(self):
+        with patch.object(surelay, "current_terminal", return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()), patch("builtins.input", return_value=""):
+            surelay.confirm("保存修改")
+            with self.assertRaises(surelay.Cancelled):
+                surelay.confirm("删除出口", danger=True)
+        with patch.object(surelay, "current_terminal", return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()), patch("builtins.input", return_value="1"):
+            surelay.confirm("删除出口", danger=True)
+
+    def test_routine_maintenance_runs_without_a_second_confirmation(self):
+        panel = surelay.Panel(self.m)
+        with patch.object(surelay, "confirm", side_effect=AssertionError("unexpected confirmation")), \
+             patch.object(self.m, "update_code") as update, \
+             patch.object(self.m, "backup") as backup, \
+             patch.object(self.m, "phase") as phase, \
+             patch.object(self.m, "service") as service, \
+             patch.object(surelay, "run") as run:
+            with self.assertRaises(SystemExit) as stopped:
+                panel.update_code()
+            self.assertEqual(stopped.exception.code, 0)
+            update.assert_called_once_with()
+            panel.update_core()
+            backup.assert_called_once_with()
+            self.m.env["ENABLE_CUSTOM_DOMAIN"] = "true"
+            self.m.env["CUSTOM_DOMAIN"] = "edge.example.com"
+            panel.certificate()
+            phase.assert_called_once_with("custom-domain", RRB_SKIP_PACKAGE_INSTALL="false")
+            with patch.object(surelay, "ask", return_value="1"):
+                for action in ("start", "stop", "restart"):
+                    panel.service_action(action)
+                    service.assert_called_with("sing-box", action)
+            with patch.object(surelay, "ask", return_value="192.0.2.5"):
+                panel.unban()
+                run.assert_called_with(["fail2ban-client", "set", "sshd", "unbanip", "192.0.2.5"])
+
+    def test_name_edit_saves_once_without_confirmation_and_skips_unchanged_value(self):
+        panel = surelay.Panel(self.m)
+        with patch.object(surelay, "confirm", side_effect=AssertionError("unexpected confirmation")), \
+             patch.object(self.m, "apply") as apply:
+            with patch.object(surelay, "ask", return_value="new-name"):
+                panel.setting("SERVER_ALIAS", "节点名称")
+            apply.assert_called_once_with({"SERVER_ALIAS": "new-name"}, domain=False)
+            apply.reset_mock()
+            with patch.object(surelay, "ask", return_value="fixture"):
+                panel.setting("SERVER_ALIAS", "节点名称")
+            apply.assert_not_called()
+
     def test_panel_links_are_read_only_and_contain_only_client_endpoints(self):
         from urllib.parse import urlsplit
         from surelay_terminal import Terminal

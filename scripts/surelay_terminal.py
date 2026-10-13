@@ -328,6 +328,50 @@ class Terminal:
                 elif key in ("q", "Q"):
                     raise EOFError
 
+    def confirm(self, message, *, action="确认执行", danger=False):
+        """Review a change with the same controls as menus, without typed tokens."""
+        self.pending = ("", [])
+        selected, start = (1 if danger else 0), 0
+        with self.keys():
+            while True:
+                if self.too_small():
+                    continue
+                lines = wrap(message, self.content_width())
+                capacity = max(1, self.dimensions()[1] - 10)
+                start = min(start, max(0, len(lines) - capacity))
+                body = [(line, "text") for line in lines[start:start + capacity]]
+                body.append(("", "text"))
+                choices = self.menu_rows([action], selected, back="取消")
+                if danger:
+                    choices[0] = (choices[0][0], "danger_selected" if selected == 0 else "danger")
+                body += choices
+                hint = "↑↓ / 数字选择 · Enter 确认 · Esc 取消"
+                if len(lines) > capacity:
+                    hint += f" · PgUp/PgDn 查看说明 {start + 1}–{min(start + capacity, len(lines))}/{len(lines)}"
+                self.render(body, hint)
+                key = self.key()
+                if key == "\x1b":
+                    return False
+                if key in ("q", "Q"):
+                    raise EOFError
+                if key in (UP, DOWN, "\t"):
+                    selected = 1 - selected
+                elif key in ("1", "0"):
+                    selected = 0 if key == "1" else 1
+                elif key in (PAGE_DOWN, PAGE_UP):
+                    start = max(0, min(len(lines) - capacity, start + (capacity if key == PAGE_DOWN else -capacity)))
+                elif key in (HOME, ESC + "1~"):
+                    start = 0
+                elif key in (END, ESC + "4~"):
+                    start = max(0, len(lines) - capacity)
+                elif key in ("\r", "\n"):
+                    if selected == 1:
+                        return False
+                    if start + capacity < len(lines):
+                        start = min(len(lines) - capacity, start + capacity)
+                    else:
+                        return True
+
     def output_rows(self):
         rows, heading = [], False
         for line in clean(self.buffer).strip("\n").splitlines():

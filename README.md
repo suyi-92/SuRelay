@@ -2,6 +2,16 @@
 
 轻量 Reality 部署、中转与 VPS 安全管理。安装后输入 **sr** 打开终端控制面板。
 
+## 推荐一键安装
+
+新安装推荐直接使用一键安装指令。在 VPS 上以 root 执行：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh)
+```
+
+执行后按提示完成安装，随后继续阅读下方步骤。
+
 ## 旧安装如何更新
 
 在 VPS 上以 root 执行：

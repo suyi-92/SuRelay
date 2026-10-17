@@ -339,6 +339,41 @@ public_ipv6() {
   printf '%s\n' "$ip"
 }
 
+ssh_connection_port() {
+  local port="${SSH_CONNECTION:-}"
+  port="${port##* }"
+  if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )); then
+    printf '%s\n' "$port"
+  fi
+}
+
+detect_current_ssh_port() {
+  local port
+  port="$(ssh_connection_port)"
+  if [[ -n "$port" ]]; then
+    printf '%s\n' "$port"
+    return 0
+  fi
+  if command -v sshd >/dev/null 2>&1; then
+    port="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')"
+    if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )); then
+      printf '%s\n' "$port"
+      return 0
+    fi
+  fi
+  printf '22\n'
+}
+
+sync_config_ssh_port() {
+  local config_file="$1" value="$2" quoted
+  quoted="$(shell_quote "$value")"
+  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?SSH_PORT=' "$config_file"; then
+    sed -i -E "s/^[[:space:]]*(export[[:space:]]+)?SSH_PORT=.*/SSH_PORT=$quoted/" "$config_file"
+  else
+    printf '\nSSH_PORT=%s\n' "$quoted" >>"$config_file"
+  fi
+}
+
 normalize_ipv6() {
   local value="$1"
   command -v python3 >/dev/null 2>&1 || die "找不到 python3，无法校验 IPv6 地址。"
@@ -541,7 +576,7 @@ run_install_phase() {
 }
 
 run_install_flow() {
-  local project_dir="$1" ssh_host
+  local project_dir="$1" ssh_host current_ssh_port
   cd "$project_dir"
   if [[ "$RUN_PHASES" != "true" ]]; then
     info "配置已就绪：$project_dir/config.env；未执行部署。"
@@ -549,6 +584,13 @@ run_install_flow() {
   fi
   # Use the saved settings, including ports and file paths customized through config.env.
   source "$project_dir/config.env"
+  current_ssh_port="$(ssh_connection_port)"
+  if [[ -n "$current_ssh_port" && "$current_ssh_port" != "$SSH_PORT" ]]; then
+    warn "当前 SSH 会话使用端口 $current_ssh_port，但 config.env 记录为 $SSH_PORT；已按当前会话同步。"
+    sync_config_ssh_port "$project_dir/config.env" "$current_ssh_port"
+    SSH_PORT="$current_ssh_port"
+    export SSH_PORT
+  fi
   ssh_host="${SERVER_IP_IPV4:-${SERVER_IP_IPV6:-${SERVER_IP:-}}}"
   # Prefer the already working SSH address when it is one of the configured endpoints.
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
@@ -629,13 +671,14 @@ configure_install() {
   default_ip="$(public_ipv4)"
 
   section "基础信息"
-  local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey
+  local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey current_ssh_port
   local enable_custom_domain custom_domain cloudflare_zone_name le_email cloudflare_api_token
   server_alias="$(read_default "SERVER_ALIAS" "")"
   server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
   # IPv6 is an explicit post-install action through sr or install.sh -6.
   server_ip_ipv6=""
-  ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-22}")"
+  current_ssh_port="$(detect_current_ssh_port)"
+  ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-$current_ssh_port}")"
 
   section "Cloudflare 域名（灰云 DNS）"
   enable_custom_domain="$(read_bool_value "ENABLE_CUSTOM_DOMAIN" "false")"

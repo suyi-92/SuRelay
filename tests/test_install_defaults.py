@@ -47,6 +47,59 @@ class InstallFlowTest(unittest.TestCase):
             with self.subTest(ipv6=ipv6), tempfile.TemporaryDirectory() as temporary:
                 self.check_first_install(Path(temporary), ipv6)
 
+    def test_first_install_defaults_to_current_ssh_connection_port(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self.run_bash('''
+public_ipv4() { printf '192.0.2.10'; }
+read_default() {
+  case "$1" in
+    SERVER_ALIAS) printf 'relay' ;;
+    SERVER_IP_IPv4) printf '192.0.2.10' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+read_bool_value() { printf false; }
+collect_admin_pubkeys() { printf 'ssh-ed25519 AAAA test\n' >"$1"; }
+configure_install "$1"
+source "$1/config.env"
+printf '%s\n' "$SSH_PORT" >"$1/ssh-port"
+''', root, SSH_CONNECTION="112.193.179.58 47504 217.217.78.142 50396")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "ssh-port").read_text().strip(), "50396")
+
+    def test_install_flow_syncs_stale_config_to_current_ssh_connection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "config.env").write_text(
+                'SERVER_IP_IPV4="217.217.78.142"\nSSH_PORT="22"\n'
+            )
+            master, slave = pty.openpty()
+            try:
+                os.write(master, b"\n")
+                result = self.run_bash('''
+INPUT_TTY="$TEST_TTY"
+run_install_phase() { :; }
+python3() { :; }
+run_install_flow "$1"
+''', root, TEST_TTY=os.ttyname(slave), RRB_RUN_PHASES="true",
+                                    SSH_CONNECTION="112.193.179.58 47504 217.217.78.142 50396")
+                prompt = os.read(master, 65536).decode("utf-8")
+            finally:
+                os.close(master)
+                os.close(slave)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("ssh -p 50396 ", result.stdout)
+            self.assertIn("当前 SSH 会话使用端口 50396", result.stderr)
+            self.assertEqual(
+                subprocess.check_output(
+                    ["bash", "-c", 'source "$1"; printf "%s" "$SSH_PORT"', "_", str(root / "config.env")],
+                    text=True,
+                ),
+                "50396",
+            )
+            self.assertIn("[Y/n]", prompt)
+
     def check_first_install(self, root, ipv6):
         result = self.run_bash('''
 prompt_log="$1/prompts"

@@ -189,7 +189,11 @@ class Security:
         current = self.effective()
         old_ports = [port(line.split()[1]) for line in current.splitlines() if line.startswith("port ")]
         if new in old_ports and len(old_ports) == 1:
-            print("SSH 已使用该端口。")
+            configured = str(self.m.env["SSH_PORT"])
+            if configured == new:
+                print("SSH 已使用该端口。")
+                return
+            self._sync_existing_ssh_port(new, configured)
             return
         reserved = {str(self.m.env["DIRECT_PORT"]), str(self.m.env["SUBSCRIPTION_LISTEN_PORT"]),
                     *(str(row["listen_port"]) for row in self.m.rows())}
@@ -234,7 +238,9 @@ class Security:
             self.set_ssh_ports([new], socket_active)
             self.verify_ssh_listener(new)
             self.m.update({"SSH_PORT": new})
-            if self.m.env["ENABLE_FAIL2BAN"] == "true":
+            if (self.m.env["ENABLE_FAIL2BAN"] == "true"
+                    and shutil.which("fail2ban-client")
+                    and self.m.active("fail2ban")):
                 self.fail2ban_settings({"port": new})
         except BaseException:
             backup.restore()
@@ -251,17 +257,47 @@ class Security:
             notice("SSH 迁移未完成，已恢复原配置。")
             raise
         # Delete only owned rules for obsolete SSH ports after the new login was verified.
-        if shutil.which("ufw"):
-            status = run(["ufw", "status", "numbered"], capture=True)
-            numbers = []
-            for line in status.splitlines():
-                match = re.match(r"\[\s*(\d+)\]\s+(\d+)/tcp", line)
-                if match and match[2] in old_ports and match[2] != new and any(
-                        name in line for name in ("surelay SSH", "reality-relay-bootstrap SSH")):
-                    numbers.append(int(match[1]))
-            for number in sorted(numbers, reverse=True):
-                run(["ufw", "--force", "delete", str(number)])
+        self._cleanup_owned_ssh_rules(old_ports, new)
         print(f"SSH 端口已改为 {new}；其他软件或手工配置的旧规则未删除。")
+
+    def _sync_existing_ssh_port(self, new, configured):
+        """Adopt a port already used by sshd and repair SuRelay metadata."""
+        paths = [self.m.config, Path("/etc/ufw/user.rules"), Path("/etc/ufw/user6.rules"),
+                 Path("/etc/fail2ban/jail.d/zz-surelay.local")]
+        backup = Snapshot(paths)
+        try:
+            if shutil.which("ufw"):
+                run(["ufw", "allow", f"{new}/tcp", "comment", "surelay SSH current port"])
+            self.m.update({"SSH_PORT": new})
+            if (self.m.env["ENABLE_FAIL2BAN"] == "true"
+                    and shutil.which("fail2ban-client")
+                    and self.m.active("fail2ban")):
+                self.fail2ban_settings({"port": new})
+        except BaseException:
+            backup.restore()
+            self.m.reload()
+            if shutil.which("fail2ban-client"):
+                run(["fail2ban-client", "reload"], check=False)
+            if shutil.which("ufw"):
+                run(["ufw", "reload"], check=False)
+            notice("SSH 端口配置同步未完成，已恢复原配置。")
+            raise
+        self._cleanup_owned_ssh_rules([configured], new)
+        print(f"SSH 已在 {new} 监听；已同步 SuRelay 配置和安全规则。")
+
+    def _cleanup_owned_ssh_rules(self, old_ports, new):
+        if not shutil.which("ufw"):
+            return
+        status = run(["ufw", "status", "numbered"], capture=True)
+        numbers = []
+        old_ports = {str(value) for value in old_ports}
+        for line in status.splitlines():
+            match = re.match(r"\[\s*(\d+)\]\s+(\d+)/tcp", line)
+            if match and match[2] in old_ports and match[2] != new and any(
+                    name in line for name in ("surelay SSH", "reality-relay-bootstrap SSH")):
+                numbers.append(int(match[1]))
+        for number in sorted(numbers, reverse=True):
+            run(["ufw", "--force", "delete", str(number)])
 
     def set_ssh_ports(self, ports, socket_active):
         atomic(self.ssh_config, ssh_block(self.ssh_config.read_text(), {"Port": ports}), 0o600)

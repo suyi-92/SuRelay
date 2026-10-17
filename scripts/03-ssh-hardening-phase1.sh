@@ -20,6 +20,15 @@ EOF
 test_sshd_config
 reload_ssh
 
+# An existing UFW may still allow only the old SSH port. Open the configured
+# port before asking for a second verification session; the final firewall
+# phase removes stale SuRelay-managed SSH rules later.
+if [[ "$ENABLE_UFW" == "true" ]] && command -v ufw >/dev/null 2>&1 \
+  && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  run ufw allow "${SSH_PORT}/tcp" comment "surelay SSH current port"
+  info "已为 SSH 公钥验证放行当前端口 $SSH_PORT/tcp。"
+fi
+
 cat <<EOF
 
 SSH phase1 已完成；当前仍未禁用 root/密码登录。

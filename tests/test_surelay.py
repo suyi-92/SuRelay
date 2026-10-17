@@ -532,6 +532,48 @@ class ManagementTest(unittest.TestCase):
         self.assertIn("Port 2222\n", secure.ssh_config.read_text())
         self.assertNotIn("\nPort 22\n", secure.ssh_config.read_text())
 
+    def test_ssh_port_menu_syncs_stale_config_when_sshd_already_uses_port(self):
+        secure = security.Security(self.m)
+        self.m.update({"SSH_PORT": "22"})
+        self.snapshot_class = core.Snapshot
+        with patch.object(security, "Snapshot", side_effect=self.local_snapshot), \
+             patch.object(security.shutil, "which", return_value=None), \
+             patch.object(secure, "effective", return_value="port 50396"), \
+             patch.object(security, "run") as external:
+            secure.change_ssh_port("50396", lambda value: self.fail("existing listener should not ask for login"))
+
+        self.assertEqual(self.m.env["SSH_PORT"], "50396")
+        self.assertIn("SSH_PORT=50396", self.config.read_text())
+        external.assert_not_called()
+
+    def test_ssh_port_menu_repairs_owned_ufw_rules_when_syncing_listener(self):
+        secure = security.Security(self.m)
+        self.m.update({"SSH_PORT": "22"})
+        self.snapshot_class = core.Snapshot
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:3] == ["ufw", "status", "numbered"]:
+                return ("[ 1] 22/tcp ALLOW IN Anywhere # surelay SSH current port\n"
+                        "[ 2] 443/tcp ALLOW IN Anywhere # surelay sing-box VLESS+Reality 443\n"
+                        "[ 3] 50396/tcp ALLOW IN Anywhere # surelay SSH current port")
+            return ""
+
+        def which(name):
+            return "/usr/sbin/ufw" if name == "ufw" else None
+
+        with patch.object(security, "Snapshot", side_effect=self.local_snapshot), \
+             patch.object(security.shutil, "which", side_effect=which), \
+             patch.object(security, "run", side_effect=fake_run), \
+             patch.object(secure, "effective", return_value="port 50396"), \
+             patch.object(self.m, "active", return_value=False):
+            secure.change_ssh_port("50396", lambda value: self.fail("existing listener should not ask for login"))
+
+        self.assertIn(["ufw", "allow", "50396/tcp", "comment", "surelay SSH current port"], calls)
+        self.assertIn(["ufw", "--force", "delete", "1"], calls)
+        self.assertNotIn(["ufw", "--force", "delete", "2"], calls)
+
 
 if __name__ == "__main__":
     unittest.main()

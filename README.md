@@ -4,13 +4,21 @@
 
 ## 推荐一键安装
 
-新安装推荐直接使用一键安装指令。在 VPS 上以 root 执行：
+新安装推荐直接使用下面的一键安装指令。在 VPS 上以 root 执行：
 
-```bash
-bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh)
-```
+1. 部署节点代理：
 
-执行后按提示完成安装，随后继续阅读下方步骤。
+   ```bash
+   bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh)
+   ```
+
+2. 只做服务器安全防护：
+
+   ```bash
+   bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh) --security-only
+   ```
+
+第二条指令仍会先配置 root 公钥并要求新终端验证登录，再关闭密码登录；随后安装 fail2ban、启用 UFW 并只确保 SSH 端口放行。它不会安装 sing-box、订阅服务、Reality 密钥或客户端节点。已有项目配置不会被重置，已有其他 UFW 规则也会保留。完成后输入 `sr`，选择主菜单的“部署节点代理”，即可继续安装 sing-box；订阅服务保持关闭时，可在“高级维护 → 编辑高级配置并应用”中开启。
 
 ## 旧安装如何更新
 
@@ -42,8 +50,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install
 | 4) 域名与证书 | 配置 CF 域名和凭据、同步 DNS、检查续期、停用域名模式 |
 | 5) 服务与诊断 | 状态、启动/停止/重启代理与订阅、日志、配置和监听检查 |
 | 6) VPS 安全 | UFW 自定义端口规则、SSH 端口、公钥与密码认证、fail2ban |
-| 7) 高级维护 | 更新脚本/内核、备份恢复、高级配置、继续安装、目录迁移和重置 |
+| 7) 高级维护 | 更新脚本/内核、备份恢复、高级配置、继续安装/部署节点代理、目录迁移和重置 |
 | 8) 卸载 SuRelay | 预览清单、备份并卸载部署，保留 SSH |
+
+纯安全防护模式的主菜单会显示“部署节点代理”、VPS 安全、高级维护和卸载；完成节点部署后恢复完整菜单。
 
 面板在同一屏幕内切换菜单和输入：方向键或数字选择，Enter 确认，Esc 返回，q 退出。节点与订阅页也使用居中面板，直接展示完整链接；**Enter / c** 请求复制完整原始链接（需终端支持 OSC 52），**p** 在当前面板展开/收起原文，便于鼠标选中复制；**←→** 切换节点或订阅格式，**Esc / 0** 返回。过长内容可用 ↑↓ 或 PgUp/PgDn 翻页。添加上游 VLESS 每次完成一个节点，依次填写链接、名称和入口端口后保存。`sr --plain` 使用逐行菜单，`NO_COLOR=1 sr` 关闭颜色。打开菜单只读取状态；更新脚本等常规维护选中后执行，需要核对的变更使用确认/取消选项，不必输入 YES 等确认词。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
 

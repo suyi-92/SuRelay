@@ -214,6 +214,36 @@ class ManagementTest(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][-2:], ["--mode", "config"])
             phase.assert_not_called()
 
+    def test_security_only_panel_offers_node_deployment_entry(self):
+        self.m.update({"SURELAY_SECURITY_ONLY": "true"})
+        panel = surelay.Panel(self.m)
+        captured = {}
+        with patch.object(surelay, "menu", side_effect=lambda title, actions, *args: captured.update(dict(actions))):
+            panel.main()
+        self.assertIn("部署节点代理", captured)
+        self.assertNotIn("节点与订阅", captured)
+
+    def test_security_only_node_deployment_switches_to_full_install(self):
+        self.m.update({"SURELAY_SECURITY_ONLY": "true"})
+        panel = surelay.Panel(self.m)
+        with patch.object(surelay, "confirm") as confirm, patch.object(surelay, "run") as run:
+            with self.assertRaises(SystemExit):
+                panel.install_nodes()
+        confirm.assert_called_once_with(
+            "已完成服务器安全防护。现在切换到完整安装并部署节点代理？", action="部署节点代理")
+        run.assert_called_once_with(["bash", self.root / "install.sh"], interactive=True)
+        self.assertEqual(self.m.env["SURELAY_SECURITY_ONLY"], "false")
+
+    def test_cancelling_security_only_node_deployment_keeps_security_mode(self):
+        self.m.update({"SURELAY_SECURITY_ONLY": "true"})
+        panel = surelay.Panel(self.m)
+        with patch.object(surelay, "confirm", side_effect=surelay.Cancelled("取消")), \
+             patch.object(surelay, "run") as run:
+            with self.assertRaises(surelay.Cancelled):
+                panel.install_nodes()
+        run.assert_not_called()
+        self.assertEqual(self.m.env["SURELAY_SECURITY_ONLY"], "true")
+
     def test_firewall_choices_and_preview_use_readable_rules(self):
         panel = surelay.Panel(self.m)
         rule = {"port": "8080", "protocol": "tcp", "sources": ["192.0.2.0/24"], "note": "web"}

@@ -110,6 +110,7 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         "ENABLE_UFW": "true",
         "ENABLE_FAIL2BAN": "true",
         "ENABLE_IPV6_LISTEN": "false",
+        "SURELAY_SECURITY_ONLY": "false",
         "CSV_PATH": "./home-proxies.csv",
         "UPSTREAM_NODES_PATH": "./upstream-nodes.txt",
         "RRB_STATE_DIR": state_dir,
@@ -302,7 +303,9 @@ def is_posix_absolute(value: str) -> bool:
 def validate_env(env: Dict[str, str]) -> None:
     as_port(env, "SSH_PORT")
     direct_port = as_port(env, "DIRECT_PORT")
-    if direct_port == as_port(env, "SSH_PORT"):
+    if env.get("SURELAY_SECURITY_ONLY", "false") not in {"true", "false"}:
+        raise ConfigError("SURELAY_SECURITY_ONLY 必须是 true 或 false")
+    if direct_port == as_port(env, "SSH_PORT") and env.get("SURELAY_SECURITY_ONLY") != "true":
         raise ConfigError("DIRECT_PORT 不能与 SSH_PORT 相同")
     start = as_port(env, "HOME_PORT_START")
     end = as_port(env, "HOME_PORT_END")

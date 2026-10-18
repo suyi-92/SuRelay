@@ -364,16 +364,6 @@ detect_current_ssh_port() {
   printf '22\n'
 }
 
-sync_config_ssh_port() {
-  local config_file="$1" value="$2" quoted
-  quoted="$(shell_quote "$value")"
-  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?SSH_PORT=' "$config_file"; then
-    sed -i -E "s/^[[:space:]]*(export[[:space:]]+)?SSH_PORT=.*/SSH_PORT=$quoted/" "$config_file"
-  else
-    printf '\nSSH_PORT=%s\n' "$quoted" >>"$config_file"
-  fi
-}
-
 normalize_ipv6() {
   local value="$1"
   command -v python3 >/dev/null 2>&1 || die "找不到 python3，无法校验 IPv6 地址。"
@@ -576,7 +566,7 @@ run_install_phase() {
 }
 
 run_install_flow() {
-  local project_dir="$1" ssh_host current_ssh_port
+  local project_dir="$1" ssh_host current_ssh_port configured_ssh_port
   cd "$project_dir"
   if [[ "$RUN_PHASES" != "true" ]]; then
     info "配置已就绪：$project_dir/config.env；未执行部署。"
@@ -584,12 +574,10 @@ run_install_flow() {
   fi
   # Use the saved settings, including ports and file paths customized through config.env.
   source "$project_dir/config.env"
+  configured_ssh_port="${SSH_PORT:-22}"
   current_ssh_port="$(ssh_connection_port)"
-  if [[ -n "$current_ssh_port" && "$current_ssh_port" != "$SSH_PORT" ]]; then
-    warn "当前 SSH 会话使用端口 $current_ssh_port，但 config.env 记录为 $SSH_PORT；已按当前会话同步。"
-    sync_config_ssh_port "$project_dir/config.env" "$current_ssh_port"
-    SSH_PORT="$current_ssh_port"
-    export SSH_PORT
+  if [[ -n "$current_ssh_port" && "$current_ssh_port" != "$configured_ssh_port" ]]; then
+    warn "当前 SSH 会话使用端口 $current_ssh_port，但 config.env 记录为 $configured_ssh_port；验证命令将按配置端口执行。"
   fi
   ssh_host="${SERVER_IP_IPV4:-${SERVER_IP_IPV6:-${SERVER_IP:-}}}"
   # Prefer the already working SSH address when it is one of the configured endpoints.
@@ -615,7 +603,7 @@ run_install_flow() {
 
   section "SSH 公钥登录验证"
   printf '另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
-  printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "${SSH_PORT:-22}" "$ssh_host"
+  printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "$configured_ssh_port" "$ssh_host"
   if read_yes_no "已确认公钥登录成功，继续关闭密码登录？" yes; then
     section "应用配置与验证"
     CONFIRM_ROOT_KEY_LOGIN=yes run_install_phase ssh-final

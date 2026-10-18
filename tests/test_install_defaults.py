@@ -68,11 +68,11 @@ printf '%s\n' "$SSH_PORT" >"$1/ssh-port"
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((root / "ssh-port").read_text().strip(), "50396")
 
-    def test_install_flow_syncs_stale_config_to_current_ssh_connection(self):
+    def test_install_flow_preserves_configured_ssh_port_when_session_differs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "config.env").write_text(
-                'SERVER_IP_IPV4="217.217.78.142"\nSSH_PORT="22"\n'
+                'SERVER_IP_IPV4="217.217.78.142"\nSSH_PORT="24087"\n'
             )
             master, slave = pty.openpty()
             try:
@@ -83,20 +83,21 @@ run_install_phase() { :; }
 python3() { :; }
 run_install_flow "$1"
 ''', root, TEST_TTY=os.ttyname(slave), RRB_RUN_PHASES="true",
-                                    SSH_CONNECTION="112.193.179.58 47504 217.217.78.142 50396")
+                                    SSH_CONNECTION="112.193.179.58 47504 217.217.78.142 22")
                 prompt = os.read(master, 65536).decode("utf-8")
             finally:
                 os.close(master)
                 os.close(slave)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("ssh -p 50396 ", result.stdout)
-            self.assertIn("当前 SSH 会话使用端口 50396", result.stderr)
+            self.assertIn("ssh -p 24087 ", result.stdout)
+            self.assertIn("当前 SSH 会话使用端口 22", result.stderr)
+            self.assertIn("验证命令将按配置端口执行", result.stderr)
             self.assertEqual(
                 subprocess.check_output(
                     ["bash", "-c", 'source "$1"; printf "%s" "$SSH_PORT"', "_", str(root / "config.env")],
                     text=True,
                 ),
-                "50396",
+                "24087",
             )
             self.assertIn("[Y/n]", prompt)
 

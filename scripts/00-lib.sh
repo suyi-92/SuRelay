@@ -65,6 +65,43 @@ run() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+memory_limit_mib() {
+  local memory_file="${RRB_MEMORY_LIMIT_FILE:-}" bytes
+  if [[ -z "$memory_file" ]]; then
+    if [[ -r /sys/fs/cgroup/memory.max ]]; then
+      memory_file=/sys/fs/cgroup/memory.max
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+      memory_file=/sys/fs/cgroup/memory/memory.limit_in_bytes
+    fi
+  fi
+  if [[ -n "$memory_file" && -r "$memory_file" ]]; then
+    read -r bytes <"$memory_file" || bytes=""
+    if [[ "$bytes" =~ ^[0-9]+$ ]] && (( bytes > 0 && bytes < 1099511627776 )); then
+      printf '%s\n' $(( (bytes + 1048575) / 1048576 ))
+      return 0
+    fi
+  fi
+  awk '/^MemTotal:[[:space:]]+[0-9]+[[:space:]]+kB/ {printf "%d\n", ($2 + 1023) / 1024; exit}' \
+    "${RRB_MEMINFO_FILE:-/proc/meminfo}"
+}
+
+swap_total_mib() {
+  awk '/^SwapTotal:[[:space:]]+[0-9]+[[:space:]]+kB/ {printf "%d\n", ($2 + 1023) / 1024; exit}' \
+    "${RRB_MEMINFO_FILE:-/proc/meminfo}"
+}
+
+check_memory_budget() {
+  is_alpine || return 0
+  local memory_mib swap_mib
+  memory_mib="$(memory_limit_mib)"
+  swap_mib="$(swap_total_mib)"
+  [[ "$memory_mib" =~ ^[0-9]+$ && "$swap_mib" =~ ^[0-9]+$ ]] || return 0
+  info "内存检查：限制 ${memory_mib} MiB，Swap ${swap_mib} MiB。"
+  if (( memory_mib < 160 && swap_mib < 256 )); then
+    die "Alpine 安装至少需要 160 MiB 内存；当前限制 ${memory_mib} MiB 且 Swap 仅 ${swap_mib} MiB，安装 sing-box 时可能被 OOM 终止。请先升级主机或配置至少 512 MiB Swap 后重试。"
+  fi
+}
+
 source "$SCRIPT_DIR/00-platform.sh"
 
 user_home() {

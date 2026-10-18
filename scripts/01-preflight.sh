@@ -10,7 +10,14 @@ require_supported_os
 info "开始 preflight。日志：$LOG_FILE"
 
 require_service_manager
-pkg_install ca-certificates curl gnupg openssl python3 sudo openssh-server iproute2
+check_memory_budget
+if is_alpine; then
+  # Alpine uses the pinned musl release archive; gnupg and sudo are not needed
+  # during deployment and add avoidable package/memory pressure.
+  pkg_install ca-certificates curl openssl python3 openssh-server iproute2
+else
+  pkg_install ca-certificates curl gnupg openssl python3 sudo openssh-server iproute2
+fi
 if is_alpine; then
   pkg_install coreutils findutils grep sed procps
   service_enable sshd

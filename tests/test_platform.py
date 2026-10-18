@@ -51,6 +51,28 @@ class PlatformTest(unittest.TestCase):
                 self.assertEqual(result.stdout.splitlines(), [method, f"/etc/nginx/{confdir}/surelay.conf"])
                 self.assertEqual(self.config.read_bytes(), original)
 
+    def test_memory_budget_uses_cgroup_limit_and_swap(self):
+        (self.root / "memory.max").write_text(str(128 * 1024 * 1024))
+        (self.root / "meminfo").write_text("MemTotal:       131072 kB\nSwapTotal:      524288 kB\n")
+        result = self.run_shell(
+            'RRB_MEMORY_LIMIT_FILE="$TEST_ROOT/memory.max"; RRB_MEMINFO_FILE="$TEST_ROOT/meminfo"; '
+            'check_memory_budget; printf "%s %s\\n" "$(memory_limit_mib)" "$(swap_total_mib)"'
+        )
+        self.assert_ok(result)
+        self.assertIn("内存检查：限制 128 MiB，Swap 512 MiB。", (self.root / "phase.log").read_text())
+        self.assertEqual(result.stdout.strip(), "128 512")
+
+    def test_memory_budget_stops_unusable_low_memory_alpine_before_install(self):
+        (self.root / "memory.max").write_text(str(128 * 1024 * 1024))
+        (self.root / "meminfo").write_text("MemTotal:       131072 kB\nSwapTotal:           0 kB\n")
+        result = self.run_shell(
+            'RRB_MEMORY_LIMIT_FILE="$TEST_ROOT/memory.max"; RRB_MEMINFO_FILE="$TEST_ROOT/meminfo"; '
+            'check_memory_budget; printf UNEXPECTED_SUCCESS'
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("UNEXPECTED_SUCCESS", result.stdout)
+        self.assertIn("至少需要 160 MiB", result.stderr)
+
     def test_nat_custom_domain_shell_defaults_match_public_port(self):
         for port, override, expected in (
             ("443", "", "https://edge.example.com"),

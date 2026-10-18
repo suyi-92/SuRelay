@@ -7,6 +7,7 @@ Alpine 3.19 使用 apk、OpenRC 和 musl。安装、维护、`-6` 和回滚使�
 - 以 root 运行，使用已经启动 OpenRC 的 VPS/虚拟机镜像。
 - `/etc/apk/repositories` 启用同一个 3.19 分支的 `main` 和 `community`。脚本不混入 edge，也不自动替换镜像源。
 - x86_64 或 aarch64；能访问 Alpine 软件源、GitHub Release；自有域名模式还需要 PyPI、Cloudflare 和 ACME 网络访问。
+- 小内存主机至少需要 160 MiB 内存；128 MiB 主机必须先准备足够的 Swap（建议 512 MiB 以上）。安装器会在 SSH 加固前检查内存限制，不满足条件时直接停止。
 - UFW 需要实际的 netfilter 权限。受限 LXC/容器若没有这些权限，会在防火墙阶段失败，不能宣称已完成防护。
 
 默认 ash 不能直接使用 README 中 Debian/Ubuntu 的 Bash 进程替换入口。先执行：
@@ -56,6 +57,20 @@ tail -n 80 /var/log/messages
 ### 小内存主机从证书安装失败处继续
 
 `Killed` / 退出码 137 表示进程收到 SIGKILL。结合 cgroup 的 `memory.max` 和 `memory.events` 判断是否发生 OOM；进程退出后的 `free` 余量不能代表安装时的峰值。不要仅凭 137 就自动创建 swap，受限容器可能无权启用，且需要先核对磁盘余量。
+
+128 MiB Alpine 主机可以先确认并启用 Swap，再重新执行安装：
+
+```sh
+free -m
+cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events 2>/dev/null || true
+dd if=/dev/zero of=/swapfile bs=1M count=512
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+free -m
+```
+
+如果 `swapon` 被拒绝，说明 VPS/LXC 没有启用 Swap 的权限，需要在服务商面板增加内存或 Swap；不要继续重复安装。
 
 更新项目中的 `scripts/00-platform.sh` 和 `requirements/alpine-certbot.txt` 后，如果已经完成 sing-box、订阅和 DNS，而失败停在 Certbot 安装，可沿用现有配置继续：
 

@@ -7,7 +7,11 @@ require_root
 load_config
 require_supported_os
 
-pkg_install ca-certificates curl gnupg openssl python3 iproute2
+if is_alpine; then
+  pkg_install ca-certificates curl openssl python3 iproute2
+else
+  pkg_install ca-certificates curl gnupg openssl python3 iproute2
+fi
 
 backup_path /etc/sing-box/config.json || true
 [[ -d /etc/sing-box/conf ]] && backup_path /etc/sing-box/conf || true

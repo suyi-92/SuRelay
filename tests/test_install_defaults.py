@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -192,6 +193,32 @@ run_install_flow "$1"
                 self.assertIn("完成：安装 sing-box", result.stderr)
                 self.assertNotIn("阶段失败", result.stderr)
                 self.assertEqual("routine output" in result.stdout, verbose == "true")
+
+    def test_maintenance_lock_blocks_a_concurrent_install(self):
+        if not shutil.which("flock"):
+            self.skipTest("flock is required")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            holder = subprocess.Popen(
+                ["bash", "--noprofile", "--norc", "-c",
+                 self.functions + '\nacquire_maintenance_lock; : >"$1/held"; sleep 30',
+                 "holder", str(root)],
+                env={**os.environ, "RRB_MAINTENANCE_LOCK_FILE": str(root / "surelay.lock")},
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not (root / "held").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue((root / "held").exists(), "lock holder did not start")
+                result = self.run_bash(
+                    'acquire_maintenance_lock', root,
+                    RRB_MAINTENANCE_LOCK_FILE=str(root / "surelay.lock"),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("另一个 SuRelay 安装或管理会话正在运行", result.stderr)
+            finally:
+                holder.terminate()
+                holder.wait(timeout=5)
 
 
 if __name__ == "__main__":

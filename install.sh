@@ -16,6 +16,8 @@ INSTALL_LOG_FILE="${RRB_INSTALL_LOG_FILE:-/tmp/surelay-install.log}"
 INSTALL_MODE="full"
 IPV6_NODE_ADDRESS=""
 INPUT_TTY=""
+MAINTENANCE_LOCK_FILE="${RRB_MAINTENANCE_LOCK_FILE:-/run/surelay.lock}"
+MAINTENANCE_LOCK_FD=""
 export RRB_VERBOSE RUN_PHASES
 
 BOLD=$'\033[1m'
@@ -116,6 +118,22 @@ parse_args() {
         ;;
     esac
   done
+}
+
+acquire_maintenance_lock() {
+  # A panel already owns this lock when it launches install.sh for install or
+  # reset. Keep that ownership across the child process instead of opening a
+  # second flock on the same file.
+  if [[ "${RRB_MANAGEMENT_LOCK_HELD:-false}" == "true" ]]; then
+    return 0
+  fi
+  command -v flock >/dev/null 2>&1 || die "找不到 flock，无法防止安装与管理操作并发运行。"
+  exec {MAINTENANCE_LOCK_FD}>"$MAINTENANCE_LOCK_FILE" \
+    || die "无法打开维护锁：$MAINTENANCE_LOCK_FILE"
+  if ! flock -n "$MAINTENANCE_LOCK_FD"; then
+    die "另一个 SuRelay 安装或管理会话正在运行，请先等待它结束。"
+  fi
+  export RRB_MANAGEMENT_LOCK_HELD=true
 }
 
 init_input_tty() {
@@ -704,6 +722,7 @@ main() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     die "请使用 root 运行，例如：sudo bash install.sh"
   fi
+  acquire_maintenance_lock
   if [[ "$INSTALL_MODE" == "reset" && "$RUN_PHASES" != "true" ]]; then
     die "--reset 必须执行完整重装，不能与 RRB_RUN_PHASES=false 同时使用。"
   fi

@@ -378,6 +378,17 @@ class ManagementTest(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in identities}, identities)
         self.assertEqual([c.args[0] for c in self.m.phase.call_args_list], ["subscription"])
 
+    def test_panel_install_and_reset_reuse_the_parent_maintenance_lock(self):
+        panel = surelay.Panel(self.m)
+        with patch.object(surelay, "run") as run:
+            with self.assertRaises(SystemExit):
+                panel.install()
+            panel.reset()
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"], {"RRB_MANAGEMENT_LOCK_HELD": "true"})
+            self.assertTrue(call.kwargs["interactive"])
+
     def test_exit_delete_preserves_generated_port(self):
         url = "vless://11111111-2222-4333-8444-555555555555@example.com:443?security=none&type=tcp"
         (self.root / "upstream-nodes.txt").write_text(url + "#one\n" + url + "#two\n")

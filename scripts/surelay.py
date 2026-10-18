@@ -2,7 +2,7 @@
 """SuRelay terminal control panel. Run sr, sr status, sr update or sr help."""
 from __future__ import annotations
 import argparse
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 import getpass
 import io
 import ipaddress
@@ -898,11 +898,13 @@ class Panel:
 
     def reset(self):
         # The established reset flow has its own preview, backup and RESET confirmation.
-        run(["bash", self.m.root / "install.sh", "--reset"], interactive=True)
+        run(["bash", self.m.root / "install.sh", "--reset"],
+            env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
         self.m.reload()
 
     def install(self):
-        run(["bash", self.m.root / "install.sh"], interactive=True)
+        run(["bash", self.m.root / "install.sh"],
+            env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
         raise SystemExit(0)
 
     @operation("旧安装迁移已完成。重新运行 sr 打开面板。")
@@ -936,11 +938,17 @@ def main():
         raise Error(f"未找到配置：{manager.config}。首次部署运行 sr install；更新脚本不会自动安装节点。")
     import fcntl
     restart_root = None
-    with open("/run/surelay.lock", "w") as lock:
+    # Direct sr invocations acquire the maintenance lock. install.sh --update
+    # may invoke this entry point while already holding it, so that child must
+    # reuse the parent's ownership instead of blocking on its own lock.
+    lock_context = (nullcontext(None) if os.environ.get("RRB_MANAGEMENT_LOCK_HELD") == "true"
+                    else open("/run/surelay.lock", "w"))
+    with lock_context as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if lock is not None:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise Error("另一个 sr 管理会话正在运行，请先退出该会话。")
+            raise Error("另一个 SuRelay 安装或管理会话正在运行，请先退出该会话。")
         panel = Panel(manager)
         if args.command == "status":
             panel.status()

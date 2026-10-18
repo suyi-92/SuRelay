@@ -63,6 +63,18 @@ if [[ "$SINGBOX_ONLY" != "true" ]]; then
   fi
 fi
 
+if [[ "$SURELAY_SECURITY_ONLY" == "true" ]]; then
+  if [[ "$RRB_VERBOSE" != "true" ]]; then
+    printf '安全防护验证完成。\n'
+  else
+    cat <<EOF
+
+安全防护验证完成。未检查 sing-box、订阅服务或节点端口。
+EOF
+  fi
+  exit 0
+fi
+
 info "检查 sing-box 配置语法。"
 python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --check-only --quiet
 singbox_check "$SINGBOX_CONFIG_PATH"

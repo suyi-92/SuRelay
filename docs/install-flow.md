@@ -4,6 +4,16 @@ Alpine 3.19 先按 [Alpine 部署说明](alpine.md) 安装 Bash，并保持 `INS
 
 ## 1. 准备配置
 
+如果只需要服务器安全防护，可跳过节点配置并使用：
+
+```bash
+sudo bash install.sh --security-only
+```
+
+该模式只执行 SSH 公钥初始化与二阶段加固、fail2ban 和 UFW。UFW 只确保当前 SSH 端口放行，已有其他规则保持不变；sing-box、订阅、Reality 密钥、域名和节点文件都不会安装或生成。它仍需要在新 SSH 窗口确认 root 公钥登录后，才会关闭密码登录。
+
+以后要继续部署节点时，输入 `sr`，从主菜单选择“部署节点代理”；面板会确认后将 `SURELAY_SECURITY_ONLY` 切换为 `false` 并运行普通安装流程。需要订阅时再在“高级维护 → 编辑高级配置并应用”中开启 `ENABLE_SUBSCRIPTION_SERVER`。
+
 已有部署需要全部重置时，使用 `bash install.sh --reset`；先备份并卸载项目配置/服务，再进入交互式安装。普通重跑仍保留节点身份。见 [重置安装说明](reset-install.md)。
 
 ```bash

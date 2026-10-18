@@ -14,6 +14,29 @@ fi
 
 bash "$SCRIPT_DIR/06-install-ufw.sh"
 
+if [[ "$SURELAY_SECURITY_ONLY" == "true" ]]; then
+  info "安全防护模式：只确保 SSH 端口 $SSH_PORT/tcp，保留现有其他 UFW 规则。"
+  if is_dry_run; then
+    log "DRY-RUN: ufw --force enable && ufw status verbose"
+  else
+    ufw --force enable >>"$LOG_FILE" 2>&1
+    if [[ "$RRB_VERBOSE" == "true" ]]; then
+      ufw status verbose 2>&1 | tee -a "$LOG_FILE"
+    else
+      ufw status verbose >>"$LOG_FILE" 2>&1
+    fi
+  fi
+  if is_alpine; then service_enable ufw; fi
+  cat <<EOF
+
+安全防护模式已应用：
+  SSH: tcp/$SSH_PORT
+
+未安装或配置 sing-box、订阅服务和客户端节点；已有其他 UFW 规则保持不变。
+EOF
+  exit 0
+fi
+
 mapfile -t PORTS < <(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-ports)
 [[ "${#PORTS[@]}" -ge 1 ]] || die "未解析到 VLESS+Reality 端口。"
 

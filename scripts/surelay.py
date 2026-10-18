@@ -215,10 +215,19 @@ class Panel:
         self.m = manager
         self.s = Security(manager)
 
+    def security_only(self):
+        return self.m.env.get("SURELAY_SECURITY_ONLY", "false") == "true"
+
     def status(self):
         self.m.reload()
         if not self.m.config.exists():
             print(color("  安装：尚未配置，请运行 sr install", "warn"))
+            return
+        if self.security_only():
+            print("  模式  " + color("仅服务器安全防护", "title"))
+            print("  节点  " + color("未部署（主菜单可部署节点代理）", "warn"))
+            print("  域名  未启用")
+            print("  IPv6  未启用")
             return
         print("  节点  " + color(self.m.env['SERVER_ALIAS'], "title"))
         for name, label in (("sing-box", "代理"), (self.m.env["SUBSCRIPTION_SERVICE"], "订阅")):
@@ -230,12 +239,19 @@ class Panel:
             print(color("  安装尚未完成：运行 sr install 继续安装。", "warn"))
 
     def main(self):
-        menu("SuRelay", [
-            ("节点与订阅", self.nodes), ("出口管理", self.exits), ("IPv6 设置", self.ipv6),
-            ("域名与证书", self.domain), ("服务与诊断", self.services),
-            ("VPS 安全", self.security), ("高级维护", self.advanced),
-            ("卸载 SuRelay", self.uninstall),
-        ], self.status)
+        if self.security_only():
+            actions = [
+                ("部署节点代理", self.install_nodes), ("VPS 安全", self.security),
+                ("高级维护", self.advanced), ("卸载 SuRelay", self.uninstall),
+            ]
+        else:
+            actions = [
+                ("节点与订阅", self.nodes), ("出口管理", self.exits), ("IPv6 设置", self.ipv6),
+                ("域名与证书", self.domain), ("服务与诊断", self.services),
+                ("VPS 安全", self.security), ("高级维护", self.advanced),
+                ("卸载 SuRelay", self.uninstall),
+            ]
+        menu("SuRelay", actions, self.status)
 
     def nodes(self):
         menu("节点与订阅", [
@@ -837,11 +853,12 @@ class Panel:
         self.s.fail2ban_settings(values)
 
     def advanced(self):
+        install_action = ("部署节点代理", self.install_nodes) if self.security_only() else ("继续安装", self.install)
         menu("高级维护", [
             ("更新 SuRelay", self.update_code), ("更新 sing-box", self.update_core),
             ("备份节点配置", self.backup_nodes), ("恢复节点配置", self.restore),
             ("编辑高级配置并应用", self.edit_config), ("重置并重新安装", self.reset),
-            ("继续安装", self.install), ("迁移旧安装目录", self.migrate),
+            install_action, ("迁移旧安装目录", self.migrate),
         ])
 
     def update_code(self):
@@ -905,6 +922,12 @@ class Panel:
     def install(self):
         run(["bash", self.m.root / "install.sh"],
             env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
+        raise SystemExit(0)
+
+    def install_nodes(self):
+        confirm("已完成服务器安全防护。现在切换到完整安装并部署节点代理？", action="部署节点代理")
+        self.m.update({"SURELAY_SECURITY_ONLY": "false"})
+        run(["bash", self.m.root / "install.sh"], interactive=True)
         raise SystemExit(0)
 
     @operation("旧安装迁移已完成。重新运行 sr 打开面板。")

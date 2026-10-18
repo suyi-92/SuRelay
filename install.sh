@@ -47,6 +47,7 @@ usage() {
 用法：
   sudo bash install.sh
   sudo bash install.sh --update
+  sudo bash install.sh --security-only
   sudo bash install.sh --uninstall
   sudo bash install.sh --reset
   sudo bash install.sh -6 [IPv6地址]
@@ -54,6 +55,7 @@ usage() {
 
 选项：
       --update              更新脚本并安装 sr 命令，保留现有服务、配置和节点身份
+      --security-only       只配置 SSH、fail2ban 和 UFW，不安装 sing-box、订阅或节点
       --uninstall           备份后卸载本项目部署，保留 SSH 和系统软件包
       --reset               备份并卸载项目配置与服务，再重新填写配置安装
   -6, --add-ipv6-node [地址]  在已有部署上启用 IPv6 监听，并单独生成 v6 VLESS 节点
@@ -64,6 +66,8 @@ usage() {
 不会重跑 SSH 初始化，也不会轮换 VLESS UUID、Reality keypair 或 short-id。
 --reset 会使旧节点和订阅失效；显示清单后需输入 RESET。保留 SSH 登录通道、
 系统软件包和其他证书；不能与 -6 同时使用。
+--security-only 会创建安全配置并执行 SSH 二阶段加固、fail2ban 和 UFW；不会创建
+sing-box、订阅服务、Reality 密钥或任何客户端节点。已有项目配置不会被重置。
 EOF
 }
 
@@ -78,6 +82,11 @@ parse_args() {
       --update)
         [[ "$INSTALL_MODE" == "full" ]] || die "--update 不能与其他维护模式合用。"
         INSTALL_MODE="update"
+        shift
+        ;;
+      --security-only)
+        [[ "$INSTALL_MODE" == "full" ]] || die "--security-only 不能与其他维护模式合用。"
+        INSTALL_MODE="security-only"
         shift
         ;;
       --reset)
@@ -449,7 +458,7 @@ ensure_project() {
 }
 
 write_config() {
-  local project_dir="$1" server_alias="$2" server_ip_ipv4="$3" server_ip_ipv6="$4" ssh_port="$5" admin_pubkey="$6" direct_port="$7" enable_subscription_server="$8" subscription_port="$9" subscription_target="${10}" reset_proxy_keys="${11}" home_port_start="${12}" home_port_end="${13}" enable_custom_domain="${14}" custom_domain="${15}" cloudflare_zone_name="${16}" le_email="${17}" cloudflare_api_token="${18}" nginx_fallback_port="${19}"
+  local project_dir="$1" server_alias="$2" server_ip_ipv4="$3" server_ip_ipv6="$4" ssh_port="$5" admin_pubkey="$6" direct_port="$7" enable_subscription_server="$8" subscription_port="$9" subscription_target="${10}" reset_proxy_keys="${11}" home_port_start="${12}" home_port_end="${13}" enable_custom_domain="${14}" custom_domain="${15}" cloudflare_zone_name="${16}" le_email="${17}" cloudflare_api_token="${18}" nginx_fallback_port="${19}" security_only="${20:-false}"
   local server_ip="$server_ip_ipv4"
   local proxy_ip_version="ipv4"
   local enable_ipv6_listen="false"
@@ -477,6 +486,7 @@ SERVER_IP=$(shell_quote "$server_ip")
 SERVER_IP_IPV4=$(shell_quote "$server_ip_ipv4")
 SERVER_IP_IPV6=$(shell_quote "$server_ip_ipv6")
 SSH_PORT=$(shell_quote "$ssh_port")
+SURELAY_SECURITY_ONLY=$(shell_quote "$security_only")
 INITIAL_USER="root"
 ADMIN_USER="root"
 ADMIN_PUBKEY=$(shell_quote "$admin_pubkey")
@@ -567,7 +577,13 @@ run_install_phase() {
     fail2ban) label="安装并配置 fail2ban" ;;
     singbox) label="安装 sing-box、生成节点及配置域名" ;;
     firewall) label="应用防火墙规则" ;;
-    validate) label="验证服务与节点" ;;
+    validate)
+      if [[ "${SURELAY_SECURITY_ONLY:-false}" == "true" || "$INSTALL_MODE" == "security-only" ]]; then
+        label="验证 SSH、防火墙和登录防护"
+      else
+        label="验证服务与节点"
+      fi
+      ;;
   esac
   info "开始：$label"
   if [[ "$RRB_VERBOSE" == "true" ]]; then
@@ -584,7 +600,7 @@ run_install_phase() {
 }
 
 run_install_flow() {
-  local project_dir="$1" ssh_host current_ssh_port configured_ssh_port
+  local project_dir="$1" ssh_host current_ssh_port configured_ssh_port security_only_mode=false
   cd "$project_dir"
   if [[ "$RUN_PHASES" != "true" ]]; then
     info "配置已就绪：$project_dir/config.env；未执行部署。"
@@ -593,6 +609,10 @@ run_install_flow() {
   # Use the saved settings, including ports and file paths customized through config.env.
   source "$project_dir/config.env"
   configured_ssh_port="${SSH_PORT:-22}"
+  if [[ "$INSTALL_MODE" == "security-only" || "${SURELAY_SECURITY_ONLY:-false}" == "true" || "${RRB_SECURITY_ONLY:-false}" == "true" ]]; then
+    security_only_mode=true
+    export RRB_SECURITY_ONLY=true
+  fi
   current_ssh_port="$(ssh_connection_port)"
   if [[ -n "$current_ssh_port" && "$current_ssh_port" != "$configured_ssh_port" ]]; then
     warn "当前 SSH 会话使用端口 $current_ssh_port，但 config.env 记录为 $configured_ssh_port；验证命令将按配置端口执行。"
@@ -636,6 +656,12 @@ run_install_flow() {
   fi
 
   run_install_phase fail2ban
+  if [[ "$security_only_mode" == true ]]; then
+    run_install_phase firewall
+    run_install_phase validate
+    printf '\n安全防护部署完成：未安装 sing-box、订阅服务或客户端节点。\n'
+    return 0
+  fi
   run_install_phase singbox
   run_install_phase firewall
   run_install_phase validate
@@ -671,10 +697,26 @@ configure_install() {
   local project_dir="$1" default_ip
   if [[ -f "$project_dir/config.env" ]]; then
     info "沿用现有 config.env 和出口列表；修改方法见 README。"
-    ensure_proxy_lists "$project_dir"
+    if [[ "$INSTALL_MODE" != "security-only" ]] && ! grep -Eq "^[[:space:]]*SURELAY_SECURITY_ONLY=(true|'true')" "$project_dir/config.env"; then
+      ensure_proxy_lists "$project_dir"
+    fi
     return 0
   fi
   default_ip="$(public_ipv4)"
+
+  if [[ "$INSTALL_MODE" == "security-only" ]]; then
+    local server_ip_ipv4 ssh_port current_ssh_port
+    section "服务器安全防护"
+    server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
+    current_ssh_port="$(detect_current_ssh_port)"
+    ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-$current_ssh_port}")"
+    ADMIN_KEYS_FILE="$(mktemp)"
+    trap 'rm -f "${ADMIN_KEYS_FILE:-}"' EXIT
+    collect_admin_pubkeys "$ADMIN_KEYS_FILE"
+    write_config "$project_dir" security-only "$server_ip_ipv4" '' "$ssh_port" "$(cat "$ADMIN_KEYS_FILE")" \
+      443 false '' ClashMeta false 51043 65535 false '' '' '' '' 8443 true
+    return 0
+  fi
 
   section "基础信息"
   local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey current_ssh_port

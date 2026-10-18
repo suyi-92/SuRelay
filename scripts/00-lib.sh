@@ -238,6 +238,11 @@ load_config() {
   : "${ENABLE_FAIL2BAN:=true}"
   : "${FAIL2BAN_SSH_LOG:=/var/log/messages}"
   : "${ENABLE_IPV6_LISTEN:=false}"
+  : "${SURELAY_SECURITY_ONLY:=${RRB_SECURITY_ONLY:-false}}"
+  if [[ "${RRB_SECURITY_ONLY:-false}" == "true" ]]; then
+    SURELAY_SECURITY_ONLY=true
+  fi
+  export SURELAY_SECURITY_ONLY
   : "${CSV_PATH:=./home-proxies.csv}"
   : "${UPSTREAM_NODES_PATH:=./upstream-nodes.txt}"
   if [[ -z "${RRB_STATE_DIR:-}" && -d /etc/reality-relay-bootstrap && ! -e /etc/surelay ]]; then
@@ -483,7 +488,9 @@ validate_user_name() {
 validate_config_basics() {
   validate_port SSH_PORT
   validate_port DIRECT_PORT
-  [[ "$DIRECT_PORT" != "$SSH_PORT" ]] || die "DIRECT_PORT 不能与 SSH_PORT 相同"
+  if [[ "$SURELAY_SECURITY_ONLY" != "true" ]]; then
+    [[ "$DIRECT_PORT" != "$SSH_PORT" ]] || die "DIRECT_PORT 不能与 SSH_PORT 相同"
+  fi
   validate_port HOME_PORT_START
   validate_port HOME_PORT_END
   validate_bool ENABLE_SFTP_USER
@@ -491,6 +498,7 @@ validate_config_basics() {
   validate_bool ENABLE_UFW
   validate_bool ENABLE_FAIL2BAN
   validate_bool ENABLE_IPV6_LISTEN
+  validate_bool SURELAY_SECURITY_ONLY
   validate_bool ENABLE_CUSTOM_DOMAIN
   validate_bool LE_STAGING
   validate_bool CLOUDFLARE_CREATE_ZONE

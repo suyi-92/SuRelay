@@ -252,7 +252,9 @@ class Manager:
 
     def apply(self, updates=None, files=None, domain=False):
         """Commit locally after validation; publication failures remain retryable."""
-        updates, files = updates or {}, files or {}
+        # Routine maintenance reuses identity, even if a previous reset left this flag enabled.
+        updates = {**(updates or {}), "RESET_PROXY_KEYS": "false"}
+        files = files or {}
         old = dict(self.env)
         paths = self.owned_paths() + list(files)
         paths += [Path("/etc/ufw/user.rules"), Path("/etc/ufw/user6.rules"), Path("/etc/default/ufw")]
@@ -264,12 +266,10 @@ class Manager:
         restarted = firewall_changed = domain_changed = False
         print(f"变更前备份：{backup.directory}")
         try:
-            if updates:
-                self.update(updates)
             for path, content in files.items():
                 atomic(path, content)
-            if self.env["RESET_PROXY_KEYS"] != "false":
-                raise Error('请先将 RESET_PROXY_KEYS 设为 false；日常维护保留节点身份。')
+            # Normalize after file edits too, then reload the configuration used by every phase.
+            self.update(updates)
             rows = self.check()
             config = GEN.build_config(self.env, rows, GEN.read_vless_uuid(self.env),
                                       GEN.read_reality_private_key(self.env), GEN.read_reality_short_id(self.env))

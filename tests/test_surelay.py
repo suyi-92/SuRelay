@@ -307,6 +307,47 @@ class ManagementTest(unittest.TestCase):
         with self.assertRaises(core.Error):
             core.install_command(project, target)
 
+    def test_adding_upstream_clears_stale_reset_flag_without_rotating_identity(self):
+        self.m.update({"RESET_PROXY_KEYS": "true"})
+        identity = {p: p.read_bytes() for p in self.state.iterdir()}
+        upstream = [{"tag": "relay-01", "listen_port": "51043", "node_url":
+                     "vless://11111111-2222-4333-8444-555555555555@upstream.example:443?security=none&type=tcp"}]
+        self.mock_system()
+
+        self.m.save_exits([], upstream)
+
+        self.assertEqual(self.m.env["RESET_PROXY_KEYS"], "false")
+        self.assertEqual(core.GEN.parse_env_file(self.config)["RESET_PROXY_KEYS"], "false")
+        self.assertEqual({p: p.read_bytes() for p in identity}, identity)
+        self.assertEqual([row["tag"] for row in self.m.rows()], ["relay-01"])
+        config = json.loads((self.root / "sing-box.json").read_text())
+        self.assertTrue(any(node.get("server") == "upstream.example" for node in config["outbounds"]))
+        self.m.phase.assert_called_once_with("subscription")
+
+    def test_failed_exit_change_restores_reset_flag_files_and_identity(self):
+        self.m.update({"RESET_PROXY_KEYS": "true"})
+        originals = {p: p.read_bytes() for p in self.m.owned_paths() if p.exists()}
+        self.mock_system()
+        self.m.check_listeners.side_effect = core.Error("listener failed")
+
+        with self.assertRaisesRegex(core.Error, "listener failed"):
+            self.m.save_exits([], [{"tag": "relay-01", "listen_port": "51043", "node_url":
+                                  "vless://11111111-2222-4333-8444-555555555555@upstream.example:443?security=none&type=tcp"}])
+
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        self.assertEqual(self.m.env["RESET_PROXY_KEYS"], "true")
+        self.m.phase.assert_not_called()
+
+    def test_apply_uses_edited_config_with_reset_disabled(self):
+        self.mock_system()
+        edited = core.env_text(self.config.read_text(), {"SERVER_ALIAS": "edited", "RESET_PROXY_KEYS": "true"})
+
+        self.m.apply(files={self.config: edited})
+
+        self.assertEqual(self.m.env["SERVER_ALIAS"], "edited")
+        self.assertEqual(self.m.env["RESET_PROXY_KEYS"], "false")
+        self.assertEqual(core.GEN.parse_env_file(self.config)["RESET_PROXY_KEYS"], "false")
+
     def test_apply_failure_restores_config_and_identity(self):
         originals = {p: p.read_bytes() for p in self.m.owned_paths() if p.exists()}
         self.mock_system()

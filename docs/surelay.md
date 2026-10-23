@@ -36,7 +36,9 @@ IPv6-only VPS 请按 [分阶段流程](install-flow.md) 准备 config.env：填�
 
 ## 节点、出口与域名
 
-日常应用配置先备份、生成候选 JSON、执行 sing-box check，随后应用、验证监听并调整项目防火墙规则。失败时恢复本地配置并尝试恢复服务，备份位置会显示。操作不轮换 UUID、Reality 密钥或订阅 token。订阅/DNS 发布失败时保留已通过验证的本地配置，在对应菜单重试发布。
+日常应用配置先备份，将 `config.env` 中的 `RESET_PROXY_KEYS` 保存为 `false`，再生成候选 JSON、执行 sing-box check，随后应用、验证监听并调整项目防火墙规则。即使旧配置遗留了 `RESET_PROXY_KEYS=true`，添加或修改出口等日常操作也会继续复用现有身份。失败时恢复本地配置并尝试恢复服务，备份位置会显示。操作不轮换 UUID、Reality 密钥或订阅 token。订阅/DNS 发布失败时保留已通过验证的本地配置，在对应菜单重试发布。
+
+旧版面板若提示「请先将 RESET_PROXY_KEYS 设为 false」，退出面板，在 VPS 上编辑 `/opt/SuRelay/config.env`，将该项改为 `RESET_PROXY_KEYS="false"`，保存后重新运行 `sr` 再添加出口。自定义安装使用实际代码目录中的 `config.env`；无需删除密钥或重装。
 
 出口支持 HTTP、SOCKS5 和现有的 TCP VLESS/Reality。新增或删除出口前，已自动分配的名称与端口会写成固定值。更改入口端口或节点名称会改变相应的客户端条目；客户端需要更新订阅。
 

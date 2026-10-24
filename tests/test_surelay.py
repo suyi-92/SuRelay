@@ -507,7 +507,10 @@ class ManagementTest(unittest.TestCase):
 
     def test_custom_firewall_cannot_adopt_or_delete_required_rule(self):
         secure = security.Security(self.m)
-        for value in ("22", "443", "51040", "1:1000"):
+        (self.root / "home-proxies.csv").write_text(
+            "tag,type,server,server_port,username,password,network,listen_port\n"
+            "home-01,socks5,proxy.example,1080,user,password,tcp,51043\n")
+        for value in ("22", "443", "51040", "51043", "1:1000"):
             with self.subTest(value=value):
                 rule = security.firewall_rule(value, "tcp", "any", "4", "app")
                 with self.assertRaisesRegex(core.Error, "所需 TCP"):
@@ -515,6 +518,49 @@ class ManagementTest(unittest.TestCase):
                 with patch.object(secure, "custom_rules", return_value=(self.root / "rules.json", [rule])):
                     with self.assertRaisesRegex(core.Error, "所需 TCP"):
                         secure.edit_rule(index=0)
+
+    def test_security_only_custom_firewall_lifecycle_without_node_files(self):
+        self.m.path("CSV_PATH").unlink()
+        self.m.path("UPSTREAM_NODES_PATH").unlink()
+        self.snapshot_class = core.Snapshot
+        secure = security.Security(self.m)
+        for subscription_port in ("", "51040"):
+            with self.subTest(subscription_port=subscription_port):
+                self.m.update({"SURELAY_SECURITY_ONLY": "true", "ENABLE_SUBSCRIPTION_SERVER": "false",
+                               "SUBSCRIPTION_LISTEN_PORT": subscription_port})
+                with patch.object(security, "Snapshot", side_effect=self.local_snapshot), \
+                     patch.object(security, "run", return_value="") as command:
+                    for index, value in enumerate(("8080", "443", "51040")):
+                        rule = security.firewall_rule(value, "tcp", "any", "4", "app")
+                        secure.edit_rule(rule, 0 if index else None)
+                        self.assertEqual(secure.custom_rules()[1], [rule])
+                        command.assert_any_call([
+                            "ufw", "allow", "proto", "tcp", "from", "0.0.0.0/0", "to", "any",
+                            "port", value, "comment", "SuRelay custom app"])
+                    secure.edit_rule(index=0)
+                    command.assert_any_call([
+                        "ufw", "--force", "delete", "allow", "proto", "tcp", "from", "0.0.0.0/0",
+                        "to", "any", "port", "51040", "comment", "SuRelay custom app"])
+                self.assertEqual(secure.custom_rules()[1], [])
+                self.assertFalse(self.m.path("CSV_PATH").exists())
+                self.assertFalse(self.m.path("UPSTREAM_NODES_PATH").exists())
+
+    def test_security_only_custom_firewall_still_protects_ssh_without_node_files(self):
+        self.m.update({"SURELAY_SECURITY_ONLY": "true", "ENABLE_SUBSCRIPTION_SERVER": "false"})
+        self.m.path("CSV_PATH").unlink()
+        self.m.path("UPSTREAM_NODES_PATH").unlink()
+        secure = security.Security(self.m)
+        with patch.dict(os.environ, {"SSH_CONNECTION": "192.0.2.5 40000 192.0.2.1 2222"}), \
+             patch.object(security, "run") as command:
+            for value in ("22", "2222", "1:1000"):
+                with self.subTest(value=value):
+                    rule = security.firewall_rule(value, "tcp", "any", "4", "app")
+                    with self.assertRaisesRegex(core.Error, "所需 TCP"):
+                        secure.edit_rule(rule)
+                    with patch.object(secure, "custom_rules", return_value=(self.root / "rules.json", [rule])):
+                        with self.assertRaisesRegex(core.Error, "所需 TCP"):
+                            secure.edit_rule(index=0)
+            command.assert_not_called()
 
     def test_custom_firewall_cannot_take_over_another_app(self):
         secure = security.Security(self.m)
@@ -627,6 +673,33 @@ class ManagementTest(unittest.TestCase):
         self.assertEqual(self.m.env["SSH_PORT"], "50396")
         self.assertIn("SSH_PORT=50396", self.config.read_text())
         external.assert_not_called()
+
+    def test_security_only_ssh_migration_allows_unused_node_ports_without_node_files(self):
+        self.m.path("CSV_PATH").unlink()
+        self.m.path("UPSTREAM_NODES_PATH").unlink()
+        self.snapshot_class = core.Snapshot
+        secure = security.Security(self.m)
+        secure.ssh_config = self.root / "sshd_config"
+        secure.socket_conf = self.root / "socket.conf"
+        for value in ("443", "51040"):
+            with self.subTest(value=value):
+                self.m.update({"SURELAY_SECURITY_ONLY": "true", "ENABLE_SUBSCRIPTION_SERVER": "false",
+                               "SUBSCRIPTION_LISTEN_PORT": "51040", "SSH_PORT": "22"})
+                secure.ssh_config.write_text("Port 22\n")
+                def confirm_login(new):
+                    self.assertEqual(new, value)
+                    self.assertEqual(self.m.env["SSH_PORT"], "22")
+                with patch.object(security, "Snapshot", side_effect=self.local_snapshot), \
+                     patch.object(security, "run", return_value=""), \
+                     patch.object(security.shutil, "which", return_value=None), \
+                     patch.object(self.m, "alpine", return_value=True), patch.object(self.m, "service"), \
+                     patch.object(secure, "effective", side_effect=["port 22", f"port 22\nport {value}"]), \
+                     patch.object(secure, "verify_ssh_listener"), \
+                     patch.object(secure, "_cleanup_owned_ssh_rules"):
+                    secure.change_ssh_port(value, confirm_login)
+                self.assertEqual(self.m.env["SSH_PORT"], value)
+                self.assertIn(f"Port {value}\n", secure.ssh_config.read_text())
+                self.assertNotIn("\nPort 22\n", secure.ssh_config.read_text())
 
     def test_ssh_port_menu_repairs_owned_ufw_rules_when_syncing_listener(self):
         secure = security.Security(self.m)

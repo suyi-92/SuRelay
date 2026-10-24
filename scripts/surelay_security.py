@@ -184,6 +184,16 @@ class Security:
             raise
         print("SSH 策略已应用。开启密码认证不会创建密码或解锁 root；重跑完整加固会再次关闭密码认证。")
 
+    def proxy_ports(self):
+        # Security-only installs deliberately have no proxy input files or services.
+        if self.m.env.get("SURELAY_SECURITY_ONLY") == "true":
+            return set()
+        ports = {int(self.m.env["DIRECT_PORT"]),
+                 *(int(row["listen_port"]) for row in self.m.rows())}
+        if self.m.env.get("SUBSCRIPTION_LISTEN_PORT"):
+            ports.add(int(self.m.env["SUBSCRIPTION_LISTEN_PORT"]))
+        return ports
+
     def change_ssh_port(self, new, confirm_login):
         new = port(new)
         current = self.effective()
@@ -195,9 +205,7 @@ class Security:
                 return
             self._sync_existing_ssh_port(new, configured)
             return
-        reserved = {str(self.m.env["DIRECT_PORT"]), str(self.m.env["SUBSCRIPTION_LISTEN_PORT"]),
-                    *(str(row["listen_port"]) for row in self.m.rows())}
-        if new in reserved:
+        if int(new) in self.proxy_ports():
             raise Error("新 SSH 端口与代理或订阅端口冲突。")
         listeners = run(["ss", "-H", "-ltn", "sport", "=", new], capture=True)
         if listeners and new not in old_ports:
@@ -326,10 +334,7 @@ class Security:
     def edit_rule(self, rule=None, index=None):
         path, rules = self.custom_rules()
         old = rules[index] if index is not None else None
-        required = {int(self.m.env["SSH_PORT"]), int(self.m.env["DIRECT_PORT"]),
-                    *(int(row["listen_port"]) for row in self.m.rows())}
-        if self.m.env.get("SUBSCRIPTION_LISTEN_PORT"):
-            required.add(int(self.m.env["SUBSCRIPTION_LISTEN_PORT"]))
+        required = {int(self.m.env["SSH_PORT"]), *self.proxy_ports()}
         connection = os.environ.get("SSH_CONNECTION", "").split()
         if len(connection) == 4:
             required.add(int(port(connection[3])))

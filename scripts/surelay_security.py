@@ -145,7 +145,9 @@ class Security:
         return path, lines, [i for i, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#")]
 
     def write_keys(self, lines):
+        from surelay_redeploy import ledger_path, record_managed_keys
         path = self.key_path()
+        before = path.read_text().splitlines() if path.exists() else []
         active = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
         # Keep at least one valid key even when password access is enabled.
         if not active:
@@ -154,11 +156,12 @@ class Security:
             self.validate_key(line)
         path.parent.mkdir(mode=0o700, exist_ok=True)
         os.chmod(path.parent, 0o700)
-        backup = Snapshot([path, self.m.config])
+        backup = Snapshot([path, self.m.config, ledger_path(self.m)])
         try:
             atomic(path, "\n".join(lines) + "\n")
             # Existing install falls back to authorized_keys. Removed keys cannot reappear.
             self.m.update({"ADMIN_PUBKEY": "", "ADMIN_PUBKEYS": ""})
+            record_managed_keys(self.m, before, lines)
         except BaseException:
             backup.restore()
             self.m.reload()

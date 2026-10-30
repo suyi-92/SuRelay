@@ -29,6 +29,17 @@ sudo CONFIRM_ROLLBACK=yes RESTORE_FULL_SSH_BACKUP=yes bash bootstrap.sh --phase 
 
 Ubuntu 若使用 `ssh.socket`，监听端口还由 `/etc/systemd/system/ssh.socket.d/surelay.conf`（旧安装可能为 `reality-relay-bootstrap.conf`）控制。上述完整配置回滚不会恢复这个 socket override；需按 SSH 迁移备份的 `manifest.json` 恢复它原先的内容，原先不存在时移除本次新增文件，再执行 `systemctl daemon-reload` 并重启 `ssh.socket` 与 SSH 服务。先运行 `sshd -t`，保留当前会话，并在新窗口验证实际旧端口恢复后再关闭当前窗口。
 
+## 引导式重新部署中断
+
+「开始引导式节点布置」对应 `install.sh --redeploy`。它在清理旧代理配置前保存备份，并使用 `/root/surelay-backups/redeploy-handoff.json` 记录 SSH 交接阶段。
+
+- 清理前取消时旧部署不变。
+- 已清理后取消向导或暂不确认 SSH 登录时，旧节点/订阅保持停止，旧 SSH 通道与公钥先保留。保留当前会话，执行 `sr install` 接续向导或 SSH 验证。
+- 新端口、本次录入的公钥验证成功后，旧项目 SSH 入口和可确认归属的旧项目公钥才会移除。再次连接应使用新端口和本次公钥。
+- 交接标记仍为 `prepared` 或已为 `failed` 时停止续跑，按打印的备份位置与错误检查现场；不要删除交接记录或重新触发清理来跳过失败门禁。
+
+备份中的 `files.tar.gz` 与 `manifest.json` 包含旧项目部署、SSH/UFW 文件及 socket override，恢复需要一起核对；交接记录本身含敏感信息，仅供本机 root 使用。恢复旧部署按[重置安装的失败与恢复](reset-install.md#失败与恢复)操作。先恢复并校验 SSH 配置与 socket 监听，再恢复需要的服务和规则，最后另开窗口验证。普通 `bootstrap.sh --phase rollback` 不会恢复整个强重置备份，也不会自动还原新旧交接记录。
+
 ## UFW 导致失联风险
 
 如果当前旧窗口还能用，可以临时禁用 UFW：

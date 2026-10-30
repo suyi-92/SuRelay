@@ -9,8 +9,8 @@ from pathlib import Path
 import re
 import sys
 
-from surelay_core import Error, GEN, ROOT, atomic, env_text, port, random_high_ports
-from surelay_terminal import Terminal, current
+from surelay_core import Error, GEN, Manager, ROOT, atomic, env_text, port, random_high_ports
+from surelay_terminal import STEP_NEXT, STEP_PREVIOUS, Terminal, current
 from surelay import ask, Cancelled
 
 
@@ -81,32 +81,41 @@ def prepare_values(values):
 
 
 class Wizard:
-    def __init__(self, values, *, security_only=False, protocol_only=False, validate_extra=None):
+    def __init__(self, values, *, security_only=False, protocol_only=False, validate_extra=None, redeploy=False):
         self.values = dict(values)
         self.security_only, self.protocol_only = security_only, protocol_only
+        self.redeploy = redeploy
         self.keys_confirmed = protocol_only
         self.validate_extra = validate_extra
         self.error = ""
 
-    def choose(self, title, actions, status="", selected=0, back="返回"):
+    def choose(self, title, actions, status="", selected=0, back="返回", *, steps=None):
         window = current()
         if window:
             with window.page(title):
                 return window.choose([(label, None) for label, _ in actions], status, selected,
-                                     navigation=False, back=back)
+                                     navigation=False, back=back, steps=steps)
         print("\n" + title)
         if status:
             print(status)
         for index, (label, _) in enumerate(actions, 1):
             print(f"{index}) {label}")
-        print(f"0) {back}")
+        if steps:
+            print(f"< {steps[0]}    {steps[1]} >")
+        else:
+            print(f"0) {back}")
         while True:
-            choice = ask("请选择", str(selected + 1))
+            choice = ask("编辑编号，< 上一步 / > 下一步" if steps else "请选择",
+                         str(selected + 1) if actions else ">").strip().lower()
+            if steps and choice in ("<", "left"):
+                return STEP_PREVIOUS
+            if steps and choice in (">", "right"):
+                return STEP_NEXT
             if choice == "0":
                 return None
             if choice.isdigit() and 1 <= int(choice) <= len(actions):
                 return int(choice) - 1
-            print("请输入列表中的编号。")
+            print("请输入编辑项编号，或用 < / > 切换步骤。" if steps else "请输入列表中的编号。")
 
     def edit(self, key, label, *, secret=False, validate=None, help=""):
         old = self.values.get(key, "")
@@ -123,20 +132,25 @@ class Wizard:
                  if secret else value or "待填写")
         return f"{label}：{shown}", lambda: self.edit(key, label, secret=secret, validate=validate, help=help)
 
-    def group(self, title, fields, *, status="", finish="下一步"):
+    def group(self, title, fields, *, status="", finish="下一步", step_navigation=True):
         selected = 0
         while True:
-            actions = fields() + [(finish, None)]
-            index = self.choose(title, actions, self.error or status, selected, "上一步")
+            actions = fields()
+            if not step_navigation:
+                actions.append((finish, None))
+            index = self.choose(title, actions, self.error or status, selected, "上一步",
+                                steps=("上一步", finish) if step_navigation else None)
             self.error = ""
-            if index is None:
+            if index is None or index == STEP_PREVIOUS:
                 return False
+            if index == STEP_NEXT:
+                return True
             selected = index
-            if index == len(actions) - 1:
+            if not step_navigation and index == len(actions) - 1:
                 return True
             try:
                 actions[index][1]()
-                selected = min(index + 1, len(fields()))
+                selected = min(index + 1, max(0, len(fields()) - 1))
             except (KeyboardInterrupt, Cancelled):
                 pass
             except (Error, GEN.ConfigError, ValueError) as exc:
@@ -215,7 +229,8 @@ class Wizard:
         keys = []
         while True:
             value = ask("管理员 SSH 公钥", multiline=True,
-                        help="每行一把公钥，可粘贴多行；空行完成。取消后原草稿不变。",
+                        help=("重新部署需录入新管理员公钥。" if self.redeploy else "") +
+                             "每行一把公钥，可粘贴多行；空行完成。取消后原草稿不变。",
                         context=[("本次已接收", f"{len(keys)} 把")])
             if not value:
                 break
@@ -231,12 +246,16 @@ class Wizard:
         self.keys_confirmed = True
 
     def reuse_keys(self):
+        if self.redeploy:
+            raise Error("重新部署需录入新管理员公钥。")
         # Existing keys are checked by the SSH deployment phase before policy changes.
         self.values["ADMIN_PUBKEY"] = ""
         self.keys_confirmed = True
 
     def key_fields(self):
         count = len(self.values.get("ADMIN_PUBKEY", "").splitlines())
+        if self.redeploy:
+            return [(f"录入 / 替换新管理员公钥：已填 {count} 把", self.add_keys)]
         return [(f"录入 / 替换公钥：已填 {count} 把", self.add_keys),
                 ("明确复用 root 已有 authorized_keys" + ("（已选择）" if self.keys_confirmed and not count else ""), self.reuse_keys)]
 
@@ -246,6 +265,8 @@ class Wizard:
             ipv4(values["SERVER_IP_IPV4"])
             if not self.security_only:
                 required(values["SERVER_ALIAS"])
+            if self.redeploy and not values.get("ADMIN_PUBKEY", "").strip():
+                raise Error("重新部署需录入新管理员公钥。")
             if not self.keys_confirmed:
                 raise Error("请录入管理员公钥，或明确选择复用已有公钥。")
         if values["ENABLE_CUSTOM_DOMAIN"] == "true" and not self.protocol_only:
@@ -274,7 +295,7 @@ class Wizard:
 
     def run(self):
         if self.protocol_only:
-            while self.group("入口协议", self.protocol_fields, finish="校验并应用"):
+            while self.group("入口协议", self.protocol_fields, finish="校验并应用", step_navigation=False):
                 try:
                     return self.validate()
                 except (Error, GEN.ConfigError, ValueError) as exc:
@@ -319,6 +340,18 @@ def save_config(root, values):
     atomic(destination, env_text((root / "config.example.env").read_text(encoding="utf-8"), values))
 
 
+def redeploy_validator(project_dir, handoff):
+    """Validate the unsaved identity against its handoff without staging SSH."""
+    def validate(resolved):
+        from surelay_redeploy import Redeployer
+        manager = Manager(project_dir)
+        manager.env = dict(resolved)
+        operation = Redeployer(manager, handoff)
+        lines = operation.new_keys()
+        operation.validate_fresh_identity(lines)
+    return validate
+
+
 def main():
     parser = argparse.ArgumentParser(description="SuRelay 分组安装向导")
     parser.add_argument("--project-dir", type=Path, default=ROOT)
@@ -327,6 +360,9 @@ def main():
     parser.add_argument("--plain", action="store_true")
     args = parser.parse_args()
     tty = os.environ.get("RRB_INPUT_TTY", "/dev/tty")
+    redeploy = os.environ.get("RRB_REDEPLOY", "false").lower() == "true"
+    handoff = os.environ.get("RRB_REDEPLOY_HANDOFF", "")
+    validate_extra = redeploy_validator(args.project_dir, handoff) if redeploy and handoff else None
     try:
         # The remote shell entry may have stdin attached to a pipe/process substitution.
         with open(tty, encoding="utf-8") as source, open(tty, "w", encoding="utf-8", buffering=1) as sink:
@@ -334,7 +370,8 @@ def main():
             sys.stdin, sys.stdout = source, sink
             try:
                 with Terminal(enabled=not args.plain):
-                    values = Wizard(initial_values(args.ipv4, args.security_only), security_only=args.security_only).run()
+                    values = Wizard(initial_values(args.ipv4, args.security_only), security_only=args.security_only,
+                                    redeploy=redeploy, validate_extra=validate_extra).run()
                 save_config(args.project_dir, values)
             finally:
                 sys.stdin, sys.stdout = original

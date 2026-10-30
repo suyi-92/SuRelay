@@ -205,6 +205,14 @@ if ! is_dry_run; then
   grep -qi '^authenticationmethods publickey$' <<<"$effective" || die "端口迁移后 AuthenticationMethods 未保持 publickey。"
 fi
 
+if [[ -n "${RRB_REDEPLOY_HANDOFF:-}" ]]; then
+  if is_dry_run; then
+    log "DRY-RUN: finalize fresh SSH identity using $RRB_REDEPLOY_HANDOFF"
+  else
+    python3 "$SCRIPT_DIR/surelay_redeploy.py" --finalize --config-env "$RRB_CONFIG_FILE" --handoff "$RRB_REDEPLOY_HANDOFF"
+  fi
+fi
+
 cat <<EOF
 
 SSH 最终加固已应用。请不要关闭当前窗口，立刻另开 PowerShell 测试：

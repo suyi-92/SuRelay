@@ -21,6 +21,58 @@ import surelay_terminal as terminal
 
 
 class PlainTerminalTest(unittest.TestCase):
+    def test_guided_redeployment_action_uses_danger_style(self):
+        window = terminal.Terminal()
+        label = "开始引导式节点布置"
+        self.assertEqual(window.menu_rows([label], 0)[0][1], "danger_selected")
+        self.assertEqual(window.menu_rows([label], 1)[0][1], "danger")
+        self.assertEqual(window.menu_rows([label + "说明"], 0)[0][1], "selected")
+
+    def test_step_arrows_navigate_immediately_and_footer_stays_visible_when_small(self):
+        for key, expected in ((terminal.LEFT, terminal.STEP_PREVIOUS),
+                              (terminal.RIGHT, terminal.STEP_NEXT), ("\x1b", None)):
+            with self.subTest(key=key):
+                window = terminal.Terminal()
+                window.output = io.StringIO()
+                with patch.object(window, "dimensions", return_value=(50, 18)), \
+                        patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                        patch.object(window, "key", return_value=key) as read:
+                    actual = window.choose([(f"配置字段 {index}", None) for index in range(12)],
+                                           "草稿尚未保存", steps=("上一步", "下一步"))
+                self.assertEqual(actual, expected)
+                self.assertEqual(read.call_count, 1)
+                frame = "\n".join(terminal.clean(line) for line in window.frame)
+                self.assertIn("← 上一步", frame)
+                self.assertIn("下一步 →", frame)
+                self.assertIn("PgUp/PgDn", frame)
+                self.assertNotIn("0)", frame)
+                self.assertTrue(all(terminal.cells(terminal.clean(line)) < 50 for line in window.frame))
+
+    def test_step_fields_keep_up_down_and_number_selection(self):
+        for keys, expected in (([terminal.DOWN, "\r"], 1), (["2", "\r"], 1),
+                               ([terminal.UP, "\r"], 1)):
+            with self.subTest(keys=keys):
+                window = terminal.Terminal()
+                window.output = io.StringIO()
+                with patch.object(window, "dimensions", return_value=(90, 26)), \
+                        patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                        patch.object(window, "key", side_effect=keys):
+                    self.assertEqual(window.choose([("名称", None), ("地址", None)],
+                                                   steps=("上一步", "下一步")), expected)
+
+    def test_arrows_still_move_text_cursor_and_do_not_execute_review_actions(self):
+        window = terminal.Terminal()
+        window.output = io.StringIO()
+        with patch.object(window, "dimensions", return_value=(90, 26)), \
+                patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                patch.object(window, "key", side_effect=[("paste", "ab"), terminal.LEFT, "X", terminal.RIGHT, "Y", "\r"]):
+            self.assertEqual(window.read_line("名称"), "aXbY")
+        with patch.object(window, "dimensions", return_value=(90, 26)), \
+                patch.object(window, "keys", side_effect=contextlib.nullcontext), \
+                patch.object(window, "key", side_effect=[terminal.RIGHT, terminal.LEFT, "\r"]) as read:
+            self.assertEqual(window.choose([("保存配置并继续安装", None)]), 0)
+            self.assertEqual(read.call_count, 3)
+
     def test_redirected_output_never_enters_alternate_screen(self):
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream), terminal.Terminal():
@@ -202,6 +254,45 @@ class PlainTerminalTest(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
 class WindowTest(unittest.TestCase):
+    def test_step_footer_and_immediate_arrows_work_in_small_real_terminal(self):
+        import fcntl
+        import termios
+        self.start('''
+from surelay_terminal import STEP_NEXT
+with Terminal() as window:
+    with window.page("安装配置分组"):
+        result = window.choose([("配置字段 %02d" % index, None) for index in range(15)],
+                               "草稿尚未部署", steps=("上一步", "下一步"))
+assert result == STEP_NEXT
+print("SMALL_STEP_FINISHED", flush=True)
+''', direct=True)
+        self.expect("安装配置分组")
+        self.pending = b""
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 50, 0, 0))
+        self.expect("下一步 →")
+        self.send("\033[6~")
+        self.expect("配置字段 14")
+        self.send("\033OC")
+        self.expect("SMALL_STEP_FINISHED")
+        self.finish()
+        self.assertNotIn("0) 返回".encode(), self.all_output)
+        self.assertNotIn("0) 上一步".encode(), self.all_output)
+
+    def test_plain_wizard_step_controls_work_in_real_terminal(self):
+        self.start('''
+from surelay_install import Wizard, initial_values
+with Terminal():
+    draft = Wizard(initial_values("192.0.2.10"))
+    assert draft.group("基础信息", lambda: [draft.field("SERVER_ALIAS", "节点名称")])
+print("PLAIN_STEP_FINISHED", flush=True)
+''', direct=True, TERM="dumb")
+        self.expect("< 上一步    下一步 >")
+        self.send(">\r")
+        self.expect("PLAIN_STEP_FINISHED")
+        self.expect("CLEAN_EXIT")
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertNotIn(b"\x1b[?1049h", self.all_output)
+
     def test_install_wizard_groups_can_return_and_preserve_draft_in_real_terminal(self):
         self.start('''
 from surelay_install import Wizard, initial_values
@@ -218,31 +309,39 @@ print("DRAFT_REVIEWED", flush=True)
         self.expect("基础信息")
         self.send("1\r")
         self.expect("Enter 确认 · Esc 取消")
-        self.send("\x15edited\r")
+        self.send("\x15edted\033[D\033[D\033[Di\033[C\033[C\033[C\r")
         self.expect("节点名称：edited")
-        self.send("3\r")
+        self.send("\033[C")
         self.expect("服务端口")
         self.expect("静态网页内部端口")
-        self.send("0\r")
+        self.send("\033[D")
         self.expect("基础信息")
         self.expect("节点名称：edited")
-        self.send("3\r")
+        self.send("\033[C")
         self.expect("服务端口")
-        self.send("6\r")
+        self.send("\033[C")
         self.expect("CF 域名与静态网页：开启")
         self.expect("Cloudflare API Token：待填写")
         self.send("1\r")
         self.expect("CF 域名与静态网页：关闭")
-        self.send("2\r")
+        self.send("\033[C")
         self.expect("入口协议")
         self.expect("HTTP：关闭")
-        self.send("6\r")
+        self.send("\033[C")
         self.expect("管理员 SSH 公钥")
         self.send("2\r")
         self.expect("（已选择）")
-        self.send("3\r")
+        self.send("\033[C")
         self.expect("安装预览")
         self.expect("修改 · 服务端口")
+        # Arrows at final review cannot save/deploy. Enter on a review action
+        # remains necessary; returning to a group also preserves the draft.
+        self.send("\033[C2\r")
+        self.expect("基础信息")
+        self.expect("节点名称：edited")
+        for title in ("服务端口", "CF 域名与静态网页", "入口协议", "管理员 SSH 公钥", "安装预览"):
+            self.send("\033[C")
+            self.expect(title)
         self.send("1\r")
         self.expect("DRAFT_REVIEWED")
         self.finish()
@@ -618,8 +717,10 @@ actions = [("全部管理界面", panel.main)]
         self.expect("全部管理界面")
         self.send("\r")
         self.expect("卸载 SuRelay")
+        # The new guided redeployment is item 1. Visit only the seven existing
+        # management groups (2..8); never invoke redeployment or uninstall.
         for number, item in enumerate(["查看订阅链接", "检查出口连通性", "关闭 IPv6 节点", "停用域名模式",
-                                       "检查配置与监听", "登录防护（fail2ban）", "迁移旧安装目录"], 1):
+                                       "检查配置与监听", "登录防护（fail2ban）", "迁移旧安装目录"], 2):
             self.send(str(number) + "\r")
             self.expect(item)
             self.send("0\r")

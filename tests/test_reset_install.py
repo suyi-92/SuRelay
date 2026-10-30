@@ -5,6 +5,8 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -66,8 +68,8 @@ class ResetInstallTest(unittest.TestCase):
         if args[:3] == ['ufw', 'show', 'added']:
             output = '\n'.join(self.rules)
         elif args[:3] == ['ufw', '--force', 'delete']:
-            rule = shlex_join_ufw(args[3:])
-            self.rules.remove(rule)
+            original = next(rule for rule in self.rules if shlex.split(rule) == ['ufw', *args[3:]])
+            self.rules.remove(original)
         elif args[0] == 'systemctl':
             if args[1] == 'show':
                 output = 'loaded\n'
@@ -316,6 +318,258 @@ run_install_flow "$1"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((project / 'phases').read_text().splitlines(), ['preflight', 'keys', 'stage-ports'])
         self.assertIn('RRB_RESET_INSTALL=true', result.stderr)
+
+    def redeployer(self, **kwargs):
+        obj = reset.ResetDeployment(self.project, self.root, self.command, redeploy=True, **kwargs)
+        obj.collect()
+        return obj
+
+    def test_redeploy_removes_custom_security_but_defers_every_rule_carrying_ssh(self):
+        security = self.put('/etc/surelay/surelay-firewall.json', '{"old": "custom safety"}\n')
+        ledger = self.put('/etc/surelay/ssh-managed-keys.json', '{"format": 1, "keys": ["ssh-ed25519 AAAA"]}\n')
+        socket = self.put('/etc/systemd/system/ssh.socket.d/surelay.conf', '[Socket]\nListenStream=22\n')
+        self.put('/etc/fail2ban/jail.d/zz-surelay.local', '# Managed by SuRelay.\nignoreip = 192.0.2.1\n')
+        immediate = ["ufw allow 54443/udp comment 'surelay sing-box 54443/udp'",
+                     "ufw allow proto udp from ::/0 to any port 60000:60010 comment 'SuRelay custom old-v6'",
+                     "ufw allow proto tcp from 192.0.2.0/24 to any port 52000:52010 comment 'SuRelay custom old-range'"]
+        deferred = ["ufw allow proto tcp from 2001:db8::/32 to any port 20:25 comment 'SuRelay custom ssh-range'",
+                    "ufw allow 50396/tcp comment 'SuRelay custom current-session'",
+                    "ufw allow 55000/tcp comment 'surelay SSH old socket'"]
+        self.rules.extend([*immediate, *deferred])
+        previous = self.command
+        runtime_bans = ['192.0.2.9', '2001:db8::9']
+        def metadata(args, check=True):
+            if args[-1:] == ['-T']:
+                return subprocess.CompletedProcess(args, 0, 'port 22\nport 55000\n', '')
+            if args[:3] == ['ss', '-H', '-ltnp']:
+                return subprocess.CompletedProcess(args, 0, 'LISTEN 0 128 [::]:55001 [::]:* users:(("sshd",pid=1,fd=3))\n', '')
+            if args == ['fail2ban-client', 'get', 'sshd', 'banip']:
+                return subprocess.CompletedProcess(args, 0, ' '.join(runtime_bans), '')
+            if args[:4] == ['fail2ban-client', 'set', 'sshd', 'unbanip']:
+                runtime_bans.remove(args[4])
+            return previous(args, check)
+        self.command = metadata
+        with patch.dict(os.environ, {'SSH_CONNECTION': '192.0.2.5 40000 192.0.2.10 50396'}):
+            obj = self.redeployer()
+        self.assertEqual(obj.ssh_ports, {22, 50396, 55000, 55001})
+        obj.apply()
+        self.assertFalse(security.exists())
+        self.assertFalse(ledger.exists())
+        self.assertTrue(socket.is_file())
+        self.assertTrue(self.p('/etc/ssh/sshd_config').is_file())
+        self.assertEqual(self.p('/root/.ssh/authorized_keys').read_text(), 'ssh-ed25519 test\n')
+        for rule in immediate:
+            self.assertNotIn(rule, self.rules)
+        for rule in deferred:
+            self.assertIn(rule, self.rules)
+        self.assertIn("ufw allow 22/tcp comment 'surelay SSH current port'", self.rules)
+        self.assertIn("ufw allow 8080/tcp comment 'unrelated application'", self.rules)
+        handoff = self.p('/root/surelay-backups/redeploy-handoff.json')
+        self.assertEqual(handoff.stat().st_mode & 0o777, 0o600)
+        record = json.loads(handoff.read_text())
+        self.assertEqual(record['status'], 'removed')
+        self.assertEqual(record['old_managed_keys'], ['ssh-ed25519 AAAA'])
+        self.assertEqual(record['current_ssh_port'], 50396)
+        self.assertEqual(record['old_authorized_keys'], ['ssh-ed25519 test'])
+        self.assertIn('/etc/systemd/system/ssh.socket.d/surelay.conf', record['ssh_assets'])
+        with tarfile.open(obj.backup / 'files.tar.gz') as archive:
+            self.assertEqual(archive.extractfile('etc/surelay/surelay-firewall.json').read(), b'{"old": "custom safety"}\n')
+            self.assertTrue(archive.getmember('etc/systemd/system/ssh.socket.d/surelay.conf').isfile())
+        self.assertEqual(runtime_bans, [])
+        self.assertIn(['fail2ban-client', 'set', 'sshd', 'unbanip', '192.0.2.9'], self.calls)
+        self.assertIn(['fail2ban-client', 'set', 'sshd', 'unbanip', '2001:db8::9'], self.calls)
+        self.assertFalse(any(args[:2] == ['fail2ban-client', 'unban'] for args in self.calls))
+
+    def test_redeploy_preview_is_read_only_and_retains_unknown_public_keys(self):
+        original = self.p('/root/.ssh/authorized_keys').read_bytes()
+        obj = self.redeployer()
+        with redirect_stdout(io.StringIO()) as output:
+            obj.describe()
+        self.assertIn('归属不明', output.getvalue())
+        self.assertIsNone(obj.backup)
+        self.assertFalse(self.p('/root/surelay-backups').exists())
+        self.assertEqual(self.p('/root/.ssh/authorized_keys').read_bytes(), original)
+        self.assertTrue(self.p('/opt/relay/config.env').is_file())
+        self.assertFalse(any('delete' in args or 'disable' in args or 'restart' in args for args in self.calls))
+
+    def test_redeploy_reads_multiline_and_legacy_ansi_quoted_key_sources_without_execution(self):
+        for assignment in ("ADMIN_PUBKEY='ssh-ed25519 AAAA one\nssh-ed25519 BBBB two'\n",
+                           "ADMIN_PUBKEY=$'ssh-ed25519 AAAA one\\nssh-ed25519 BBBB two'\n"):
+            with self.subTest(assignment=assignment):
+                self.put('/opt/relay/config.env', 'SERVER_ALIAS=old\nSSH_PORT=22\n' + assignment)
+                obj = self.redeployer()
+                self.assertEqual(obj.old_config['ADMIN_PUBKEY'].splitlines(),
+                                 ['ssh-ed25519 AAAA one', 'ssh-ed25519 BBBB two'])
+
+    def test_redeploy_consistently_backs_up_shared_fail2ban_db_without_removing_other_jails(self):
+        database = self.p('/var/lib/fail2ban/fail2ban.sqlite3')
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            connection.execute('CREATE TABLE bans (jail TEXT, ip TEXT)')
+            connection.execute("INSERT INTO bans VALUES ('other-jail', '192.0.2.8')")
+            connection.execute("INSERT INTO bans VALUES ('sshd', '192.0.2.9')")
+        obj = self.redeployer()
+        obj.apply()
+        with sqlite3.connect(obj.backup / 'fail2ban.sqlite3') as connection:
+            self.assertEqual(connection.execute('SELECT * FROM bans').fetchall(),
+                             [('other-jail', '192.0.2.8'), ('sshd', '192.0.2.9')])
+        with sqlite3.connect(database) as connection:
+            self.assertEqual(connection.execute('SELECT * FROM bans').fetchall(), [('other-jail', '192.0.2.8')])
+        self.assertEqual((obj.backup / 'fail2ban.sqlite3').stat().st_mode & 0o777, 0o600)
+
+    def test_redeploy_uses_configured_fail2ban_db_and_only_removes_sshd_bans_and_bips(self):
+        database = self.p('/srv/security/shared-bans.sqlite3')
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            for table in ('bans', 'bips'):
+                connection.execute(f'CREATE TABLE {table} (jail TEXT, ip TEXT)')
+                connection.executemany(f'INSERT INTO {table} VALUES (?, ?)',
+                                       [('sshd', '192.0.2.9'), ('other-jail', '192.0.2.8')])
+        previous = self.command
+        def settings(args, check=True):
+            if args == ['fail2ban-client', 'get', 'dbfile']:
+                return subprocess.CompletedProcess(args, 0, '/srv/security/shared-bans.sqlite3\n', '')
+            return previous(args, check)
+        self.command = settings
+        obj = self.redeployer()
+        obj.apply()
+        with sqlite3.connect(database) as connection:
+            for table in ('bans', 'bips'):
+                self.assertEqual(connection.execute(f'SELECT * FROM {table}').fetchall(),
+                                 [('other-jail', '192.0.2.8')])
+        self.assertTrue((obj.backup / 'fail2ban.sqlite3').is_file())
+
+    def test_redeploy_unbans_legacy_fail2ban_jail_without_global_unban(self):
+        previous = self.command
+        banned = ['192.0.2.9']
+        def legacy(args, check=True):
+            if args == ['fail2ban-client', 'get', 'sshd', 'banip']:
+                return subprocess.CompletedProcess(args, 1, '', 'Invalid command')
+            if args == ['fail2ban-client', 'status', 'sshd']:
+                return subprocess.CompletedProcess(args, 0, 'Actions\nBanned IP list: ' + ' '.join(banned) + '\n', '')
+            if args[:4] == ['fail2ban-client', 'set', 'sshd', 'unbanip']:
+                banned.remove(args[4])
+            return previous(args, check)
+        self.command = legacy
+        obj = self.redeployer()
+        obj.apply()
+        self.assertEqual(banned, [])
+        self.assertFalse(any('--all' in args for args in self.calls))
+
+    def test_redeploy_backup_failure_never_writes_handoff_or_cleans_old_deployment(self):
+        obj = self.redeployer()
+        with patch.object(tarfile.TarFile, 'add', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                obj.apply()
+        self.assertFalse(self.p('/root/surelay-backups/redeploy-handoff.json').exists())
+        self.assertTrue(self.p('/opt/relay/config.env').is_file())
+        self.assertFalse(any('disable' in args or 'delete' in args for args in self.calls))
+
+    def test_failed_redeploy_keeps_private_recovery_state_and_blocks_ordinary_reset(self):
+        obj = self.redeployer()
+        previous = obj.runner
+        def failure(args, check=True):
+            if args[:2] == ['systemctl', 'disable']:
+                raise reset.ResetError('fixture stop failure')
+            return previous(args, check)
+        obj.runner = failure
+        with self.assertRaisesRegex(reset.ResetError, 'fixture stop failure'):
+            obj.apply()
+        handoff = self.p('/root/surelay-backups/redeploy-handoff.json')
+        self.assertEqual(json.loads(handoff.read_text())['status'], 'failed')
+        self.assertTrue((obj.backup / 'files.tar.gz').is_file())
+        self.assertTrue(self.p('/opt/relay/config.env').is_file())
+        for uninstall in (False, True):
+            with self.subTest(uninstall=uninstall), self.assertRaisesRegex(reset.ResetError, '尚未完成'):
+                reset.ResetDeployment(self.project, self.root, self.command, uninstall=uninstall).collect()
+
+    def test_redeploy_refuses_unfinished_corrupt_or_symlinked_handoff_before_any_changes(self):
+        handoff = self.p('/root/surelay-backups/redeploy-handoff.json')
+        handoff.parent.mkdir(parents=True)
+        for contents in ('{broken', '{}', '{"format":1,"mode":"redeploy","status":"removed"}'):
+            handoff.write_text(contents)
+            with self.subTest(contents=contents), self.assertRaises(reset.ResetError):
+                self.redeployer()
+            self.assertTrue(self.p('/opt/relay/config.env').is_file())
+        handoff.unlink()
+        handoff.symlink_to('../../../srv/unrelated')
+        with self.assertRaisesRegex(reset.ResetError, '符号链接'):
+            self.redeployer()
+
+    def test_only_finalized_valid_handoff_allows_a_new_reset(self):
+        handoff = self.put('/root/surelay-backups/redeploy-handoff.json', json.dumps({
+            'format': 1, 'mode': 'redeploy', 'status': 'finalized', 'project': '/opt/relay',
+            'backup_dir': '/root/surelay-backups/redeploy-old'}))
+        handoff.chmod(0o600)
+        self.assertTrue(self.resetter().paths)
+
+    def test_redeploy_defers_source_port_rules_and_bare_socket_ports(self):
+        rules = ["ufw allow proto tcp from 192.0.2.5 port 40000 to any port 22 comment 'SuRelay custom source-destination'",
+                 "ufw allow proto tcp from 192.0.2.5 port 40000 to any comment 'SuRelay custom source-only'",
+                 "ufw allow 55001/tcp comment 'SuRelay custom socket-only'"]
+        self.rules.extend(rules)
+        previous = self.command
+        def socket(args, check=True):
+            if args == ['systemctl', 'show', 'ssh.socket', '--property=Listen', '--value']:
+                return subprocess.CompletedProcess(args, 0, '55001 (Stream)', '')
+            return previous(args, check)
+        self.command = socket
+        obj = self.redeployer()
+        self.assertIn(55001, obj.ssh_ports)
+        pending = [shlex.split(rule) for rule in rules]
+        for rule in pending:
+            self.assertIn(['ufw', '--force', 'delete', *rule[1:]], obj.pending_firewall)
+
+    def test_redeploy_removes_owned_state_tls_but_keeps_external_certs_and_unknown_files(self):
+        self.put('/opt/relay/config.env', 'HY2_CERT_PATH=/etc/surelay/hy2.pem\nHY2_KEY_PATH=/etc/surelay/hy2.key\n')
+        self.put('/etc/surelay/hy2.pem', 'state certificate\n')
+        self.put('/etc/surelay/hy2.key', 'state private key\n')
+        obj = self.redeployer()
+        obj.apply()
+        self.assertFalse(self.p('/etc/surelay/hy2.pem').exists())
+        self.assertFalse(self.p('/etc/surelay/hy2.key').exists())
+        self.assertTrue(self.p('/etc/surelay/user-note.txt').exists())
+        # A separate fixture starts without the unfinished redeploy record.
+        self.p('/root/surelay-backups/redeploy-handoff.json').unlink()
+        self.put('/opt/relay/config.env', 'HY2_CERT_PATH=/srv/shared/cert.pem\nHY2_KEY_PATH=/srv/shared/key.pem\n')
+        self.put('/srv/shared/cert.pem', 'external certificate\n')
+        self.put('/srv/shared/key.pem', 'external private key\n')
+        obj = self.redeployer()
+        self.assertEqual(set(obj.external_tls_preserved), {'/srv/shared/cert.pem', '/srv/shared/key.pem'})
+        self.assertNotIn('/srv/shared/cert.pem', obj.paths)
+        self.assertNotIn('/srv/shared/key.pem', obj.paths)
+
+    def test_redeploy_refuses_state_hy2_cert_referenced_by_other_web_configuration(self):
+        self.put('/opt/relay/config.env', 'HY2_CERT_PATH=/etc/surelay/hy2.pem\n')
+        self.put('/etc/surelay/hy2.pem', 'shared certificate\n')
+        self.put('/etc/nginx/sites-enabled/other.conf', 'ssl_certificate /etc/surelay/hy2.pem;\n')
+        with self.assertRaisesRegex(reset.ResetError, '其他配置引用'):
+            self.redeployer()
+        self.assertFalse(self.p('/root/surelay-backups').exists())
+
+    def test_redeploy_cancellation_preserves_all_old_files_and_never_creates_handoff(self):
+        obj = reset.ResetDeployment(self.project, self.root, self.command, redeploy=True)
+        with patch.object(reset, 'ResetDeployment', return_value=obj), \
+                patch('sys.argv', ['reset', '--project-dir', '/opt/relay', '--redeploy', '--apply']), \
+                patch.object(os, 'geteuid', return_value=0), \
+                patch('builtins.open') as tty, redirect_stdout(io.StringIO()):
+            tty.return_value.__enter__.return_value.readline.return_value = 'RESET\n'
+            with self.assertRaisesRegex(reset.ResetError, '已取消'):
+                reset.main()
+        self.assertIsNone(obj.backup)
+        self.assertTrue(self.p('/opt/relay/config.env').is_file())
+        self.assertFalse(self.p('/root/surelay-backups/redeploy-handoff.json').exists())
+
+    def test_redeploy_stops_on_unsupported_owned_firewall_shape_or_shared_certificate(self):
+        self.rules.append("ufw route allow 9999/tcp comment 'SuRelay custom forwarded'")
+        with self.assertRaisesRegex(reset.ResetError, '安全重放'):
+            self.redeployer()
+        self.rules.pop()
+        self.certificate()
+        self.put('/etc/nginx/sites-enabled/other.conf', 'ssl_certificate /etc/letsencrypt/live/edge.example.test/cert.pem;\n')
+        with self.assertRaisesRegex(reset.ResetError, '其他配置引用'):
+            self.redeployer()
+        self.assertTrue(self.p('/opt/relay/config.env').is_file())
 
 
 def shlex_join_ufw(args):

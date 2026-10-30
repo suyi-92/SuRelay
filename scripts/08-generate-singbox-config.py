@@ -67,7 +67,8 @@ def parse_env_file(path: Path) -> Dict[str, str]:
     if not path.exists():
         raise ConfigError(f"找不到配置文件：{path}")
     env: Dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    lines = iter(path.read_text(encoding="utf-8").splitlines())
+    for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -81,11 +82,31 @@ def parse_env_file(path: Path) -> Dict[str, str]:
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
             continue
         if value:
-            try:
-                parts = shlex.split(value, comments=False, posix=True)
-                env[key] = parts[0] if parts else ""
-            except ValueError:
-                env[key] = value.strip("'\"")
+            while True:
+                try:
+                    if key in {"ADMIN_PUBKEY", "ADMIN_PUBKEYS"} and value.startswith("$'"):
+                        quoted = re.match(r"\$'((?:\\.|[^'])*)'", value, re.S)
+                        if quoted is None:
+                            raise ValueError("Unclosed legacy key quote")
+                        # Legacy printf %q uses ANSI quoting for multiline keys.
+                        decoded = re.sub(r"\\([nrt\\'])", lambda match: {
+                            "n": "\n", "r": "\r", "t": "\t", "\\": "\\", "'": "'"}[match[1]], quoted[1])
+                    else:
+                        # Read only the assignment's value: a trailing comment
+                        # may contain unmatched quotes, and # inside a bare
+                        # password is literal shell data rather than a comment.
+                        lexer = shlex.shlex(value, posix=True)
+                        lexer.whitespace_split = True
+                        lexer.commenters = ""
+                        token = lexer.get_token()
+                        decoded = "" if value.startswith("#") or token is None else token
+                    break
+                except ValueError as exc:
+                    continuation = next(lines, None)
+                    if continuation is None:
+                        raise ConfigError(f"{key} 存在未闭合引号；停止读取不完整配置。") from exc
+                    value += "\n" + continuation
+            env[key] = decoded
         else:
             env[key] = ""
     return env

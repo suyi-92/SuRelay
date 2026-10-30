@@ -144,7 +144,7 @@ def menu(title, actions, before=None):
             before()
             divider()
         for index, (name, _) in enumerate(actions, 1):
-            style = "danger" if name.startswith(("卸载", "重置")) else "accent"
+            style = "danger" if name.startswith(("卸载", "重置")) or name == "开始引导式节点布置" else "accent"
             print(f"  {color(str(index) + ')', style)} {color(name, style) if style == 'danger' else name}")
         print("  " + color("0)", "muted") + (" 退出" if title == "SuRelay" else " 返回"))
         divider()
@@ -251,6 +251,7 @@ class Panel:
                 ("VPS 安全", self.security), ("高级维护", self.advanced),
                 ("卸载 SuRelay", self.uninstall),
             ]
+        actions.insert(0, ("开始引导式节点布置", self.redeploy))
         menu("SuRelay", actions, self.status)
 
     def nodes(self):
@@ -952,6 +953,15 @@ class Panel:
             env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
         self.m.reload()
 
+    def redeploy(self):
+        # The child presents the complete cleanup plan and backs up before REDEPLOY.
+        try:
+            run(["bash", self.m.root / "install.sh", "--redeploy"],
+                env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
+        finally:
+            self.m.reload()
+        raise SystemExit(0)
+
     def install(self):
         run(["bash", self.m.root / "install.sh"],
             env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
@@ -977,7 +987,7 @@ class Panel:
 
 def main():
     parser = argparse.ArgumentParser(prog="sr", description="SuRelay：sr 打开菜单；sr status 查看状态；sr update 更新管理脚本。")
-    parser.add_argument("command", nargs="?", default="menu", choices=["menu", "status", "update", "install", "migrate", "uninstall", "help"])
+    parser.add_argument("command", nargs="?", default="menu", choices=["menu", "status", "update", "install", "redeploy", "migrate", "uninstall", "help"])
     parser.add_argument("--install-command", action="store_true", help="安装 /usr/local/bin/sr，不修改运行配置")
     parser.add_argument("--plain", action="store_true", help="使用逐行菜单，适用于不支持全屏界面的终端")
     args = parser.parse_args()
@@ -1011,7 +1021,7 @@ def main():
             panel.status()
         elif args.command == "update":
             manager.update_code()
-        elif args.command in {"install", "migrate", "uninstall"}:
+        elif args.command in {"install", "redeploy", "migrate", "uninstall"}:
             getattr(panel, args.command)()
         else:
             if not sys.stdin.isatty():

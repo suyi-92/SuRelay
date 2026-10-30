@@ -14,6 +14,7 @@ RUN_PHASES="${RRB_RUN_PHASES:-true}"
 RRB_VERBOSE="${RRB_VERBOSE:-false}"
 INSTALL_LOG_FILE="${RRB_INSTALL_LOG_FILE:-/tmp/surelay-install.log}"
 INSTALL_MODE="full"
+REDEPLOY_HANDOFF_FILE="${RRB_REDEPLOY_HANDOFF:-/root/surelay-backups/redeploy-handoff.json}"
 IPV6_NODE_ADDRESS=""
 INPUT_TTY=""
 MAINTENANCE_LOCK_FILE="${RRB_MAINTENANCE_LOCK_FILE:-/run/surelay.lock}"
@@ -50,6 +51,7 @@ usage() {
   sudo bash install.sh --security-only
   sudo bash install.sh --uninstall
   sudo bash install.sh --reset
+  sudo bash install.sh --redeploy
   sudo bash install.sh -6 [IPv6地址]
   sudo bash install.sh --add-ipv6-node [IPv6地址]
 
@@ -58,6 +60,7 @@ usage() {
       --security-only       只配置 SSH、fail2ban 和 UFW，不安装 sing-box、订阅或节点
       --uninstall           备份后卸载本项目部署，保留 SSH 和系统软件包
       --reset               备份并卸载项目配置与服务，再重新填写配置安装
+      --redeploy            清空 SuRelay 属性并重新引导部署，新 SSH 验证后关闭旧入口
   -6, --add-ipv6-node [地址]  在已有部署上启用 IPv6 监听，并单独生成 v6 VLESS 节点
       --ipv6-address <地址>   与 -6 相同，但要求显式提供 IPv6 地址
   -h, --help                 显示帮助
@@ -66,6 +69,8 @@ usage() {
 不会重跑 SSH 初始化，也不会轮换 VLESS UUID、Reality keypair 或 short-id。
 --reset 会使旧节点和订阅失效；显示清单后需输入 RESET。保留 SSH 登录通道、
 系统软件包和其他证书；不能与 -6 同时使用。
+--redeploy 会重新生成端口和节点身份，要求录入新的管理员公钥；验证新端口与新公钥
+登录成功后，清理旧 SuRelay 公钥、SSH 设置和端口规则。确认词为 REDEPLOY。
 --security-only 会创建安全配置并执行 SSH 二阶段加固、fail2ban 和 UFW；不会创建
 sing-box、订阅服务、Reality 密钥或任何客户端节点。已有项目配置不会被重置。
 EOF
@@ -93,6 +98,11 @@ parse_args() {
         [[ "$INSTALL_MODE" != "ipv6-node" ]] || die "--reset 不能与 -6 同时使用。"
         [[ "$INSTALL_MODE" == "full" ]] || die "--reset 不能与其他维护模式合用。"
         INSTALL_MODE="reset"
+        shift
+        ;;
+      --redeploy)
+        [[ "$INSTALL_MODE" == "full" ]] || die "--redeploy 不能与其他维护模式合用。"
+        INSTALL_MODE="redeploy"
         shift
         ;;
       -6|--add-ipv6-node)
@@ -601,6 +611,7 @@ run_install_phase() {
 
 run_install_flow() {
   local project_dir="$1" ssh_host current_ssh_port configured_ssh_port security_only_mode=false
+  local ssh_confirm_prompt="已确认公钥登录成功，继续关闭密码登录？" ssh_confirm_default=yes
   cd "$project_dir"
   if [[ "$RUN_PHASES" != "true" ]]; then
     info "配置已就绪：$project_dir/config.env；未执行部署。"
@@ -644,11 +655,18 @@ run_install_flow() {
   section "SSH 公钥登录验证"
   printf '另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
   printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "$configured_ssh_port" "$ssh_host"
-  if read_yes_no "已确认公钥登录成功，继续关闭密码登录？" yes; then
+  if [[ "${RRB_REDEPLOY:-false}" == true ]]; then
+    printf '请明确使用本次录入的新公钥登录；确认后将移除旧 SuRelay 公钥与旧 SSH 入口。\n'
+    ssh_confirm_prompt="已用本次新公钥在新端口登录成功，清理旧公钥和旧入口？"
+    ssh_confirm_default=no
+  fi
+  if read_yes_no "$ssh_confirm_prompt" "$ssh_confirm_default"; then
     section "应用配置与验证"
     CONFIRM_ROOT_KEY_LOGIN=yes run_install_phase ssh-final
   else
-    if [[ "$INSTALL_MODE" == "reset" || "${RRB_RESET_INSTALL:-false}" == "true" ]]; then
+    if [[ "${RRB_REDEPLOY:-false}" == true ]]; then
+      warn "引导部署已停在新 SSH 验证；旧登录通道仍保留。解决登录后运行 sr install 继续同一部署。"
+    elif [[ "$INSTALL_MODE" == "reset" || "${RRB_RESET_INSTALL:-false}" == "true" ]]; then
       warn "重装已停在公钥验证；解决登录后使用 RRB_RESET_INSTALL=true bash install.sh 继续。"
     else
       warn "安装已暂停，节点尚未部署；修改配置后运行 sr install 继续。"
@@ -714,14 +732,32 @@ configure_install() {
   fi
 }
 
+resume_redeploy() {
+  local project_dir="$1" handoff_status
+  handoff_status="$(python3 "$project_dir/scripts/surelay_redeploy.py" --resume-status \
+    --project-dir "$project_dir" --handoff "$REDEPLOY_HANDOFF_FILE")" \
+    || die "引导部署交接记录未通过检查；保留现场，请按备份说明恢复。"
+  case "$handoff_status" in
+    none|finalized) return 0 ;;
+    removed)
+      [[ "$INSTALL_MODE" == full || "$INSTALL_MODE" == redeploy ]] \
+        || die "引导式重新布置尚未完成，请运行 sr install 继续；不能切换到其他部署模式。"
+      export RRB_REDEPLOY=true RRB_RESET_INSTALL=true RRB_SECURITY_ONLY=false
+      export RRB_REDEPLOY_HANDOFF="$REDEPLOY_HANDOFF_FILE"
+      info "继续尚未完成的引导部署；新 SSH 验证后才清理旧登录入口。"
+      ;;
+    *) die "未知的引导部署状态，停止安装：$handoff_status" ;;
+  esac
+}
+
 main() {
   parse_args "$@"
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     die "请使用 root 运行，例如：sudo bash install.sh"
   fi
   acquire_maintenance_lock
-  if [[ "$INSTALL_MODE" == "reset" && "$RUN_PHASES" != "true" ]]; then
-    die "--reset 必须执行完整重装，不能与 RRB_RUN_PHASES=false 同时使用。"
+  if [[ ( "$INSTALL_MODE" == "reset" || "$INSTALL_MODE" == "redeploy" ) && "$RUN_PHASES" != "true" ]]; then
+    die "--$INSTALL_MODE 必须执行完整重装，不能与 RRB_RUN_PHASES=false 同时使用。"
   fi
   if [[ "$INSTALL_MODE" != "update" && ( "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ) ]]; then
     init_input_tty
@@ -741,6 +777,9 @@ main() {
     info "更新完成。输入 sr 打开 SuRelay；节点与订阅保持原样。"
     return 0
   fi
+  if [[ "$INSTALL_MODE" == "security-only" || "$INSTALL_MODE" == "ipv6-node" ]]; then
+    resume_redeploy "$project_dir"
+  fi
   bash "$project_dir/surelay.sh" --install-command
   if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
     run_ipv6_node_flow "$project_dir"
@@ -756,6 +795,13 @@ main() {
     RESET_SSH_PORT="${RESET_SSH_PORT:-22}"
     RRB_INPUT_TTY="$INPUT_TTY" python3 "$project_dir/scripts/17-reset-install.py" --project-dir "$project_dir" --apply
     export RRB_RESET_INSTALL=true
+  fi
+  if [[ "$INSTALL_MODE" == "redeploy" ]]; then
+    RRB_INPUT_TTY="$INPUT_TTY" python3 "$project_dir/scripts/17-reset-install.py" \
+      --project-dir "$project_dir" --redeploy --apply --handoff-file "$REDEPLOY_HANDOFF_FILE"
+  fi
+  if [[ "$INSTALL_MODE" == "full" || "$INSTALL_MODE" == "redeploy" ]]; then
+    resume_redeploy "$project_dir"
   fi
   configure_install "$project_dir"
   run_install_flow "$project_dir"

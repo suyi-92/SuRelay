@@ -22,6 +22,7 @@ ESC = "\033["
 UP, DOWN, LEFT, RIGHT = (ESC + c for c in "ABDC")
 PAGE_UP, PAGE_DOWN = ESC + "5~", ESC + "6~"
 HOME, END, DELETE = ESC + "H", ESC + "F", ESC + "3~"
+STEP_PREVIOUS, STEP_NEXT = "step_previous", "step_next"
 
 
 def current():
@@ -402,15 +403,22 @@ class Terminal:
         rows = []
         for i, name in enumerate([*names, back]):
             number = str(i + 1) if i < len(names) else "0"
-            danger = name.startswith(("卸载", "重置"))
+            danger = name.startswith(("卸载", "重置")) or name == "开始引导式节点布置"
             style = ("danger_selected" if danger else "selected") if i == selected else "danger" if danger else "text"
             rows.append((f" {'›' if i == selected else ' '} {number}) {name}", style))
         return rows
 
-    def choose(self, actions, status="", selected=0, *, navigation=True, back=None):
+    def choose(self, actions, status="", selected=0, *, navigation=True, back=None, steps=None):
+        """Choose an action, or navigate a draft step with immediate left/right.
+
+        ``steps=(previous_label, next_label)`` replaces the numbered back row
+        with a fixed footer and returns STEP_PREVIOUS / STEP_NEXT. Ordinary
+        menus and text-entry cursor controls keep their existing behavior.
+        """
         if navigation:
             self.menu_count += 1
-        count = len(actions) + 1
+        count = len(actions) + (0 if steps else 1)
+        selected = max(0, min(selected, count - 1))
         start, follow_selection = 0, True
         with self.keys():
             while True:
@@ -426,8 +434,11 @@ class Terminal:
                 if body:
                     body.append(("", "text"))
                 focus = len(body)
-                for i, (text, style) in enumerate(self.menu_rows([name for name, _ in actions], selected,
-                                                              back or ("退出" if len(self.trail) == 1 else "返回"))):
+                rows = self.menu_rows([name for name, _ in actions], selected,
+                                      back or ("退出" if len(self.trail) == 1 else "返回"))
+                if steps:
+                    rows = rows[:-1]
+                for i, (text, style) in enumerate(rows):
                     parts = wrap(text, self.content_width())
                     body.extend((part, style) for part in parts)
                     if i == selected:
@@ -436,15 +447,24 @@ class Terminal:
                 start = min(start, last_start)
                 if follow_selection:
                     start = max(0, focus - capacity + 1)
-                hint = "↑↓ / 数字选择 · Enter 确认 · Esc " + (back or "返回")
-                if last_start:
-                    hint += f"\nPgUp/PgDn 翻页 · {start + 1}–{min(start + capacity, len(body))}/{len(body)}"
+                if steps:
+                    previous, following = f"← {steps[0]}", f"{steps[1]} →"
+                    hint = previous + " " * max(2, self.content_width() - cells(previous) - cells(following)) + following
+                    hint += "\n↑↓/数字编辑 · Enter · Esc返回" if not last_start else "\n↑↓/数字 · Enter · PgUp/PgDn · Esc"
+                else:
+                    hint = "↑↓ / 数字选择 · Enter 确认 · Esc " + (back or "返回")
+                    if last_start:
+                        hint += f"\nPgUp/PgDn 翻页 · {start + 1}–{min(start + capacity, len(body))}/{len(body)}"
                 self.render(body[start:start + capacity], hint)
                 key = self.key()
-                if key == UP:
+                if steps and key in (LEFT, "<"):
+                    return STEP_PREVIOUS
+                if steps and key in (RIGHT, ">"):
+                    return STEP_NEXT
+                if key == UP and count:
                     selected = (selected - 1) % count
                     follow_selection = True
-                elif key in (DOWN, "\t"):
+                elif key in (DOWN, "\t") and count:
                     selected = (selected + 1) % count
                     follow_selection = True
                 elif key in (PAGE_UP, PAGE_DOWN):
@@ -452,10 +472,14 @@ class Terminal:
                     follow_selection = False
                 elif isinstance(key, str) and key in "0123456789" and key:
                     number = int(key)
-                    if number <= len(actions):
+                    if steps and number == 0:
+                        return STEP_PREVIOUS
+                    if 1 <= number <= len(actions) or (not steps and number == 0):
                         selected = number - 1 if number else len(actions)
                         follow_selection = True
                 elif key in ("\r", "\n"):
+                    if not count:
+                        continue
                     return None if selected == len(actions) else selected
                 elif key == "\x1b":
                     return None

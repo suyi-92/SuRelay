@@ -107,11 +107,50 @@ class ManagementTest(unittest.TestCase):
         self.assertEqual(rendered.count("SERVER_ALIAS="), 1)
         self.config.write_text(rendered)
         self.assertEqual(core.GEN.parse_env_file(self.config)["SERVER_ALIAS"], value)
+        self.assertEqual(core.GEN.parse_env_file(self.config)["ADMIN_PUBKEY"], "key1\nkey2")
         if os.name == "posix" and shutil.which("bash"):
             result = subprocess.run(["bash", "-c", 'source "$1"; printf "%s" "$SERVER_ALIAS"', "_", str(self.config)],
                                     capture_output=True, text=True, check=True)
             self.assertEqual(result.stdout, value)
         self.assertFalse(marker.exists())
+
+    def test_multiline_legacy_admin_keys_do_not_become_other_assignments(self):
+        self.config.write_text("ADMIN_PUBKEY=$'ssh-ed25519 AAAA first\\nssh-ed25519 AQID second'\n"
+                               "ADMIN_PUBKEYS='ssh-ed25519 BAUG third\nSSH_PORT=12345'\nSSH_PORT=22\n")
+        env = core.GEN.parse_env_file(self.config)
+        self.assertEqual(env["ADMIN_PUBKEY"].splitlines(), ["ssh-ed25519 AAAA first", "ssh-ed25519 AQID second"])
+        self.assertEqual(env["ADMIN_PUBKEYS"], "ssh-ed25519 BAUG third\nSSH_PORT=12345")
+        self.assertEqual(env["SSH_PORT"], "22")
+
+    def test_unclosed_multiline_key_is_not_silently_truncated(self):
+        self.config.write_text("ADMIN_PUBKEY='ssh-ed25519 AAAA first\nssh-ed25519 AQID second\n")
+        with self.assertRaisesRegex(core.GEN.ConfigError, "ADMIN_PUBKEY.*未闭合"):
+            core.GEN.parse_env_file(self.config)
+
+    def test_config_keeps_literal_password_hash_and_ignores_quoted_trailing_comment(self):
+        self.config.write_text("PROXY_PASSWORD=secret#literal\nSSH_PORT=52322 # don't change this\n")
+        env = core.GEN.parse_env_file(self.config)
+        self.assertEqual(env["PROXY_PASSWORD"], "secret#literal")
+        self.assertEqual(env["SSH_PORT"], "52322")
+
+    def test_redeploy_menu_exists_in_full_and_security_modes(self):
+        for mode in ("true", "false"):
+            self.m.update({"SURELAY_SECURITY_ONLY": mode})
+            panel = surelay.Panel(self.m)
+            actions = {}
+            with patch.object(surelay, "menu", side_effect=lambda title, options, *args: actions.update(options)):
+                panel.main()
+            self.assertEqual(actions["开始引导式节点布置"], panel.redeploy)
+
+    def test_redeploy_child_owns_cleanup_confirmation_and_inherits_lock(self):
+        panel = surelay.Panel(self.m)
+        original = self.config.read_bytes()
+        with patch.object(surelay, "run") as invoke:
+            with self.assertRaises(SystemExit):
+                panel.redeploy()
+        invoke.assert_called_once_with(["bash", self.root / "install.sh", "--redeploy"],
+                                       env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
+        self.assertEqual(self.config.read_bytes(), original)
 
     def test_unclosed_config_is_rejected(self):
         with self.assertRaises(core.Error):

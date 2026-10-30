@@ -10,7 +10,7 @@ backup_path /etc/ssh/sshd_config
 [[ -d /etc/ssh/sshd_config.d ]] && backup_path /etc/ssh/sshd_config.d
 ensure_sshd_dropin_include
 
-if [[ "${RRB_RESET_INSTALL:-false}" != "true" ]]; then
+if [[ "${RRB_RESET_INSTALL:-false}" != "true" && -z "${RRB_REDEPLOY_HANDOFF:-}" ]]; then
   write_sshd_policy <<'EOF'
 # Managed by surelay phase1.
 # Phase1 only enables public key authentication. It intentionally does NOT
@@ -22,6 +22,13 @@ fi
 test_sshd_config
 reload_ssh
 configure_sshd_ports stage
+if [[ -n "${RRB_REDEPLOY_HANDOFF:-}" ]]; then
+  if is_dry_run; then
+    log "DRY-RUN: restrict new SSH port to newly configured public keys"
+  else
+    python3 "$SCRIPT_DIR/surelay_redeploy.py" --restrict-new-port --config-env "$RRB_CONFIG_FILE" --handoff "$RRB_REDEPLOY_HANDOFF"
+  fi
+fi
 
 # An existing UFW may still allow only the old SSH port. Open the configured
 # port before asking for a second verification session; the final firewall

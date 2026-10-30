@@ -6,12 +6,14 @@ import argparse
 import configparser
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -23,7 +25,8 @@ class ResetError(Exception):
 
 class ResetDeployment:
     # root/runner injection is for isolated tests only, never exposed by the CLI.
-    def __init__(self, project: Path, root: Path = Path('/'), runner=None, uninstall=False):
+    def __init__(self, project: Path, root: Path = Path('/'), runner=None, uninstall=False,
+                 redeploy=False, handoff_file=Path('/root/surelay-backups/redeploy-handoff.json')):
         self.root = root.resolve()
         self.project = project
         self.runner = runner or self.run
@@ -34,6 +37,53 @@ class ResetDeployment:
         self.firewall = []
         self.backup = None
         self.uninstall = uninstall
+        self.redeploy = redeploy
+        if uninstall and redeploy:
+            raise ResetError('强重新布置不能与卸载模式同时使用。')
+        self.handoff_file = Path(handoff_file)
+        self.handoff = None
+        self.backup_extra = set()
+        self.pending_firewall = []
+        self.ssh_ports = set()
+        self.ssh_assets = []
+        self.old_managed_keys = []
+        self.managed_sshd_jail = False
+
+    def check_handoff(self):
+        self.safe_path(self.handoff_file)
+        if not self.exists(self.handoff_file):
+            return
+        info = self.path(self.handoff_file).stat()
+        if info.st_mode & 0o077 or (self.root == Path('/') and info.st_uid != 0):
+            raise ResetError('已有重新布置交接记录不是 root 私有文件，请先核实归属和权限。')
+        try:
+            value = json.loads(self.text(self.handoff_file))
+        except (ValueError, OSError) as exc:
+            raise ResetError('已有重新布置交接记录无法安全读取，请先核实恢复资料。') from exc
+        if (not isinstance(value, dict) or value.get('format') != 1 or value.get('mode') != 'redeploy'
+                or value.get('status') != 'finalized' or not isinstance(value.get('project'), str)
+                or not Path(value['project']).is_absolute() or not isinstance(value.get('backup_dir'), str)
+                or not Path(value['backup_dir']).is_absolute()):
+            raise ResetError('上次引导式重新布置尚未完成；保留 SSH 交接记录，请继续原安装或先检查恢复资料。')
+
+    @staticmethod
+    def private_json(path, value):
+        path = Path(path)
+        if path.is_symlink():
+            raise ResetError(f'拒绝覆盖交接记录链接：{path}')
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix='.surelay-handoff-', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                os.chmod(name, 0o600)
+                json.dump(value, stream, ensure_ascii=False, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
 
     def path(self, value):
         return self.root / str(value).lstrip('/')
@@ -102,12 +152,15 @@ class ResetDeployment:
         return p
 
     def collect(self):
+        self.check_handoff()
         spec = importlib.util.spec_from_file_location('reset_generator', Path(__file__).with_name('08-generate-singbox-config.py'))
         gen = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(gen)
         config = self.project / 'config.env'
         self.safe_path(config)
         env = gen.parse_env_file(self.path(config)) if self.exists(config) else {}
+        self.old_config = dict(env)
+        self.old_config_text = self.text(config)
         # Reset does not validate deployment values: it also repairs failed installs.
         # Restrict custom directories to project-specific descendants so a typo
         # cannot designate /etc, /root, another application's config, or source code.
@@ -233,7 +286,175 @@ class ResetDeployment:
         # Read-only distro metadata is commonly a link to /usr/lib/os-release.
         # It is never added to the removal plan; managed targets remain strict.
         self.alpine = bool(re.search(r'^ID=[\"\']?alpine[\"\']?$', self.text('/etc/os-release', link=True), re.M))
+        if self.redeploy:
+            self.collect_redeploy(state)
         self.collect_firewall(env)
+
+    def collect_redeploy(self, state):
+        """Keep the working SSH channel; record only evidence of managed identity."""
+        self.external_tls_preserved = []
+        for key in ('HY2_CERT_PATH', 'HY2_KEY_PATH'):
+            value = self.old_config.get(key, '')
+            if not value:
+                continue
+            path = Path(value)
+            if path.is_absolute() and state in path.parents:
+                self.add(path)
+                self.check_shared_tls(str(path))
+            elif value not in self.paths:
+                self.external_tls_preserved.append(value)
+        for name in ('surelay-firewall.json', 'ssh-managed-keys.json'):
+            self.add(state / name)
+        ledger = state / 'ssh-managed-keys.json'
+        if self.exists(ledger):
+            try:
+                saved = json.loads(self.text(ledger))
+                keys = saved.get('keys') if isinstance(saved, dict) else saved
+                if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
+                    raise ValueError('invalid key ledger')
+                self.old_managed_keys = list(dict.fromkeys(keys))
+            except (ValueError, TypeError) as exc:
+                raise ResetError('项目 SSH 公钥归属记录损坏，请先核实后重新布置。') from exc
+        self.managed_sshd_jail = any(path in self.paths for path in (
+            '/etc/fail2ban/jail.d/sshd.local', '/etc/fail2ban/jail.d/zz-surelay.local'))
+        self.fail2ban_database = None
+        if self.managed_sshd_jail:
+            database = '/var/lib/fail2ban/fail2ban.sqlite3'
+            try:
+                result = self.runner(['fail2ban-client', 'get', 'dbfile'], check=False)
+                configured_database = result.stdout.strip() if result.returncode == 0 else ''
+                if configured_database.lower() == 'none':
+                    database = ''
+                elif configured_database:
+                    database = configured_database
+            except FileNotFoundError:
+                pass  # Repair a partial install whose fail2ban executable is absent.
+            if database:
+                self.safe_path(database)
+                if self.exists(database):
+                    self.fail2ban_database = Path(database)
+        self.ssh_assets = ['/etc/ssh/sshd_config', '/root/.ssh/authorized_keys']
+        for folder in ('ssh.socket.d', 'sshd.socket.d'):
+            directory = Path('/etc/systemd/system') / folder
+            if self.exists(directory):
+                self.safe_path(directory)
+                self.backup_extra.add(str(directory))
+                for name in ('surelay.conf', 'reality-relay-bootstrap.conf'):
+                    if self.exists(directory / name):
+                        self.safe_path(directory / name)
+                        self.ssh_assets.append(str(directory / name))
+        for name in ('00-surelay-phase1.conf', '00-surelay-hardening.conf',
+                     '00-reality-relay-bootstrap-phase1.conf', '00-reality-relay-bootstrap-hardening.conf'):
+            value = Path('/etc/ssh/sshd_config.d') / name
+            if self.exists(value):
+                self.safe_path(value)
+                self.ssh_assets.append(str(value))
+        self.safe_path('/root/.ssh/authorized_keys')
+        self.old_authorized_keys = self.text('/root/.ssh/authorized_keys').splitlines()
+        # Recover complete multiline key assignments without executing old shell
+        # configuration. Legacy bash ANSI quoting is limited to its key fields.
+        lines = iter(self.old_config_text.splitlines())
+        for line in lines:
+            match = re.match(r'^\s*(?:export\s+)?(ADMIN_PUBKEYS?)=(.*)$', line)
+            if not match:
+                continue
+            value = match[2]
+            while True:
+                try:
+                    tokens = shlex.split(value, comments=True)
+                    break
+                except ValueError:
+                    extra = next(lines, None)
+                    if extra is None:
+                        raise ResetError('旧管理员公钥赋值引号不完整，无法确认身份来源。')
+                    value += '\n' + extra
+            if value.startswith("$'") and value.endswith("'"):
+                decoded = value[2:-1]
+                decoded = re.sub(r"\\([nrt\\'])", lambda m: {'n': '\n', 'r': '\r', 't': '\t',
+                                  '\\': '\\', "'": "'"}[m[1]], decoded)
+            elif len(tokens) <= 1:
+                decoded = tokens[0] if tokens else ''
+            else:
+                raise ResetError('旧管理员公钥赋值无法安全解析，未开始重新布置。')
+            self.old_config[match[1]] = decoded
+        self.current_ssh_port = None
+        connection = os.environ.get('SSH_CONNECTION', '').split()
+        if len(connection) == 4 and connection[3].isdigit() and 1 <= int(connection[3]) <= 65535:
+            self.current_ssh_port = int(connection[3])
+            self.ssh_ports.add(self.current_ssh_port)
+        configured = self.old_config.get('SSH_PORT', '22')
+        if configured.isdigit() and 1 <= int(configured) <= 65535:
+            self.ssh_ports.add(int(configured))
+        binary = shutil.which('sshd') or '/usr/sbin/sshd'
+        result = self.runner([binary, '-T'], check=False)
+        for value in re.findall(r'(?m)^port\s+(\d+)\s*$', result.stdout):
+            if 1 <= int(value) <= 65535:
+                self.ssh_ports.add(int(value))
+        if not self.alpine:
+            socket = self.runner(['systemctl', 'show', 'ssh.socket', '--property=Listen', '--value'], check=False)
+            for value in re.findall(r'(?:^|\s|:)(\d+)\s+\(Stream\)', socket.stdout):
+                if 1 <= int(value) <= 65535:
+                    self.ssh_ports.add(int(value))
+        listeners = self.runner(['ss', '-H', '-ltnp'], check=False)
+        for line in listeners.stdout.splitlines():
+            if not re.search(r'\bsshd\b', line):
+                continue
+            columns = line.split()
+            for column in columns[:5]:
+                match = re.search(r':(\d+)$', column)
+                if match and 1 <= int(match[1]) <= 65535:
+                    self.ssh_ports.add(int(match[1]))
+                    break
+        if not self.ssh_ports:
+            raise ResetError('无法确认当前 SSH 监听端口，停止重新布置以保留登录通道。')
+
+    def check_shared_tls(self, value):
+        for directory in ('/etc/nginx', '/etc/apache2', '/etc/httpd', '/etc/haproxy', '/etc/caddy'):
+            for current, dirs, files in os.walk(self.path(directory), followlinks=False):
+                if any((Path(current) / name).is_symlink() for name in dirs):
+                    raise ResetError('Web 配置有目录链接，无法确认项目 HY2 证书独占。')
+                for name in files:
+                    path = Path(current) / name
+                    logical = '/' + path.relative_to(self.root).as_posix()
+                    if logical not in self.paths and path.is_file() and value in path.read_text(errors='replace'):
+                        raise ResetError(f'项目 HY2 证书还被其他配置引用：{logical}；未开始重新布置。')
+
+    @staticmethod
+    def managed_rule(args):
+        return (len(args) >= 5 and args[0] == 'ufw' and args[1] in {'allow', 'deny', 'limit', 'reject'}
+                and args[-2] == 'comment' and args[-1].lower().startswith(('surelay ', 'reality-relay-bootstrap ')))
+
+    def protects_ssh(self, args):
+        """Defer broad/source-scoped SSH rules until a new key and port work."""
+        body, comment = args[2:-2], args[-1].lower()
+        protocol = body[body.index('proto') + 1] if 'proto' in body and body.index('proto') + 1 < len(body) else ''
+        shorthand = re.fullmatch(r'([0-9,:-]+)/(tcp|udp)', body[0]) if body else None
+        if shorthand:
+            specification, protocol = shorthand.groups()
+        elif 'port' in body:
+            # A source port is not the destination SSH listener. Rules which
+            # constrain only the source still cover every destination port.
+            destination = body[body.index('to') + 1:] if 'to' in body else body
+            position = destination.index('port') if 'port' in destination else -1
+            specification = destination[position + 1] if 0 <= position < len(destination) - 1 else ''
+        elif body and re.fullmatch(r'[0-9,:-]+', body[0]):
+            specification = body[0]
+        else:
+            specification = ''  # Profile/any-port rules may carry this session.
+        if protocol == 'udp':
+            return False
+        if 'ssh' in comment or not specification:
+            return True
+        for interval in specification.split(','):
+            limits = re.split('[:-]', interval)
+            if len(limits) not in (1, 2) or any(not part.isdigit() for part in limits):
+                raise ResetError('项目 UFW 端口范围无法安全解析，未开始重新布置。')
+            lower, upper = int(limits[0]), int(limits[-1])
+            if not 1 <= lower <= upper <= 65535:
+                raise ResetError('项目 UFW 端口范围不合法，未开始重新布置。')
+            if any(lower <= value <= upper for value in self.ssh_ports):
+                return True
+        return False
 
     def collect_legacy(self):
         """Recognize exact old managed assets without renaming live services."""
@@ -319,6 +540,18 @@ class ResetDeployment:
         if len(connection) == 4:
             ports.add(connection[3])
         for line in rules.splitlines():
+            if self.redeploy:
+                try:
+                    args = shlex.split(line)
+                except ValueError as exc:
+                    raise ResetError('防火墙规则无法安全解析，未开始重新布置。') from exc
+                if not self.managed_rule(args):
+                    if args and args[-1].lower().startswith(('surelay ', 'reality-relay-bootstrap ')):
+                        raise ResetError('发现无法安全重放的项目 UFW 规则，未开始重新布置。')
+                    continue
+                command = ['ufw', '--force', 'delete', *args[1:]]
+                (self.pending_firewall if self.protects_ssh(args) else self.firewall).append(command)
+                continue
             if 'surelay' not in line and 'reality-relay-bootstrap' not in line:
                 continue
             args = shlex.split(line)
@@ -344,22 +577,31 @@ class ResetDeployment:
         return result.returncode == 0
 
     def describe(self):
-        print('卸载将停止节点与订阅，并删除本项目部署配置。' if self.uninstall else
+        print('开始引导式节点布置：清空旧节点、配置、密钥、域名凭据与 SR 安全属性，重新填写全部参数。' if self.redeploy else
+              '卸载将停止节点与订阅，并删除本项目部署配置。' if self.uninstall else
               '重置安装将停止旧节点和订阅，清空配置/出口列表，并在重装时生成新密钥。')
         print('备份后删除以下项目文件：')
         for path in sorted(self.paths):
             print(f'  {path}')
         print('停用服务：' + (', '.join(self.services) or '无'))
-        print(f'清理代理/订阅 UFW 规则：{len(self.firewall)} 条；保留 SSH 规则。')
-        print('保留 SSH 配置/公钥/账户、系统软件包、自定义端口规则、其他站点、Cloudflare DNS、代码目录及历史备份。')
+        if self.redeploy:
+            print(f'立即清理已确认 SR 防火墙规则：{len(self.firewall)} 条；新 SSH 验证后再清理：{len(self.pending_firewall)} 条。')
+            print('暂时保留当前 SSH 配置和全部公钥以完成交接；新端口与新公钥验证后清除可确认归属的旧 SR 身份。')
+            print('归属不明的手工公钥、无 SR 注释的防火墙规则、其他服务、Cloudflare DNS、云安全组和系统软件包保留。')
+            if self.external_tls_preserved:
+                print('保留用户自行管理的外部 HY2 证书/私钥：' + ', '.join(self.external_tls_preserved))
+            print(f'私有交接记录：{self.handoff_file}；未完成交接时禁止再次重置。')
+        else:
+            print(f'清理代理/订阅 UFW 规则：{len(self.firewall)} 条；保留 SSH 规则。')
+            print('保留 SSH 配置/公钥/账户、系统软件包、自定义端口规则、其他站点、Cloudflare DNS、代码目录及历史备份。')
 
     def snapshot(self):
         base = self.path('/root/surelay-backups')
         self.safe_path('/root/surelay-backups')
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
         base.chmod(0o700)
-        self.backup = Path(tempfile.mkdtemp(prefix='reset-', dir=base))
-        extra = ['/etc/ssh', '/root/.ssh/authorized_keys', '/etc/ufw', '/etc/default/ufw']
+        self.backup = Path(tempfile.mkdtemp(prefix='redeploy-' if self.redeploy else 'reset-', dir=base))
+        extra = ['/etc/ssh', '/root/.ssh/authorized_keys', '/etc/ufw', '/etc/default/ufw', *self.backup_extra]
         paths = set(self.paths)
         for value in extra:
             if self.exists(value):
@@ -382,6 +624,16 @@ class ResetDeployment:
                             return h.digest()
                         if digest(saved) != digest(original):
                             raise ResetError(f'备份核验不一致：{member.name}')
+        if self.redeploy and self.fail2ban_database is not None:
+            # SQLite's backup API includes committed WAL pages without stopping
+            # unrelated jails or copying an inconsistent live database file.
+            database = self.backup / 'fail2ban.sqlite3'
+            with sqlite3.connect(f'file:{self.path(self.fail2ban_database)}?mode=ro', uri=True) as source:
+                with sqlite3.connect(database) as target:
+                    source.backup(target)
+                    if target.execute('PRAGMA quick_check').fetchone() != ('ok',):
+                        raise ResetError('fail2ban 封禁状态备份校验失败，未开始重新布置。')
+            database.chmod(0o600)
         state = {name: {'active': self.service(name, 'active'), 'exists': self.service(name, 'exists')}
                  for name in dict.fromkeys(self.services + self.shared)}
         for name, details in state.items():
@@ -397,8 +649,90 @@ class ResetDeployment:
         print(f'备份已核验：{self.backup}', flush=True)
         return state
 
+    def write_handoff(self, status, error=''):
+        self.safe_path(self.handoff_file)
+        if self.handoff is None:
+            self.handoff = {
+                'format': 1, 'mode': 'redeploy', 'project': str(self.project),
+                'backup_dir': '/' + self.backup.relative_to(self.root).as_posix(),
+                'ssh_ports': sorted(self.ssh_ports), 'current_ssh_port': self.current_ssh_port,
+                'pending_firewall': self.pending_firewall,
+                'authorized_keys_path': '/root/.ssh/authorized_keys',
+                'old_authorized_keys': self.old_authorized_keys,
+                'old_managed_keys': self.old_managed_keys,
+                'old_config': self.old_config, 'old_config_text': self.old_config_text,
+                'ssh_assets': self.ssh_assets,
+                'external_tls_preserved': self.external_tls_preserved,
+                'fail2ban_backup': str(self.backup / 'fail2ban.sqlite3') if self.fail2ban_database is not None else '',
+                'unknown_keys': '只有旧配置或归属账本中可确认的 SR 公钥才应在新公钥验证后移除；其他公钥保留。',
+            }
+        self.handoff['status'] = status
+        if error:
+            self.handoff['error'] = error
+        self.private_json(self.backup / 'handoff.json', self.handoff)
+        self.private_json(self.path(self.handoff_file), self.handoff)
+
+    def clear_sshd_bans(self, state):
+        if not self.redeploy or not self.managed_sshd_jail:
+            return
+        running = state.get('fail2ban', {}).get('active') and self.runner(
+            ['fail2ban-client', 'status', 'sshd'], check=False).returncode == 0
+        if running:
+            for value in self.sshd_bans():
+                # Enumerate explicitly: `set sshd unbanip --all` is not an all
+                # selector in supported fail2ban versions, and global unban
+                # commands would also clear unrelated service bans.
+                self.runner(['fail2ban-client', 'set', 'sshd', 'unbanip', value])
+        if self.fail2ban_database is not None:
+            # Remove only this confirmed managed jail's history, including
+            # expired/incremental tickets absent from the runtime list.
+            with sqlite3.connect(f'file:{self.path(self.fail2ban_database)}?mode=rw', uri=True) as database:
+                for table in ('bans', 'bips'):
+                    columns = {row[1] for row in database.execute(f'PRAGMA table_info({table})')}
+                    if not columns:
+                        continue
+                    if not {'jail', 'ip'} <= columns:
+                        raise ResetError('fail2ban 封禁表结构无法安全确认，未清除共享数据库。')
+                    database.execute(f'DELETE FROM {table} WHERE jail = ?', ('sshd',))
+        if running and self.sshd_bans():
+            raise ResetError('项目 sshd jail 仍有封禁记录，停止重新布置。')
+
+    def sshd_bans(self):
+        result = self.runner(['fail2ban-client', 'get', 'sshd', 'banip'], check=False)
+        value = result.stdout.strip()
+        if result.returncode:
+            # fail2ban 0.10 does not expose `get <jail> banip`.
+            value = self.runner(['fail2ban-client', 'status', 'sshd']).stdout
+            match = re.search(r'Banned IP list:\s*([^\n]*)', value)
+            if not match:
+                raise ResetError('无法确认项目 sshd 封禁列表，停止重新布置。')
+            value = match[1]
+        ips = value.translate(str.maketrans({'[': ' ', ']': ' ', "'": ' ', '"': ' ', ',': ' '})).split()
+        for item in ips:
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError as exc:
+                raise ResetError('项目 sshd 封禁列表含未知格式，未继续清理。') from exc
+        return list(dict.fromkeys(ips))
+
     def apply(self):
         state = self.snapshot()
+        if self.redeploy:
+            self.write_handoff('prepared')
+        try:
+            self.clear_sshd_bans(state)
+            self.remove_deployment(state)
+            if self.redeploy:
+                self.write_handoff('removed')
+        except BaseException as exc:
+            if self.redeploy and self.handoff is not None:
+                try:
+                    self.write_handoff('failed', str(exc))
+                except (ResetError, OSError):
+                    print(f'交接状态未能更新，保留恢复资料：{self.backup}', flush=True)
+            raise
+
+    def remove_deployment(self, state):
         for name in self.services:
             if not state[name]['exists']:
                 continue
@@ -446,20 +780,25 @@ class ResetDeployment:
         saved = json.loads(manifest.read_text())
         saved['status'] = 'removed'
         manifest.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + '\n')
-        print('SuRelay 已卸载。SSH 登录配置、公钥和代码目录已保留。' if self.uninstall else
+        print('旧 SR 部署已清除；SSH 交接尚未完成。请继续向导并验证新端口与新公钥。' if self.redeploy else
+              'SuRelay 已卸载。SSH 登录配置、公钥和代码目录已保留。' if self.uninstall else
               '旧部署已卸载。接下来重新填写配置并执行安装。')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project-dir', type=Path, required=True)
-    parser.add_argument('--apply', action='store_true', help='显示清单并要求输入 RESET 后执行；默认只预览')
-    parser.add_argument('--uninstall', action='store_true', help='只卸载，不重新安装；确认词为 UNINSTALL')
+    parser.add_argument('--apply', action='store_true', help='显示清单并要求输入对应确认词后执行；默认只预览')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--uninstall', action='store_true', help='只卸载，不重新安装；确认词为 UNINSTALL')
+    mode.add_argument('--redeploy', action='store_true', help='强重新布置，清除 SR 安全属性并交接 SSH；确认词 REDEPLOY')
+    parser.add_argument('--handoff-file', type=Path, default=Path('/root/surelay-backups/redeploy-handoff.json'))
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise ResetError('请以 root 运行重置安装。')
-    reset = ResetDeployment(args.project_dir.resolve(), uninstall=args.uninstall)
-    word = 'UNINSTALL' if args.uninstall else 'RESET'
+    reset = ResetDeployment(args.project_dir.resolve(), uninstall=args.uninstall,
+                            redeploy=args.redeploy, handoff_file=args.handoff_file)
+    word = 'REDEPLOY' if args.redeploy else 'UNINSTALL' if args.uninstall else 'RESET'
     try:
         reset.collect()
         reset.describe()
@@ -470,7 +809,8 @@ def main():
                 if not tty_in.isatty():
                     raise ResetError('重置确认需要交互式终端。')
                 with open(tty_path, 'w') as tty_out:
-                    tty_out.write(f'确认{"卸载 SuRelay" if args.uninstall else "重置并重新安装"}，请输入大写 {word}（其他输入取消）：')
+                    label = '开始引导式节点布置' if args.redeploy else '卸载 SuRelay' if args.uninstall else '重置并重新安装'
+                    tty_out.write(f'确认{label}，请输入大写 {word}（其他输入取消）：')
                     tty_out.flush()
                 if tty_in.readline().strip() != word:
                     raise ResetError('已取消操作；旧部署保持不变。')
@@ -484,5 +824,5 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ResetError, OSError, subprocess.TimeoutExpired) as exc:
+    except (ResetError, OSError, sqlite3.Error, subprocess.TimeoutExpired) as exc:
         raise SystemExit(f'ERROR: {exc}')

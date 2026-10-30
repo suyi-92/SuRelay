@@ -188,9 +188,15 @@ write_renew_hook() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ -x /sbin/openrc-run ]]; then
-  rc-service nginx reload || rc-service nginx restart
+  if rc-service nginx status >/dev/null 2>&1; then
+    rc-service nginx reload || rc-service nginx restart
+  fi
+  if rc-service sing-box status >/dev/null 2>&1; then rc-service sing-box restart; fi
 else
-  systemctl reload nginx || systemctl restart nginx
+  if systemctl is-active --quiet nginx; then
+    systemctl reload nginx || systemctl restart nginx
+  fi
+  if systemctl is-active --quiet sing-box; then systemctl restart sing-box; fi
 fi
 EOF
   if is_alpine; then
@@ -265,6 +271,11 @@ verify_fallback() {
 
 ensure_cloudflare_credentials
 request_certificate
+if [[ "${RRB_CERTIFICATES_ONLY:-false}" == "true" ]]; then
+  write_renew_hook
+  info "域名证书已准备，后续生成 HY2 配置时可直接加载。"
+  exit 0
+fi
 write_fallback_site
 write_nginx_site
 write_renew_hook

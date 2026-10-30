@@ -22,11 +22,11 @@ Phases:
   ssh-phase1      准备 root/SFTP 公钥登录，不禁 root/密码
   ssh-final       二阶段 SSH 最终加固；必须 CONFIRM_ROOT_KEY_LOGIN=yes
   fail2ban        安装并配置 fail2ban
-  singbox         安装 sing-box、生成 VLESS+Reality 多入口配置并重启
+  singbox         安装 sing-box、生成多协议入口配置并重启
   subscription    安装/更新可选订阅端口
   cloudflare-dns  可选在 Cloudflare 准备 DNS only / 灰云 A/AAAA 记录
   custom-domain   可选配置 Cloudflare DNS-01 证书和本机 Nginx fallback
-  firewall        安装/配置 UFW，只开放 SSH、443 和实际中转端口
+  firewall        安装/配置 UFW，只开放 SSH 和实际启用的 TCP/UDP 入口
   validate        验证 SSH、fail2ban、UFW、sing-box、监听端口、家宽代理和上游节点
   output-nodes    可选生成 /root/surelay-nodes.txt 与 /root/surelay-clash.yaml
   rollback        回滚 SSH 加固、sing-box 配置；可选处理 UFW
@@ -63,11 +63,12 @@ case "$PHASE" in
   fail2ban) run_phase 05-install-fail2ban.sh ;;
   singbox)
     run_phase 07-install-singbox.sh
+    # HY2 reads TLS files during sing-box check/start, so obtain DNS-01 certs first.
+    run_phase 14-setup-cloudflare-dns.sh
+    run_phase 15-setup-custom-domain.sh
     python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --write --quiet
     run_phase 10-validate.sh --singbox-only --skip-proxy-tests --restart-singbox
     RRB_SHOW_RESULT=false run_phase 13-setup-subscription.sh
-    run_phase 14-setup-cloudflare-dns.sh
-    run_phase 15-setup-custom-domain.sh
     if [[ "$RRB_DRY_RUN" != "true" && "${RRB_SHOW_RESULT:-true}" == "true" ]]; then
       python3 "$SCRIPT_DIR/11-output-nodes.py" --config-env "$RRB_CONFIG_FILE" \
         --generator "$SCRIPT_DIR/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary

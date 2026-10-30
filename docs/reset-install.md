@@ -1,6 +1,6 @@
 # 重置安装
 
-普通 `bash install.sh` 沿用已有配置和节点身份。`bash install.sh --reset` 用于卸载旧部署后重新安装：重新填写配置、清空出口列表、重新生成 UUID、Reality keypair、short-id 和订阅 token。
+普通 `bash install.sh` 沿用已有配置和节点身份。`bash install.sh --reset` 用于卸载旧部署后重新安装：重新填写配置、清空出口列表、重新生成 UUID、Reality keypair、short-id 和订阅 token；未手动指定的新协议密码也会随 UUID 更新。
 
 ## 入口与顺序
 
@@ -31,7 +31,7 @@ bash /tmp/surelay-install.sh --reset
 2. 输入大写 `RESET` 确认；其他输入或 EOF 取消，旧部署不变。
 3. 在 `/root/surelay-backups/reset-*` 创建仅 root 可读的 `files.tar.gz` 和 `manifest.json`。逐文件核验备份后才停止服务；磁盘满、文件读取失败等错误会阻止卸载。
 4. 停止并禁用旧 sing-box/订阅服务；删除已列出的项目文件，清理带项目标记的代理/订阅 UFW 规则，重载共享 Nginx/fail2ban。OpenRC 从所有已登记运行级别移除专用服务。
-5. 重新收集配置、公钥、可选域名信息，创建空出口列表。检查系统、更新 root 公钥后，保留当前 SSH 策略并要求第二个终端验证；确认后替换最终 SSH 策略及旧项目 SFTP Match 块，继续安装。
+5. 打开分组向导，重新填写配置、公钥和默认开启的 CF 域名静态页信息，可返回修改；SSH、公网主入口、订阅与 Nginx 内部端口重新生成高位随机建议值，可手动覆盖。确认后创建空出口列表。检查系统、更新 root 公钥后，保留当前 SSH 策略并要求第二个终端验证；确认后替换最终 SSH 策略及旧项目 SFTP Match 块，继续安装。
 
 卸载后旧代理会中断，直到重装完成。确认后若中断填写或安装失败，备份保留；已有完整新 `config.env` 时用普通 `bash install.sh` 继续，不必再次重置。公钥验证拒绝后，先解决 SSH 登录，再设置 `RRB_RESET_INSTALL=true bash install.sh` 继续最终策略清理。
 

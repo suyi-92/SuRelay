@@ -225,6 +225,15 @@ load_config() {
   : "${USE_233BOY_INSTALLER:=false}"
   : "${INSTALL_SINGBOX_METHOD:=auto}"
   : "${PROXY_PROTOCOL:=vless-reality}"
+  : "${ENABLE_HY2:=false}"
+  : "${HY2_PORT:=54443}"
+  : "${HY2_INSECURE:=false}"
+  : "${ENABLE_SOCKS5:=false}"
+  : "${SOCKS5_PORT:=51080}"
+  : "${ENABLE_SHADOWSOCKS:=false}"
+  : "${SHADOWSOCKS_PORT:=58388}"
+  : "${ENABLE_HTTP:=false}"
+  : "${HTTP_PORT:=58080}"
   : "${PROXY_IP_VERSION:=ipv4}"
   : "${MODE_443:=direct}"
   if [[ "$MODE_443" != "direct" ]]; then
@@ -508,6 +517,11 @@ validate_config_basics() {
   validate_bool CLIENT_UDP
   validate_bool ENABLE_SUBSCRIPTION_SERVER
   validate_bool RESET_PROXY_KEYS
+  validate_bool ENABLE_HY2
+  validate_bool HY2_INSECURE
+  validate_bool ENABLE_SOCKS5
+  validate_bool ENABLE_SHADOWSOCKS
+  validate_bool ENABLE_HTTP
   validate_port NGINX_FALLBACK_PORT
   validate_nonnegative_int CLOUDFLARE_DNS_TTL
   validate_nonnegative_int CLOUDFLARE_DNS_PROPAGATION_SECONDS
@@ -532,7 +546,6 @@ validate_config_basics() {
     fi
     [[ "$SUBSCRIPTION_LISTEN_PORT" != "$SSH_PORT" ]] || die "SUBSCRIPTION_LISTEN_PORT 不能与 SSH_PORT 相同"
     [[ "$SUBSCRIPTION_LISTEN_PORT" != "$DIRECT_PORT" ]] || die "SUBSCRIPTION_LISTEN_PORT 不能与 DIRECT_PORT 相同"
-    (( SUBSCRIPTION_LISTEN_PORT < HOME_PORT_START || SUBSCRIPTION_LISTEN_PORT > HOME_PORT_END )) || die "SUBSCRIPTION_LISTEN_PORT 不能落在 HOME_PORT_START/HOME_PORT_END 范围内"
   fi
   [[ "$SUBSCRIPTION_DIR" == /* ]] || die "SUBSCRIPTION_DIR 必须是绝对路径"
   [[ "$SUBSCRIPTION_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "SUBSCRIPTION_DIR 只能包含英文、数字、点、下划线、短横线和斜杠"
@@ -561,9 +574,18 @@ validate_config_basics() {
   [[ "$VLESS_FLOW" == "" || "$VLESS_FLOW" == "xtls-rprx-vision" ]] || die "VLESS_FLOW 目前建议为空或 xtls-rprx-vision，当前：$VLESS_FLOW"
   [[ "$REALITY_SERVER_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "REALITY_SERVER_NAME 不合法：$REALITY_SERVER_NAME"
   [[ "$REALITY_HANDSHAKE_SERVER" =~ ^[A-Za-z0-9._-]+$ ]] || die "REALITY_HANDSHAKE_SERVER 不合法：$REALITY_HANDSHAKE_SERVER"
-  if [[ "$DIRECT_PORT" != "443" ]]; then
-    warn "DIRECT_PORT 当前不是 443：$DIRECT_PORT；请确认客户端和安全组同步。"
-  fi
+  local protocol key enabled value used_ports=" $DIRECT_PORT $SSH_PORT "
+  [[ "$ENABLE_SUBSCRIPTION_SERVER" != true ]] || used_ports+="$SUBSCRIPTION_LISTEN_PORT "
+  [[ "$ENABLE_CUSTOM_DOMAIN" != true ]] || used_ports+="$NGINX_FALLBACK_PORT "
+  for protocol in HY2 SOCKS5 SHADOWSOCKS HTTP; do
+    enabled="ENABLE_$protocol"
+    [[ "${!enabled}" == true ]] || continue
+    key="${protocol}_PORT"
+    validate_port "$key"
+    value="${!key}"
+    [[ "$used_ports" != *" $value "* ]] || die "$key 与现有服务端口冲突：$value"
+    used_ports+="$value "
+  done
 }
 
 resolve_csv_path() {
@@ -664,11 +686,20 @@ write_sshd_policy() {
     log "DRY-RUN: write the current phase SSH policy at the start of /etc/ssh/sshd_config"
     cat >/dev/null
   else
-    python3 "$SCRIPT_DIR/sshd_policy.py" --config /etc/ssh/sshd_config --apply || return $?
+    python3 "$SCRIPT_DIR/sshd_policy.py" --config /etc/ssh/sshd_config --apply --validate-sshd "$(sshd_bin)" || return $?
   fi
   # Both SSH phases back up sshd_config and the drop-in directory before calling this.
   remove_legacy_sshd_dropins
   info "本阶段 SSH 策略已优先放置于主配置开头。"
+}
+
+configure_sshd_ports() {
+  local action="$1"
+  if is_dry_run; then
+    log "DRY-RUN: configure SSH listeners --$action for port $SSH_PORT; stage preserves old listeners"
+  else
+    python3 "$SCRIPT_DIR/sshd_ports.py" --config-env "$RRB_CONFIG_FILE" "--$action"
+  fi
 }
 
 remove_sshd_policy() {
@@ -771,19 +802,23 @@ restart_singbox() {
 }
 
 port_line_matches() {
-  local port="$1" line p
+  local port="$1" network="${2:-tcp}" family="${3:-}" line p flags
+  [[ "$network" == tcp || "$network" == udp ]] || return 2
+  flags=-ltn
+  [[ "$network" != udp ]] || flags=-lun
+  flags+="$family"
   while read -r line; do
     [[ -z "$line" ]] && continue
     p="$(awk '{print $4}' <<<"$line")"
     p="${p##*:}"
     [[ "$p" == "$port" ]] && { printf '%s\n' "$line"; return 0; }
-  done < <(ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null || true)
+  done < <(ss -H "${flags}p" 2>/dev/null || ss -H "$flags" 2>/dev/null || true)
   return 1
 }
 
 port_in_use_by_other() {
-  local port="$1" lines
-  lines="$(port_line_matches "$port" || true)"
+  local port="$1" network="${2:-tcp}" lines
+  lines="$(port_line_matches "$port" "$network" || true)"
   [[ -z "$lines" ]] && return 1
   if grep -qi 'sing-box' <<<"$lines"; then
     return 1
@@ -792,11 +827,24 @@ port_in_use_by_other() {
   return 0
 }
 
+check_proxy_port_conflicts() {
+  local output transport port network
+  output="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-transport-ports)" || die "代理入口端口解析失败。"
+  while IFS= read -r transport; do
+    [[ "$transport" =~ ^[0-9]+/(tcp|udp)$ ]] || die "无效代理监听：$transport"
+    port="${transport%/*}"
+    network="${transport##*/}"
+    if port_in_use_by_other "$port" "$network"; then
+      die "代理入口 $transport 已被非 sing-box 进程占用，请修改端口或停止占用服务。"
+    fi
+  done <<<"$output"
+}
+
 wait_for_port_listener() {
-  local port="$1" timeout="${2:-15}" deadline
+  local port="$1" timeout="${2:-15}" network="${3:-tcp}" deadline
   deadline=$((SECONDS + timeout))
   while (( SECONDS <= deadline )); do
-    if port_line_matches "$port" >/dev/null; then
+    if port_line_matches "$port" "$network" >/dev/null; then
       return 0
     fi
     sleep 1
@@ -835,9 +883,22 @@ wait_for_local_tcp_family() {
   return 1
 }
 
+wait_for_local_udp_family() {
+  local family="$1" port="$2" timeout="${3:-15}" deadline
+  [[ "$family" == "4" || "$family" == "6" ]] || return 2
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS <= deadline )); do
+    if port_line_matches "$port" udp "$family" >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 diagnose_singbox_listeners() {
-  warn "当前 TCP 监听端口如下（用于排查 sing-box 未监听问题）："
-  (ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null || true) | tee -a "$LOG_FILE" >&2
+  warn "当前 TCP/UDP 监听端口如下（用于排查 sing-box 未监听问题）："
+  (ss -H -ltunp 2>/dev/null || ss -H -ltun 2>/dev/null || true) | tee -a "$LOG_FILE" >&2
   if is_alpine; then
     rc-service sing-box status 2>&1 | tee -a "$LOG_FILE" >&2 || true
     local core_log=/var/log/surelay/sing-box.log

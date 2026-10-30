@@ -1,6 +1,6 @@
 # SuRelay
 
-轻量 Reality 部署、中转与 VPS 安全管理。安装后输入 **sr** 打开终端控制面板。
+轻量多协议节点部署、中转与 VPS 安全管理。安装后输入 **sr** 打开终端控制面板。
 
 ## 推荐一键安装
 
@@ -44,7 +44,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install
 
 | 选项 | 功能 |
 | --- | --- |
-| 1) 节点与订阅 | 查看订阅/节点、导出配置、刷新订阅、修改名称和主入口端口 |
+| 1) 节点与订阅 | 查看订阅/节点、导出配置、刷新订阅、修改名称和端口、配置入口协议 |
 | 2) 出口管理 | HTTP/SOCKS5 与上游 VLESS 的添加、修改、删除和连通性检查 |
 | 3) IPv6 设置 | 查看、探测启用、更换地址、关闭 IPv6 节点 |
 | 4) 域名与证书 | 配置 CF 域名和凭据、同步 DNS、检查续期、停用域名模式 |
@@ -57,7 +57,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install
 
 面板在同一屏幕内切换菜单和输入：方向键或数字选择，Enter 确认，Esc 返回，q 退出。节点与订阅页也使用居中面板，直接展示完整链接；**Enter / c** 请求复制完整原始链接（需终端支持 OSC 52），**p** 在当前面板展开/收起原文，便于鼠标选中复制；**←→** 切换节点或订阅格式，**Esc / 0** 返回。过长内容可用 ↑↓ 或 PgUp/PgDn 翻页。添加上游 VLESS 每次完成一个节点，依次填写链接、名称和入口端口后保存。`sr --plain` 使用逐行菜单，`NO_COLOR=1 sr` 关闭颜色。打开菜单只读取状态；更新脚本等常规维护选中后执行，需要核对的变更使用确认/取消选项，不必输入 YES 等确认词。出口编辑会固定已有名称与端口，更新节点不重新生成身份。详细行为与恢复边界见 [SuRelay 管理说明](docs/surelay.md)。
 
-在 Ubuntu 22.04/24.04、Debian 10–13 和 Alpine 3.19（OpenRC，x86_64/aarch64）VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box VLESS + Reality。默认保留现有节点身份，SSH 分两阶段加固。
+在 Ubuntu 22.04/24.04、Debian 10–13 和 Alpine 3.19（OpenRC，x86_64/aarch64）VPS 上部署 root 公钥登录、fail2ban、UFW 和 sing-box。保留 VLESS + Reality，可另外开启 Hysteria2（HY2）、SOCKS5、Shadowsocks（SS）和 HTTP 入口；默认保留现有节点身份，SSH 分两阶段加固。
 
 ## 安装
 
@@ -79,19 +79,22 @@ Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以�
 
 一键脚本默认安装到 `/opt/SuRelay`。下文的服务器操作都按此路径给出；如果使用了 `RRB_INSTALL_DIR` 或手动下载到其他位置，请替换每处 `cd` 的路径。编辑示例使用 `nano`，保存按 `Ctrl+O`、回车，退出按 `Ctrl+X`；未安装时 Debian/Ubuntu 执行 `sudo apt install nano`，Alpine 以 root 执行 `apk add nano`。
 
-首次只填写三组信息：
+首次安装使用与 `sr` 相同风格的终端向导，依次填写基础信息、服务端口、CF 域名与静态网页、入口协议和管理员公钥。同一组内可查看并修改相关字段，进入下一组后也可返回前面的组继续修改；总览可直接跳回任意组，确认后才写入配置和开始部署。支持方向键、Enter 和 Esc；不支持面板的终端使用文字菜单。
 
-1. **基础信息**：节点名称、服务器公网 IPv4（自动探测、可修改）、SSH 端口。首次安装不探测或启用 IPv6；需要时安装后使用 **sr → IPv6 设置**，或下文的 -6 维护指令。
-2. **Cloudflare（可选）**：域名、Zone、证书邮箱和 API Token；Token 输入显示 `*`。域名应已在 CF 激活，Token 需要对应 Zone 的 DNS 编辑和 Zone 读取权限；[首次配置说明](docs/cloudflare-domain-preflight.md)。
-3. **管理员公钥**：每行一把，空行结束；明确输入 `SKIP` 才会复用服务器已有公钥。
+- **基础信息与服务端口**：节点名称、公网 IPv4、SSH、主入口、订阅服务和 Nginx 静态页内部端口。IPv4 自动探测后可改；新安装为这些服务生成互不冲突的 `49152–65535` 高位随机端口，回退修改不会重新抽取。NAT 主机请改为服务商实际映射的本机端口。
+- **Cloudflare 域名与静态页**：默认开启；填写域名、Zone、证书邮箱和 API Token，也可主动关闭。Token 输入隐藏显示。域名应已在 CF 激活，Token 需要对应 Zone 的 DNS 编辑和 Zone 读取权限；[首次配置说明](docs/cloudflare-domain-preflight.md)。
+- **节点协议**：保留 VLESS Reality，按需启用 HY2、SOCKS5、SS 和 HTTP，并填写各自端口与认证参数。四种新增协议默认关闭，启用后自动加入订阅和本地输出。参见[协议配置](docs/protocols.md)。
+- **管理员公钥**：可粘贴多把公钥；明确选择复用已有公钥时才使用服务器现有公钥。
+
+首次安装不自动探测或启用 IPv6；需要时安装后使用 **sr → IPv6 设置**，或下文的 -6 维护指令。
 
 随后脚本显示一条 SSH 验证命令。**保留当前 SSH 窗口，在新终端执行；看到 `root` 后再确认关闭密码登录。** 提示为 `[Y/n]`，默认 `Y`：回车或输入 `y` 继续，输入 `n` 暂停；输入中断也会暂停。命令使用公钥和本地 SSH agent；有口令的私钥需先在本机用 `ssh-add` 加载。
 
-安装流程以标题和分隔线区分部署准备、SSH 验证、应用配置与最终节点输出，并显示各阶段的开始、完成或失败。成功后显示 IPv6 节点状态、一个订阅链接及所有本地 `vless://` 节点链接；订阅链接为青色，本地节点为绿色。重定向输出、`TERM=dumb` 或设置 `NO_COLOR=1` 时使用纯文本。命令详细输出写入日志，告警和错误仍显示。
+安装流程以标题和分隔线区分部署准备、SSH 验证、应用配置与最终节点输出，并显示各阶段的开始、完成或失败。成功后显示 IPv6 节点状态、一个订阅链接及各已启用协议的本地节点链接；订阅链接为青色，本地节点为绿色。重定向输出、`TERM=dumb` 或设置 `NO_COLOR=1` 时使用纯文本。命令详细输出写入日志，告警和错误仍显示。
 
-默认值：VLESS TCP 443、Mihomo 订阅、保留 UUID/Reality 密钥、启用 UDP 支持。CF 模式走域名 HTTPS，订阅服务仅监听本机 51040；无域名时使用公网 HTTP 51040。其他选项在 [config.example.env](config.example.env) 中查阅并修改 `config.env`。
+默认保留 VLESS Reality、Mihomo 订阅、UUID/Reality 密钥和 UDP 转发支持。`DIRECT_PORT` 是 VLESS Reality、域名 HTTPS 订阅和静态网页共用的公网入口，新装也使用高位随机端口；CF 访问地址会带上实际端口。内部订阅服务与 Nginx 各用独立的高位端口；无域名时订阅使用生成的公网 HTTP 端口。以向导总览、`config.env` 和安装输出的实际值为准，旧配置重跑不会轮换端口。其他选项见 [config.example.env](config.example.env)。
 
-NAT VPS 若只有高位业务端口，支持把 `DIRECT_PORT` 设置为服务商的同号映射端口；Reality 与域名 HTTPS 订阅共用该端口。`SSH_PORT` 仍填写本机监听端口，迁移与验证步骤见 [NAT 端口配置](docs/nat-ports.md)。
+NAT VPS 若只有服务商分配的业务端口，须把向导中的 `DIRECT_PORT` 随机建议值改为服务商的同号映射端口；Reality 与域名 HTTPS 订阅共用该端口。`SSH_PORT` 仍填写本机监听端口，迁移与验证步骤见 [NAT 端口配置](docs/nat-ports.md)。
 
 **重跑安装会沿用已有 `config.env` 和出口列表，不重新提问或覆盖它们。** 已安装后，需要修改配置并重新运行安装流程：
 
@@ -154,22 +157,22 @@ sudo bash install.sh -6 2001:db8::10
 如果客户端通过域名拉取订阅时仍卡在 IPv4，可先导入输出的本地 IPv6 节点，或在支持 IPv6 的**客户端电脑**上强制经 IPv6 下载 YAML 后导入（无需进入 VPS 项目目录，文件保存到当前目录）：
 
 ```bash
-curl -6 --fail --show-error 'https://你的域名/sub/你的token?target=ClashMeta' -o relay.yaml
+curl -6 --fail --show-error 'https://你的域名:主入口端口/sub/你的token?target=ClashMeta' -o relay.yaml
 ```
 
 这不会绕过 IPv6 自身的网络故障。勿把域名 HTTPS 链接直接改成 IPv6 字面量，否则证书名称不匹配。
 
 ## 订阅与本地导入
 
-在线订阅供 Mihomo / Clash Meta 使用，形式为：
+在线订阅供 Mihomo / Clash Meta 使用，形式为（443 时可省略端口，新装请使用实际输出的高位端口）：
 
 ```text
-https://edge.example.com/sub/<token>?target=ClashMeta
+https://edge.example.com:<主入口端口>/sub/<token>?target=ClashMeta
 ```
 
-未启用 CF 时为 `http://服务器IP:51040/sub/<token>?target=ClashMeta`。脚本优先显示已配置的外部订阅地址，其次显示 IPv4，只有 IPv6 时使用 `[IPv6]` 地址。所有地址返回同一份完整节点。
+未启用 CF 时为 `http://服务器IP:<配置的订阅端口>/sub/<token>?target=ClashMeta`。脚本优先显示已配置的外部订阅地址，其次显示 IPv4，只有 IPv6 时使用 `[IPv6]` 地址。所有地址返回同一份完整节点。
 
-“本地节点”是一行一个的 `vless://...` 分享链接，可复制到支持 VLESS Reality 的客户端导入；有家宽或上游出口时会同时输出这些**中转入口**，不会泄露上游原始链接。本地节点是静态副本，后续增删出口需要重新导入；在线订阅可刷新。
+“本地节点”是一行一个的分享链接，包括 `vless://`、`hysteria2://`、`socks5://`、`ss://` 或 `http://`，只输出已启用的协议；各客户端对 URI 的支持不同，可优先使用 Mihomo 订阅。有家宽或上游出口时会同时输出 VLESS Reality **中转入口**，不会泄露上游原始链接。本地节点是静态副本，后续增删出口需要重新导入；在线订阅可刷新。
 
 重新显示并导出本地文件：
 
@@ -178,7 +181,7 @@ cd /opt/SuRelay
 sudo bash bootstrap.sh --phase output-nodes
 ```
 
-生成 `/root/surelay-vless.txt`（分享链接）、`/root/surelay-clash.yaml`（可本地导入的完整配置）和 `/root/surelay-nodes.txt`（字段明细），权限均为 600。
+生成 `/root/surelay-vless.txt`（各协议分享链接，保留旧文件名）、`/root/surelay-clash.yaml`（可本地导入的完整配置）和 `/root/surelay-nodes.txt`（字段明细），权限均为 600。
 
 ## 新增或删除出口
 
@@ -355,7 +358,7 @@ cd /opt/SuRelay
 sudo CONFIRM_ROLLBACK=yes bash bootstrap.sh --phase rollback
 ```
 
-云厂商安全组必须放行 SSH、443 和实际出口入口的 **TCP** 端口，IPv4/IPv6 分别检查。无 CF 时还需订阅 HTTP 端口；CF 模式且 `SUBSCRIPTION_PORT` 留空时无需公网开放 51040。VLESS 的 UDP 封装在 TCP/Reality 中，不需要额外放行同号 UDP。
+云厂商安全组需要按实际配置放行 SSH、VLESS Reality、中转入口、SOCKS5 和 HTTP 的 **TCP** 端口；HY2 使用 **UDP**，启用 UDP 的 SS 还需要同号 **UDP**。IPv4/IPv6 分别检查。无 CF 时还需订阅 HTTP 端口；CF 模式且 `SUBSCRIPTION_PORT` 留空时无需公网开放内部订阅端口。VLESS 的 UDP 封装在 TCP/Reality 中，不需要额外放行同号 UDP。
 
 安装日志：`/tmp/surelay-install.log`；阶段日志：`/var/log/surelay.log`；配置备份：`/root/surelay-backups/`。
 

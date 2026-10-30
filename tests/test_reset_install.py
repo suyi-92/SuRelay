@@ -300,6 +300,8 @@ class ResetInstallTest(unittest.TestCase):
         (project / 'scripts').mkdir(parents=True)
         (project / 'config.env').write_text('SERVER_IP_IPV4=192.0.2.10\nSSH_PORT=2222\n')
         (project / 'scripts/02-setup-root-ssh.sh').write_text('printf "keys\\n" >>"$RRB_PROJECT_DIR/phases"\n')
+        (project / 'scripts/03-ssh-hardening-phase1.sh').write_text(
+            'test "$RRB_RESET_INSTALL" = true\nprintf "stage-ports\\n" >>"$RRB_PROJECT_DIR/phases"\n')
         # Fixed local filename, so no service script from the repository executes.
         script = functions + '''
 INSTALL_MODE=reset
@@ -312,7 +314,7 @@ run_install_flow "$1"
         result = subprocess.run(['bash', '-c', script, 'test', str(project)], capture_output=True, text=True,
                                 env={**os.environ, 'SSH_CONNECTION': ''}, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((project / 'phases').read_text().splitlines(), ['preflight', 'keys'])
+        self.assertEqual((project / 'phases').read_text().splitlines(), ['preflight', 'keys', 'stage-ports'])
         self.assertIn('RRB_RESET_INSTALL=true', result.stderr)
 
 

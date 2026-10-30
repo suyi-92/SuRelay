@@ -17,9 +17,7 @@ backup_path /etc/sing-box/config.json || true
 [[ -d /etc/sing-box/conf ]] && backup_path /etc/sing-box/conf || true
 backup_path "$RRB_STATE_DIR" || true
 
-if port_in_use_by_other "$DIRECT_PORT"; then
-  die "DIRECT_PORT=$DIRECT_PORT 已被非 sing-box 进程占用。请停止 nginx/apache/其他服务或修改 DIRECT_PORT。"
-fi
+check_proxy_port_conflicts
 
 ensure_state_dirs() {
   local path

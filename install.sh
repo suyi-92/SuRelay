@@ -635,6 +635,8 @@ run_install_flow() {
     info "更新 root 公钥，验证前保留当前 SSH 登录策略。"
     RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" \
       bash "$project_dir/scripts/02-setup-root-ssh.sh"
+    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_RESET_INSTALL=true \
+      bash "$project_dir/scripts/03-ssh-hardening-phase1.sh"
   else
     run_install_phase ssh-phase1
   fi
@@ -703,60 +705,13 @@ configure_install() {
     return 0
   fi
   default_ip="$(public_ipv4)"
-
-  if [[ "$INSTALL_MODE" == "security-only" ]]; then
-    local server_ip_ipv4 ssh_port current_ssh_port
-    section "服务器安全防护"
-    server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
-    current_ssh_port="$(detect_current_ssh_port)"
-    ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-$current_ssh_port}")"
-    ADMIN_KEYS_FILE="$(mktemp)"
-    trap 'rm -f "${ADMIN_KEYS_FILE:-}"' EXIT
-    collect_admin_pubkeys "$ADMIN_KEYS_FILE"
-    write_config "$project_dir" security-only "$server_ip_ipv4" '' "$ssh_port" "$(cat "$ADMIN_KEYS_FILE")" \
-      443 false '' ClashMeta false 51043 65535 false '' '' '' '' 8443 true
-    return 0
+  local -a wizard_args=(--project-dir "$project_dir" --ipv4 "$default_ip")
+  [[ "$INSTALL_MODE" != "security-only" ]] || wizard_args+=(--security-only)
+  RRB_INPUT_TTY="$INPUT_TTY" python3 "$project_dir/scripts/surelay_install.py" "${wizard_args[@]}" \
+    || die "安装向导未完成；未执行部署。"
+  if [[ "$INSTALL_MODE" != "security-only" ]]; then
+    ensure_proxy_lists "$project_dir"
   fi
-
-  section "基础信息"
-  local server_alias server_ip_ipv4 server_ip_ipv6 ssh_port admin_pubkey current_ssh_port
-  local enable_custom_domain custom_domain cloudflare_zone_name le_email cloudflare_api_token
-  server_alias="$(read_default "SERVER_ALIAS" "")"
-  server_ip_ipv4="$(read_default "SERVER_IP_IPv4" "$default_ip")"
-  # IPv6 is an explicit post-install action through sr or install.sh -6.
-  server_ip_ipv6=""
-  current_ssh_port="$(detect_current_ssh_port)"
-  ssh_port="$(read_default "SSH_PORT" "${RESET_SSH_PORT:-$current_ssh_port}")"
-
-  section "Cloudflare 域名（灰云 DNS）"
-  enable_custom_domain="$(read_bool_value "ENABLE_CUSTOM_DOMAIN" "false")"
-  custom_domain=""
-  cloudflare_zone_name=""
-  le_email=""
-  cloudflare_api_token=""
-  if [[ "$enable_custom_domain" == "true" ]]; then
-    custom_domain="$(read_default "CUSTOM_DOMAIN" "")"
-    cloudflare_zone_name="$(read_default "CLOUDFLARE_ZONE_NAME" "$(infer_cloudflare_zone_name "$custom_domain")")"
-    le_email="$(read_default "LE_EMAIL" "")"
-    cloudflare_api_token="$(read_secret_default "CLOUDFLARE_API_TOKEN" "")"
-    [[ -n "$custom_domain" && -n "$cloudflare_zone_name" && -n "$le_email" && -n "$cloudflare_api_token" ]] \
-      || die "启用 CF 域名时，请完整填写域名、Zone、邮箱和 Token。"
-  fi
-  [[ -n "$server_alias" ]] || server_alias="$custom_domain"
-  [[ -n "$server_alias" ]] || die "SERVER_ALIAS 不能为空。"
-  [[ -n "$server_ip_ipv4" ]] || die "首次简洁安装需要公网 IPv4；IPv6-only 请按 README 使用高级配置部署。"
-  if [[ -n "$server_ip_ipv6" ]]; then
-    server_ip_ipv6="$(normalize_ipv6 "$server_ip_ipv6")"
-  fi
-
-  ADMIN_KEYS_FILE="$(mktemp)"
-  trap 'rm -f "${ADMIN_KEYS_FILE:-}"' EXIT
-  collect_admin_pubkeys "$ADMIN_KEYS_FILE"
-  admin_pubkey="$(cat "$ADMIN_KEYS_FILE")"
-  write_config "$project_dir" "$server_alias" "$server_ip_ipv4" "$server_ip_ipv6" "$ssh_port" "$admin_pubkey" \
-    443 true '' ClashMeta false 51043 65535 "$enable_custom_domain" "$custom_domain" \
-    "$cloudflare_zone_name" "$le_email" "$cloudflare_api_token" 8443
-  ensure_proxy_lists "$project_dir"
 }
 
 main() {

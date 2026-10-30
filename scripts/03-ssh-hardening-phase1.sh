@@ -10,15 +10,18 @@ backup_path /etc/ssh/sshd_config
 [[ -d /etc/ssh/sshd_config.d ]] && backup_path /etc/ssh/sshd_config.d
 ensure_sshd_dropin_include
 
-write_sshd_policy <<'EOF'
+if [[ "${RRB_RESET_INSTALL:-false}" != "true" ]]; then
+  write_sshd_policy <<'EOF'
 # Managed by surelay phase1.
 # Phase1 only enables public key authentication. It intentionally does NOT
 # disable root login or password login. Final hardening is a separate phase.
 PubkeyAuthentication yes
 EOF
+fi
 
 test_sshd_config
 reload_ssh
+configure_sshd_ports stage
 
 # An existing UFW may still allow only the old SSH port. Open the configured
 # port before asking for a second verification session; the final firewall

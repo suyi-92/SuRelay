@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 配置 UFW：只开放 SSH、443/DIRECT_PORT 和 CSV 实际使用端口。
+# 配置 UFW：只开放 SSH、订阅和实际使用的 TCP/UDP 入口。
 set -Eeuo pipefail
 PHASE_NAME="firewall"
 source "${RRB_PROJECT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/00-lib.sh"
@@ -37,8 +37,9 @@ EOF
   exit 0
 fi
 
-mapfile -t PORTS < <(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-ports)
-[[ "${#PORTS[@]}" -ge 1 ]] || die "未解析到 VLESS+Reality 端口。"
+transport_output="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-transport-ports)" || die "代理入口端口解析失败。"
+mapfile -t TRANSPORT_PORTS <<<"$transport_output"
+[[ -n "$transport_output" ]] || die "未解析到代理入口端口。"
 
 cleanup_rrb_ufw_rules() {
   local desired_file stale_file status_file number
@@ -47,8 +48,8 @@ cleanup_rrb_ufw_rules() {
   status_file="$(mktemp)"
 
   printf '%s/tcp\n' "$SSH_PORT" >"$desired_file"
-  for port in "${PORTS[@]}"; do
-    printf '%s/tcp\n' "$port" >>"$desired_file"
+  for transport in "${TRANSPORT_PORTS[@]}"; do
+    printf '%s\n' "$transport" >>"$desired_file"
   done
   if subscription_public_enabled; then
     printf '%s/tcp\n' "$SUBSCRIPTION_PORT" >>"$desired_file"
@@ -104,11 +105,10 @@ PY
 
 cleanup_rrb_ufw_rules
 
-info "准备开放实际使用的 VLESS+Reality TCP 端口：${PORTS[*]}"
-for port in "${PORTS[@]}"; do
-  validate_port_value="$port"
-  [[ "$validate_port_value" =~ ^[0-9]+$ ]] || die "端口不是数字：$port"
-  run ufw allow "${port}/tcp" comment "surelay sing-box VLESS+Reality ${port}"
+info "准备开放实际使用的代理 TCP/UDP 端口：${TRANSPORT_PORTS[*]}"
+for transport in "${TRANSPORT_PORTS[@]}"; do
+  [[ "$transport" =~ ^[0-9]+/(tcp|udp)$ ]] || die "无效代理监听：$transport"
+  run ufw allow "$transport" comment "surelay sing-box ${transport}"
 done
 
 if subscription_public_enabled; then
@@ -136,7 +136,7 @@ cat <<EOF
 UFW 已按最小端口开放。服务商安全组/云防火墙也必须手动放行：
 
   SSH:        tcp/$SSH_PORT
-$(printf '  VLESS+Reality:     tcp/%s\n' "${PORTS[@]}")
+$(printf '  Proxy:             %s\n' "${TRANSPORT_PORTS[@]}")
 $(if subscription_public_enabled; then printf '  Subscription:       tcp/%s\n' "$SUBSCRIPTION_PORT"; fi)
 
 以上为本机监听端口；NAT 主机须确认服务商映射，外部 SSH 命令使用服务商分配的公网 SSH 端口。

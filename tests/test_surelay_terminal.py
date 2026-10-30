@@ -202,6 +202,51 @@ class PlainTerminalTest(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
 class WindowTest(unittest.TestCase):
+    def test_install_wizard_groups_can_return_and_preserve_draft_in_real_terminal(self):
+        self.start('''
+from surelay_install import Wizard, initial_values
+values = initial_values("192.0.2.10")
+values["SERVER_ALIAS"] = "before"
+draft = Wizard(values)
+with Terminal():
+    saved = draft.run()
+assert saved["SSH_PORT"] == values["SSH_PORT"]
+assert saved["SERVER_ALIAS"] == "edited"
+assert saved["ENABLE_CUSTOM_DOMAIN"] == "false"
+print("DRAFT_REVIEWED", flush=True)
+''', direct=True)
+        self.expect("基础信息")
+        self.send("1\r")
+        self.expect("Enter 确认 · Esc 取消")
+        self.send("\x15edited\r")
+        self.expect("节点名称：edited")
+        self.send("3\r")
+        self.expect("服务端口")
+        self.expect("静态网页内部端口")
+        self.send("0\r")
+        self.expect("基础信息")
+        self.expect("节点名称：edited")
+        self.send("3\r")
+        self.expect("服务端口")
+        self.send("6\r")
+        self.expect("CF 域名与静态网页：开启")
+        self.expect("Cloudflare API Token：待填写")
+        self.send("1\r")
+        self.expect("CF 域名与静态网页：关闭")
+        self.send("2\r")
+        self.expect("入口协议")
+        self.expect("HTTP：关闭")
+        self.send("6\r")
+        self.expect("管理员 SSH 公钥")
+        self.send("2\r")
+        self.expect("（已选择）")
+        self.send("3\r")
+        self.expect("安装预览")
+        self.expect("修改 · 服务端口")
+        self.send("1\r")
+        self.expect("DRAFT_REVIEWED")
+        self.finish()
+
     def start(self, body, *, direct=False, **env):
         import fcntl
         import pty

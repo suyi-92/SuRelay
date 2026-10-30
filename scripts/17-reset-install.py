@@ -322,7 +322,7 @@ class ResetDeployment:
             if 'surelay' not in line and 'reality-relay-bootstrap' not in line:
                 continue
             args = shlex.split(line)
-            if len(args) != 5 or args[:2] != ['ufw', 'allow'] or args[3] != 'comment' or not re.fullmatch(r'\d+/tcp', args[2]):
+            if len(args) != 5 or args[:2] != ['ufw', 'allow'] or args[3] != 'comment' or not re.fullmatch(r'\d+/(?:tcp|udp)', args[2]):
                 raise ResetError('发现无法自动识别的项目 UFW 规则，未开始重置。')
             if 'SSH' in args[4] or args[2].split('/')[0] in ports:
                 continue

@@ -22,6 +22,18 @@ SSHD = shutil.which("sshd") or ("/usr/sbin/sshd" if Path("/usr/sbin/sshd").is_fi
 
 
 class SshdPolicyTextTest(unittest.TestCase):
+    def test_final_policy_removes_only_superseded_managed_settings_and_preserves_ports(self):
+        provider = b"# provider bytes\nPasswordAuthentication yes\n"
+        settings = (POLICY.SETTINGS_BEGIN + b"\nPort 50396\nAuthenticationMethods any\n"
+                    b"PasswordAuthentication yes\nClientAliveInterval 90\n" + POLICY.SETTINGS_END + b"\n")
+        updated = POLICY.apply_policy(settings + provider, FINAL)
+        remainder = POLICY.remove_policy(updated)
+        self.assertIn(b"Port 50396\n", remainder)
+        self.assertIn(b"ClientAliveInterval 90\n", remainder)
+        self.assertNotIn(b"AuthenticationMethods any", remainder)
+        self.assertEqual(remainder.count(b"PasswordAuthentication yes"), 1)
+        self.assertTrue(remainder.endswith(provider))
+
     def test_policy_is_first_and_preserves_all_other_bytes(self):
         original = b"# provider\nPermitRootLogin yes\nInclude /etc/ssh/sshd_config.d/*.conf\n# non-UTF8: \xff\xfe\n"
         updated = POLICY.apply_policy(original, FINAL)
@@ -77,6 +89,18 @@ class SshdPolicyTextTest(unittest.TestCase):
             result = subprocess.run([sys.executable, str(HELPER), "--config", str(config), "--apply"], input=FINAL, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(config.read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "posix", "Requires a POSIX validation binary")
+    def test_cli_candidate_rejection_keeps_original_file_untouched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "sshd_config"
+            original = b"# original\nPasswordAuthentication yes\n"
+            config.write_bytes(original)
+            result = subprocess.run([sys.executable, str(HELPER), "--config", str(config), "--apply",
+                                     "--validate-sshd", "/bin/false"], input=FINAL, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(config.read_bytes(), original)
+            self.assertEqual(list(Path(temporary).iterdir()), [config])
 
 
 @unittest.skipUnless(os.name == "posix" and SSHD and shutil.which("ssh-keygen"), "Requires real OpenSSH server tools")
@@ -144,6 +168,7 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
             "CONFIRM_ROOT_KEY_LOGIN": "yes" if confirmed else "",
             "CONFIRM_ROLLBACK": "yes",
             "ENABLE_SFTP_USER": str(sftp).lower(),
+            "ENABLE_UFW": "false",
             "SFTP_USER": "nobody" if sftp else "sftpuser",
             "ADMIN_USER": "root",
             "SSH_PORT": "22",
@@ -159,6 +184,7 @@ require_root() {{ :; }}
 load_config() {{ :; }}
 sshd_bin() {{ printf '%s\\n' {shlex.quote(str(self.sshd_wrapper))}; }}
 reload_ssh() {{ printf '%s\\n' "$PHASE_NAME" >> {shlex.quote(str(self.reloads))}; }}
+configure_sshd_ports() {{ :; }}  # Port staging is covered by test_port_policy.py.
 getent() {{
   if [[ "$1" == passwd && "$2" == root ]]; then
     printf 'root:x:0:0:root:%s:/bin/bash\\n' {shlex.quote(str(self.root_home))}
@@ -245,6 +271,44 @@ getent() {{
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertFalse(self.reloads.exists())
+
+    def test_final_port_update_keeps_final_authentication_ahead_of_maintenance_override(self):
+        from unittest.mock import Mock
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import surelay_security as security
+        old_settings = security.ssh_block(self.original.decode(), {
+            "Port": ["22"], "PermitRootLogin": ["yes"], "PasswordAuthentication": ["yes"],
+            "AuthenticationMethods": ["any"]})
+        self.config.write_text(old_settings)
+        self.assert_success(self.run_phase("04-ssh-hardening-final.sh"))
+        self.assert_final()
+        manager = Mock()
+        helper = security.Security(manager)
+        helper.ssh_config = self.config
+        helper.sshd = lambda: str(self.sshd_wrapper)
+        helper.reload_ssh = Mock()
+        helper.set_ssh_ports(["52322"], False)
+        self.assert_final()
+        self.assertEqual(self.effective()["port"], "52322")
+
+    def test_candidate_validation_keeps_legacy_keyboard_directive_fallback(self):
+        self.sshd_wrapper.write_text(f"""#!/bin/sh
+candidate={shlex.quote(str(self.config))}
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '-f' ]; then candidate="$argument"; fi
+  previous="$argument"
+done
+if grep -qi '^KbdInteractiveAuthentication ' "$candidate"; then
+  echo 'Bad configuration option: KbdInteractiveAuthentication' >&2
+  exit 1
+fi
+exec {shlex.quote(SSHD)} -f {shlex.quote(str(self.config))} -h {shlex.quote(str(self.host_key))} "$@"
+""")
+        self.assert_success(self.run_phase("04-ssh-hardening-final.sh"))
+        self.assert_final()
+        self.assertIn("ChallengeResponseAuthentication no", self.config.read_text())
+        self.assertNotIn("KbdInteractiveAuthentication no", self.config.read_text())
 
     def test_sftp_match_block_remains_compatible(self):
         self.assert_success(self.run_phase("04-ssh-hardening-final.sh", sftp=True))

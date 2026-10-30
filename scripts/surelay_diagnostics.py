@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-from surelay_core import Error, GEN, Manager, ROOT, run
+from surelay_core import Error, GEN, Manager, ROOT, run, udp_listener
 
 
 def endpoint(host, port):
@@ -128,7 +128,8 @@ def check_config(manager):
     hosts = ["127.0.0.1"] if manager.env.get("SERVER_IP_IPV4") else []
     if manager.env["ENABLE_IPV6_LISTEN"] == "true":
         hosts.append("::1")
-    listeners = [("代理入口", host, port) for port in GEN.port_list(manager.env, rows) for host in hosts]
+    listeners = [("代理入口", host, port, network)
+                 for port, network in GEN.transport_ports(manager.env, rows) for host in hosts]
     if manager.env["ENABLE_SUBSCRIPTION_SERVER"] == "true":
         active = manager.active(manager.env["SUBSCRIPTION_SERVICE"])
         report("订阅服务", active, "运行中" if active else "未运行")
@@ -137,14 +138,17 @@ def check_config(manager):
         sub_hosts = ["127.0.0.1"] if manager.env.get("SERVER_IP_IPV4") or domain else []
         if manager.env.get("SERVER_IP_IPV6") and not local_only:
             sub_hosts.append("::1")
-        listeners += [("订阅入口", host, int(manager.env["SUBSCRIPTION_LISTEN_PORT"])) for host in sub_hosts]
-    for label, host, port in listeners:
+        listeners += [("订阅入口", host, int(manager.env["SUBSCRIPTION_LISTEN_PORT"]), "tcp") for host in sub_hosts]
+    for label, host, port, network in listeners:
         try:
-            with socket.create_connection((host, port), timeout=1):
-                ok = True
+            if network == "udp":
+                ok = udp_listener(port, socket.AF_INET6 if ":" in host else socket.AF_INET)
+            else:
+                with socket.create_connection((host, port), timeout=1):
+                    ok = True
         except OSError:
             ok = False
-        report(label, ok, endpoint(host, port))
+        report(label, ok, endpoint(host, port) + "/" + network)
     print(f"\n检查完成：{'全部通过' if not failures else str(failures) + ' 项需要处理'}。", flush=True)
     print("本机监听通过后，公网访问仍取决于安全组、端口映射和客户端网络。", flush=True)
 

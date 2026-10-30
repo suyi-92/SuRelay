@@ -3,7 +3,7 @@
 Generate /etc/sing-box/config.json from config.env and home-proxies.csv.
 
 Security notes:
-- Inbound protocol is VLESS + Reality.
+- VLESS + Reality remains available alongside optional authenticated protocols.
 - This script never prints VLESS UUID, Reality private key, or home proxy passwords.
 - CSV is parsed with Python's csv module, so quoted commas are supported.
 """
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -44,6 +46,13 @@ HOME_PROXY_TYPES = {"socks5", "socks", "http"}
 UPSTREAM_SCHEMES = {"vless"}
 
 SUBSCRIPTION_TARGETS = {"ClashMeta"}
+EXTRA_PROTOCOLS = (
+    ("hysteria2", "ENABLE_HY2", "HY2_PORT", ("udp",)),
+    ("socks5", "ENABLE_SOCKS5", "SOCKS5_PORT", ("tcp",)),
+    ("ss", "ENABLE_SHADOWSOCKS", "SHADOWSOCKS_PORT", ("tcp", "udp")),
+    ("http", "ENABLE_HTTP", "HTTP_PORT", ("tcp",)),
+)
+SHADOWSOCKS_METHODS = {"aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"}
 
 
 class ConfigError(SystemExit):
@@ -146,6 +155,23 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         "CLIENT_FINGERPRINT": "chrome",
         "CLIENT_UDP": "true",
         "CLIENT_ALPN": "h2,http/1.1",
+        "ENABLE_HY2": "false",
+        "HY2_PORT": "54443",
+        "HY2_PASSWORD": "",
+        "HY2_CERT_PATH": "",
+        "HY2_KEY_PATH": "",
+        "HY2_SERVER_NAME": "",
+        "HY2_INSECURE": "false",
+        "ENABLE_SOCKS5": "false",
+        "SOCKS5_PORT": "51080",
+        "ENABLE_HTTP": "false",
+        "HTTP_PORT": "58080",
+        "PROXY_USERNAME": "surelay",
+        "PROXY_PASSWORD": "",
+        "ENABLE_SHADOWSOCKS": "false",
+        "SHADOWSOCKS_PORT": "58388",
+        "SHADOWSOCKS_METHOD": "aes-128-gcm",
+        "SHADOWSOCKS_PASSWORD": "",
         "CLASH_MIXED_PORT": "7890",
         "ENABLE_SUBSCRIPTION_SERVER": "true",
         "SUBSCRIPTION_PORT": "",
@@ -175,6 +201,15 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
     merged["SUBSCRIPTION_TARGET"] = normalize_subscription_target(merged.get("SUBSCRIPTION_TARGET", "ClashMeta"))
     apply_custom_domain_defaults(merged)
     apply_subscription_defaults(merged)
+    if custom_domain_enabled(merged) and merged.get("CUSTOM_DOMAIN", ""):
+        domain = merged["CUSTOM_DOMAIN"]
+        for key, value in {
+            "HY2_SERVER_NAME": domain,
+            "HY2_CERT_PATH": f"/etc/letsencrypt/live/{domain}/fullchain.pem",
+            "HY2_KEY_PATH": f"/etc/letsencrypt/live/{domain}/privkey.pem",
+        }.items():
+            if not merged.get(key):
+                merged[key] = value
 
     for default_state_dir in ("/etc/surelay", legacy_state):
         default_paths = {
@@ -365,8 +400,6 @@ def validate_env(env: Dict[str, str]) -> None:
         assert subscription_listen_port is not None
         if subscription_listen_port in {as_port(env, "SSH_PORT"), direct_port}:
             raise ConfigError("SUBSCRIPTION_LISTEN_PORT 不能与 SSH_PORT 或 DIRECT_PORT 相同")
-        if start <= subscription_listen_port <= end:
-            raise ConfigError("SUBSCRIPTION_LISTEN_PORT 不能落在 HOME_PORT_START/HOME_PORT_END 范围内")
     if custom_domain_enabled(env):
         domain = env.get("CUSTOM_DOMAIN", "").strip()
         if not domain:
@@ -395,8 +428,78 @@ def validate_env(env: Dict[str, str]) -> None:
             raise ConfigError("启用自有域名时 REALITY_HANDSHAKE_SERVER 必须等于 NGINX_FALLBACK_HOST")
         if env["REALITY_HANDSHAKE_PORT"] != env["NGINX_FALLBACK_PORT"]:
             raise ConfigError("启用自有域名时 REALITY_HANDSHAKE_PORT 必须等于 NGINX_FALLBACK_PORT")
-    if direct_port != 443:
-        print(f"WARN: DIRECT_PORT={direct_port}，不是默认 443。", file=sys.stderr)
+    validate_protocols(env)
+
+
+def protocol_endpoints(env: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Static listener transports; SOCKS5 UDP uses dynamic association ports."""
+    endpoints = []
+    for protocol, enabled, port_key, networks in EXTRA_PROTOCOLS:
+        if env.get(enabled, "false").lower() == "true":
+            if protocol == "ss" and env.get("CLIENT_UDP", "true") != "true":
+                networks = ("tcp",)
+            endpoints.append({"type": protocol, "port": as_port(env, port_key), "networks": list(networks)})
+    return endpoints
+
+
+def validate_protocols(env: Dict[str, str]) -> None:
+    for _, enabled, _, _ in EXTRA_PROTOCOLS:
+        as_bool(env, enabled)
+    as_bool(env, "HY2_INSECURE")
+    occupied = {as_port(env, "SSH_PORT"), as_port(env, "DIRECT_PORT")}
+    if env.get("ENABLE_SUBSCRIPTION_SERVER") == "true":
+        occupied.add(as_port(env, "SUBSCRIPTION_LISTEN_PORT"))
+    if custom_domain_enabled(env):
+        occupied.add(as_port(env, "NGINX_FALLBACK_PORT"))
+    for endpoint in protocol_endpoints(env):
+        if endpoint["port"] in occupied:
+            raise ConfigError(f"{endpoint['type']} 入口端口与其他服务冲突：{endpoint['port']}")
+        occupied.add(endpoint["port"])
+    if as_bool(env, "ENABLE_SOCKS5") or as_bool(env, "ENABLE_HTTP"):
+        if not env.get("PROXY_USERNAME", "").strip():
+            raise ConfigError("启用 SOCKS5/HTTP 时 PROXY_USERNAME 不能为空；不允许无认证公网代理。")
+        if ":" in env["PROXY_USERNAME"]:
+            raise ConfigError("PROXY_USERNAME 不能包含冒号。")
+    if as_bool(env, "ENABLE_SHADOWSOCKS") and env.get("SHADOWSOCKS_METHOD") not in SHADOWSOCKS_METHODS:
+        raise ConfigError("SHADOWSOCKS_METHOD 只支持 aes-128-gcm、aes-256-gcm、chacha20-ietf-poly1305。")
+    if as_bool(env, "ENABLE_HY2"):
+        for key in ("HY2_CERT_PATH", "HY2_KEY_PATH"):
+            if not is_posix_absolute(env.get(key, "")):
+                raise ConfigError(f"启用 HY2 必须提供 {key} 绝对路径；CF 域名模式自动复用证书。")
+        if not DOMAIN_RE.fullmatch(env.get("HY2_SERVER_NAME", "")):
+            raise ConfigError("启用 HY2 必须填写与证书匹配的 HY2_SERVER_NAME。")
+        if as_bool(env, "HY2_INSECURE"):
+            print("WARN: HY2_INSECURE=true，HY2 客户端将跳过证书校验（仅用于明确选择的自签证书）。", file=sys.stderr)
+
+
+def protocol_password(env: Dict[str, str], protocol: str, uuid: str = "") -> str:
+    """Keep credentials stable across apply/update; reset follows the node identity."""
+    key = {"hysteria2": "HY2_PASSWORD", "ss": "SHADOWSOCKS_PASSWORD",
+           "socks5": "PROXY_PASSWORD", "http": "PROXY_PASSWORD"}[protocol]
+    if env.get(key):
+        return env[key]
+    identity = uuid or read_vless_uuid(env)
+    scope = "proxy" if protocol in {"http", "socks5"} else protocol
+    return hmac.new(identity.encode(), f"surelay/{scope}/v1".encode(), hashlib.sha256).hexdigest()
+
+
+def build_protocol_inbound(endpoint: Dict[str, Any], env: Dict[str, str], uuid: str) -> Dict[str, Any]:
+    protocol = endpoint["type"]
+    inbound = {"type": {"socks5": "socks", "ss": "shadowsocks"}.get(protocol, protocol),
+               "tag": f"{protocol}-direct", "listen": "::" if as_bool(env, "ENABLE_IPV6_LISTEN") else "0.0.0.0",
+               "listen_port": endpoint["port"]}
+    password = protocol_password(env, protocol, uuid)
+    if protocol == "ss":
+        inbound.update(method=env["SHADOWSOCKS_METHOD"], password=password)
+        if endpoint["networks"] == ["tcp"]:
+            inbound["network"] = "tcp"
+    elif protocol == "hysteria2":
+        inbound["users"] = [{"name": "surelay", "password": password}]
+        inbound["tls"] = {"enabled": True, "server_name": env["HY2_SERVER_NAME"],
+                          "alpn": ["h3"], "certificate_path": env["HY2_CERT_PATH"], "key_path": env["HY2_KEY_PATH"]}
+    else:
+        inbound["users"] = [{"username": env["PROXY_USERNAME"], "password": password}]
+    return inbound
 
 
 def iter_csv_lines(path: Path) -> Iterable[str]:
@@ -773,6 +876,12 @@ def load_rows(env: Dict[str, str], base: Path, allow_empty: bool = True) -> List
     direct_port = as_port(env, "DIRECT_PORT")
     used_tags: set[str] = set()
     used_ports: set[int] = {direct_port}
+    used_ports.update(endpoint["port"] for endpoint in protocol_endpoints(env))
+    used_ports.add(as_port(env, "SSH_PORT"))
+    if env.get("ENABLE_SUBSCRIPTION_SERVER") == "true":
+        used_ports.add(as_port(env, "SUBSCRIPTION_LISTEN_PORT"))
+    if custom_domain_enabled(env):
+        used_ports.add(as_port(env, "NGINX_FALLBACK_PORT"))
     rows = load_home_rows(env, base, used_tags, used_ports, allow_empty=True)
     rows.extend(load_upstream_rows(env, base, used_tags, used_ports))
     if not rows and not allow_empty:
@@ -896,6 +1005,7 @@ def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, pri
     inbounds = [build_vless_reality_inbound(direct_inbound_tag, direct_port, uuid, private_key, short_id, env)]
     for row in rows:
         inbounds.append(build_vless_reality_inbound(f"vless-{row['tag']}", row["listen_port"], uuid, private_key, short_id, env))
+    inbounds.extend(build_protocol_inbound(endpoint, env, uuid) for endpoint in protocol_endpoints(env))
 
     outbounds: List[Dict[str, Any]] = [{"type": "direct", "tag": "direct"}]
     for row in rows:
@@ -907,6 +1017,8 @@ def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, pri
     ]
     for row in rows:
         route_rules.append({"inbound": f"vless-{row['tag']}", "action": "route", "outbound": f"out-{row['tag']}"})
+    for endpoint in protocol_endpoints(env):
+        route_rules.append({"inbound": f"{endpoint['type']}-direct", "action": "route", "outbound": "direct"})
 
     return {
         "log": {"level": "info", "timestamp": True},
@@ -946,7 +1058,16 @@ def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, pri
 def port_list(env: Dict[str, str], rows: List[Dict[str, Any]]) -> List[int]:
     ports = [as_port(env, "DIRECT_PORT")]
     ports.extend(int(r["listen_port"]) for r in rows)
+    ports.extend(endpoint["port"] for endpoint in protocol_endpoints(env))
     return sorted(set(ports))
+
+
+def transport_ports(env: Dict[str, str], rows: List[Dict[str, Any]]) -> List[Tuple[int, str]]:
+    ports = {(as_port(env, "DIRECT_PORT"), "tcp")}
+    ports.update((int(row["listen_port"]), "tcp") for row in rows)
+    for endpoint in protocol_endpoints(env):
+        ports.update((endpoint["port"], network) for network in endpoint["networks"])
+    return sorted(ports)
 
 
 def node_list(env: Dict[str, str], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -962,19 +1083,22 @@ def node_list(env: Dict[str, str], rows: List[Dict[str, Any]]) -> List[Dict[str,
                 "home_tag": row["tag"],
             }
         )
+    for endpoint in protocol_endpoints(env):
+        nodes.append({"name": f"{direct_name}-{endpoint['type'].upper()}", "port": endpoint["port"],
+                      "kind": "direct", "type": endpoint["type"]})
     return nodes
 
 
 def print_summary(env: Dict[str, str], rows: List[Dict[str, Any]]) -> None:
     print("配置检查通过。")
-    print("入站协议：VLESS + Reality")
+    print("入站协议：VLESS + Reality" + "".join(f"、{item['type'].upper()}" for item in protocol_endpoints(env)))
     print(f"代理 IP 版本：{env['PROXY_IP_VERSION']}（DNS strategy: {dns_strategy(env)}）")
     print(f"直连出口：direct，端口：{env['DIRECT_PORT']}")
     print(f"Reality server_name：{env['REALITY_SERVER_NAME']}")
     print(f"Reality handshake：{env['REALITY_HANDSHAKE_SERVER']}:{env['REALITY_HANDSHAKE_PORT']}")
     if custom_domain_enabled(env):
         print(f"自有域名：{env['CUSTOM_DOMAIN']}（Cloudflare zone: {env['CLOUDFLARE_ZONE_NAME']}；DNS 灰云；Nginx fallback {env['NGINX_FALLBACK_HOST']}:{env['NGINX_FALLBACK_PORT']}）")
-    print("将开放端口：" + ", ".join(str(p) for p in port_list(env, rows)))
+    print("将开放端口：" + ", ".join(f"{port}/{network}" for port, network in transport_ports(env, rows)))
     home_rows = [row for row in rows if row.get("source") == "home"]
     upstream_rows = [row for row in rows if row.get("source") == "upstream"]
     if home_rows:
@@ -986,7 +1110,7 @@ def print_summary(env: Dict[str, str], rows: List[Dict[str, Any]]) -> None:
         for row in upstream_rows:
             print(f"  {row['tag']} {row['listen_port']} -> {row['type']}://{row['server']}:{row['server_port']}")
     if not home_rows and not upstream_rows:
-        print(f"没有家宽代理或上游节点行；仅生成 {env['DIRECT_PORT']} 入口。")
+        print("没有家宽代理或上游节点行；各入口均使用 direct 出口。")
 
 
 def main() -> int:
@@ -995,6 +1119,7 @@ def main() -> int:
     ap.add_argument("--check-only", action="store_true")
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--print-ports", action="store_true")
+    ap.add_argument("--print-transport-ports", action="store_true")
     ap.add_argument("--print-nodes-json", action="store_true")
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--quiet", action="store_true", help="only validate/write without printing the human summary")
@@ -1009,6 +1134,11 @@ def main() -> int:
     if args.print_ports:
         for p in port_list(env, rows):
             print(p)
+        return 0
+
+    if args.print_transport_ports:
+        for port, network in transport_ports(env, rows):
+            print(f"{port}/{network}")
         return 0
 
     if args.print_nodes_json:
@@ -1026,7 +1156,7 @@ def main() -> int:
 
     if args.write:
         if os.environ.get("RRB_DRY_RUN") == "true":
-            print("DRY-RUN: 将生成 VLESS+Reality sing-box 配置，但不会写入文件。")
+            print("DRY-RUN: 将生成 sing-box 多协议配置，但不会写入文件。")
             print_summary(env, rows)
             return 0
         uuid = read_vless_uuid(env)
@@ -1045,7 +1175,7 @@ def main() -> int:
             print_summary(env, rows)
         return 0
 
-    ap.error("请指定 --check-only、--write、--print-ports、--print-nodes-json 或 --summary")
+    ap.error("请指定 --check-only、--write、--print-ports、--print-transport-ports、--print-nodes-json 或 --summary")
     return 2
 
 

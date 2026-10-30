@@ -96,19 +96,27 @@ else
   info "sing-box 服务运行中。"
 fi
 
-mapfile -t PORTS < <(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-ports)
+transport_output="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-transport-ports)" || die "代理入口端口解析失败。"
+mapfile -t TRANSPORT_PORTS <<<"$transport_output"
+PORTS=()
+for transport in "${TRANSPORT_PORTS[@]}"; do
+  [[ "$transport" =~ ^[0-9]+/(tcp|udp)$ ]] || die "无效代理监听：$transport"
+  [[ "$transport" != */tcp ]] || PORTS+=("${transport%/*}")
+done
 if is_dry_run; then
-  info "DRY-RUN: 实际运行后应监听端口：${PORTS[*]}"
+  info "DRY-RUN: 实际运行后应监听端口：${TRANSPORT_PORTS[*]}"
 else
-  info "检查监听端口：${PORTS[*]}"
+  info "检查监听端口：${TRANSPORT_PORTS[*]}"
 fi
 if ! is_dry_run; then
-  for port in "${PORTS[@]}"; do
-    if wait_for_port_listener "$port" 15; then
-      info "端口监听正常：$port"
+  for transport in "${TRANSPORT_PORTS[@]}"; do
+    port="${transport%/*}"
+    network="${transport##*/}"
+    if wait_for_port_listener "$port" 15 "$network"; then
+      info "端口监听正常：$transport"
     else
       diagnose_singbox_listeners
-      die "未发现监听端口：$port；已等待 15 秒，详见上方 sing-box 状态和日志。"
+      die "未发现监听端口：$transport；已等待 15 秒，详见上方 sing-box 状态和日志。"
     fi
   done
 fi

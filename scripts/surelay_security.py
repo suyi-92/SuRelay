@@ -11,14 +11,14 @@ import socket
 import tempfile
 from pathlib import Path
 
-from surelay_core import Error, Snapshot, atomic, port, run
+from surelay_core import Error, GEN, Snapshot, atomic, port, run
 from surelay_terminal import notice
 
 SSH_BEGIN = "# BEGIN SuRelay SSH settings"
 SSH_END = "# END SuRelay SSH settings"
 
 
-def ssh_block(text, values):
+def ssh_block(text, values, *, preserve_position=False):
     pattern = re.compile(r"(?ms)^# BEGIN SuRelay SSH settings\n(.*?)^# END SuRelay SSH settings\n?")
     matches = list(pattern.finditer(text))
     if len(matches) > 1 or (SSH_BEGIN in text and not matches):
@@ -35,7 +35,13 @@ def ssh_block(text, values):
     lines = [SSH_BEGIN]
     for key, entries in settings.items():
         lines.extend(f"{key} {entry}" for entry in entries)
-    return "\n".join([*lines, SSH_END, ""]) + body
+    block = "\n".join([*lines, SSH_END, ""])
+    if preserve_position and matches:
+        # Port changes must not promote older authentication overrides above
+        # the final bootstrap policy which was just validated by ssh-final.
+        match = matches[0]
+        return text[:match.start()] + block + text[match.end():]
+    return block + body
 
 
 def ssh_files(path, seen=None):
@@ -185,19 +191,28 @@ class Security:
         print("SSH 策略已应用。开启密码认证不会创建密码或解锁 root；重跑完整加固会再次关闭密码认证。")
 
     def proxy_ports(self):
+        return {value for value, _network in self.proxy_transports()}
+
+    def proxy_transports(self):
         # Security-only installs deliberately have no proxy input files or services.
         if self.m.env.get("SURELAY_SECURITY_ONLY") == "true":
             return set()
-        ports = {int(self.m.env["DIRECT_PORT"]),
-                 *(int(row["listen_port"]) for row in self.m.rows())}
-        if self.m.env.get("SUBSCRIPTION_LISTEN_PORT"):
-            ports.add(int(self.m.env["SUBSCRIPTION_LISTEN_PORT"]))
+        ports = set(GEN.transport_ports(self.m.env, self.m.rows()))
+        if self.m.env.get("ENABLE_SUBSCRIPTION_SERVER") == "true" and self.m.env.get("SUBSCRIPTION_LISTEN_PORT"):
+            ports.add((int(self.m.env["SUBSCRIPTION_LISTEN_PORT"]), "tcp"))
+        if self.m.env.get("ENABLE_CUSTOM_DOMAIN") == "true":
+            ports.add((int(self.m.env["NGINX_FALLBACK_PORT"]), "tcp"))
         return ports
 
-    def change_ssh_port(self, new, confirm_login):
+    def change_ssh_port(self, new, confirm_login, *, stage=False):
         new = port(new)
         current = self.effective()
         old_ports = [port(line.split()[1]) for line in current.splitlines() if line.startswith("port ")]
+        socket_active = not self.m.alpine() and self.m.active("ssh.socket")
+        if socket_active:
+            # Socket activation can listen on a port absent from sshd -T.
+            # Read its own metadata before any file/rule mutation or restart.
+            old_ports = list(dict.fromkeys([*old_ports, *self.socket_listener_ports()]))
         if new in old_ports and len(old_ports) == 1:
             configured = str(self.m.env["SSH_PORT"])
             if configured == new:
@@ -217,7 +232,6 @@ class Security:
                 match = re.match(r"^\s*ListenAddress\s+(\S+)", line, re.I)
                 if match and (re.search(r"\]:[0-9]+$", match[1]) or re.match(r"[^:]+:[0-9]+$", match[1])):
                     raise Error("ListenAddress 固定了独立端口，请先整理该配置再迁移 SSH 端口。")
-        socket_active = not self.m.alpine() and self.m.active("ssh.socket")
         paths = [*files, self.m.config, self.socket_conf,
                  Path("/etc/ufw/user.rules"), Path("/etc/ufw/user6.rules"),
                  Path("/etc/fail2ban/jail.d/zz-surelay.local")]
@@ -235,13 +249,16 @@ class Security:
                     lines.append(line)
                 atomic(path, "".join(lines), path.stat().st_mode & 0o777)
             both = list(dict.fromkeys([*old_ports, new]))
+            if self.m.env.get("ENABLE_UFW", "true") == "true" and shutil.which("ufw"):
+                run(["ufw", "allow", f"{new}/tcp", "comment", "surelay SSH current port"])
             self.set_ssh_ports(both, socket_active)
             effective_ports = {line.split()[1] for line in self.effective().splitlines() if line.startswith("port ")}
             if set(both) != effective_ports:
                 raise Error("存在额外端口配置，已停止迁移。")
-            if shutil.which("ufw"):
-                run(["ufw", "allow", f"{new}/tcp", "comment", "surelay SSH current port"])
             self.verify_ssh_listener(new)
+            if stage:
+                print(f"SSH 验证端口 {new} 已监听；旧端口保留到新窗口公钥登录确认后。")
+                return
             confirm_login(new)
             self.set_ssh_ports([new], socket_active)
             self.verify_ssh_listener(new)
@@ -260,7 +277,7 @@ class Security:
             self.reload_ssh()
             if shutil.which("fail2ban-client"):
                 run(["fail2ban-client", "reload"], check=False)
-            if shutil.which("ufw"):
+            if self.m.env.get("ENABLE_UFW", "true") == "true" and shutil.which("ufw"):
                 run(["ufw", "reload"], check=False)
             notice("SSH 迁移未完成，已恢复原配置。")
             raise
@@ -274,7 +291,7 @@ class Security:
                  Path("/etc/fail2ban/jail.d/zz-surelay.local")]
         backup = Snapshot(paths)
         try:
-            if shutil.which("ufw"):
+            if self.m.env.get("ENABLE_UFW", "true") == "true" and shutil.which("ufw"):
                 run(["ufw", "allow", f"{new}/tcp", "comment", "surelay SSH current port"])
             self.m.update({"SSH_PORT": new})
             if (self.m.env["ENABLE_FAIL2BAN"] == "true"
@@ -286,7 +303,7 @@ class Security:
             self.m.reload()
             if shutil.which("fail2ban-client"):
                 run(["fail2ban-client", "reload"], check=False)
-            if shutil.which("ufw"):
+            if self.m.env.get("ENABLE_UFW", "true") == "true" and shutil.which("ufw"):
                 run(["ufw", "reload"], check=False)
             notice("SSH 端口配置同步未完成，已恢复原配置。")
             raise
@@ -294,7 +311,7 @@ class Security:
         print(f"SSH 已在 {new} 监听；已同步 SuRelay 配置和安全规则。")
 
     def _cleanup_owned_ssh_rules(self, old_ports, new):
-        if not shutil.which("ufw"):
+        if self.m.env.get("ENABLE_UFW", "true") != "true" or not shutil.which("ufw"):
             return
         status = run(["ufw", "status", "numbered"], capture=True)
         numbers = []
@@ -307,8 +324,22 @@ class Security:
         for number in sorted(numbers, reverse=True):
             run(["ufw", "--force", "delete", str(number)])
 
+    def socket_listener_ports(self):
+        value = run(["systemctl", "show", "ssh.socket", "--property=Listen", "--value"], capture=True)
+        pattern = r"(\S+)\s+\(Stream\)"
+        addresses = re.findall(pattern, value)
+        if not addresses or re.sub(pattern, "", value).strip():
+            raise Error("无法可靠解析 ssh.socket 当前监听，未修改 SSH。请先检查 systemctl show ssh.socket --property=Listen。")
+        result = []
+        for address in addresses:
+            match = re.fullmatch(r"(?:\[[0-9A-Fa-f:.%]+\]:|[0-9.]+:|\*:)?([0-9]{1,5})", address)
+            if not match:
+                raise Error("ssh.socket 使用了未支持的监听地址，未修改 SSH。请先整理 socket 配置。")
+            result.append(port(match[1]))
+        return list(dict.fromkeys(result))
+
     def set_ssh_ports(self, ports, socket_active):
-        atomic(self.ssh_config, ssh_block(self.ssh_config.read_text(), {"Port": ports}), 0o600)
+        atomic(self.ssh_config, ssh_block(self.ssh_config.read_text(), {"Port": ports}, preserve_position=True), 0o600)
         run([self.sshd(), "-t"], capture=True)
         if socket_active:
             atomic(self.socket_conf, "[Socket]\nListenStream=\n" + "".join(f"ListenStream={p}\n" for p in ports), 0o644)
@@ -334,16 +365,18 @@ class Security:
     def edit_rule(self, rule=None, index=None):
         path, rules = self.custom_rules()
         old = rules[index] if index is not None else None
-        required = {int(self.m.env["SSH_PORT"]), *self.proxy_ports()}
+        required = {(int(self.m.env["SSH_PORT"]), "tcp"), *self.proxy_transports()}
         connection = os.environ.get("SSH_CONNECTION", "").split()
         if len(connection) == 4:
-            required.add(int(port(connection[3])))
+            required.add((int(port(connection[3])), "tcp"))
         for selected in (rule, old):
-            if not selected or selected["protocol"] == "udp":
+            if not selected:
                 continue
             numbers = [int(n) for n in selected["port"].split(":")]
-            if any(numbers[0] <= value <= numbers[-1] for value in required):
-                raise Error("规则覆盖 SSH、代理或订阅所需 TCP 端口，请通过对应设置调整。")
+            if any(numbers[0] <= value <= numbers[-1] and selected["protocol"] in {"both", network}
+                   for value, network in required):
+                transport = "TCP/UDP" if selected["protocol"] == "both" else selected["protocol"].upper()
+                raise Error(f"规则覆盖 SSH、代理或订阅所需 {transport} 端口，请通过对应设置调整。")
         if rule:
             if any(r["note"] == rule["note"] for i, r in enumerate(rules) if i != index):
                 raise Error("请使用未重复的自定义规则备注。")

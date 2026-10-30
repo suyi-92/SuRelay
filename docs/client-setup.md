@@ -1,21 +1,21 @@
 # 客户端配置与测试
 
-默认部署后启用订阅服务，不主动生成 `/root` 下的节点文件。默认订阅配置：
+默认部署后启用订阅服务，不主动生成 `/root` 下的节点文件。新装会生成高位随机端口，以下 `53001` 仅为示例，请使用实际 `config.env` 和安装输出。已有配置中的端口会保留。订阅配置示例：
 
 ```bash
 ENABLE_SUBSCRIPTION_SERVER="true"
 SUBSCRIPTION_PORT=""
-SUBSCRIPTION_INTERNAL_PORT="51040"
+SUBSCRIPTION_INTERNAL_PORT="53001"
 SUBSCRIPTION_TARGET="ClashMeta"
 SUBSCRIPTION_BASE_URL=""
 ```
 
-未启用自有域名时，`SUBSCRIPTION_PORT` 留空会自动回退为 `SUBSCRIPTION_INTERNAL_PORT`，也就是默认 `51040`。
+未启用自有域名时，`SUBSCRIPTION_PORT` 留空会自动回退为 `SUBSCRIPTION_INTERNAL_PORT`，本例为 `53001`。
 
 订阅地址：
 
 ```text
-http://服务器IP:51040/sub/<VLESS_UUID>?target=ClashMeta
+http://服务器IP:53001/sub/<VLESS_UUID>?target=ClashMeta
 ```
 
 `<VLESS_UUID>` 来自 `/etc/surelay/vless-uuid.txt`。内置订阅服务是 HTTP；如需 HTTPS，请在外层接入带证书的反向代理，并把 `SUBSCRIPTION_BASE_URL` 设置为反代外部地址。
@@ -27,10 +27,10 @@ ENABLE_CUSTOM_DOMAIN="true"
 CUSTOM_DOMAIN="edge.example.com"
 ```
 
-主节点的 `server` 和 Reality `servername` 使用 `CUSTOM_DOMAIN`；配置 IPv6 并开启监听时，还会为每个出口增加 `-IPv6` 字面量备用节点，其 SNI 保持相同。订阅服务只监听本机，外部订阅地址为：
+主节点的 `server` 和 Reality `servername` 使用 `CUSTOM_DOMAIN`；公网 HTTPS 订阅与静态网页共用 `DIRECT_PORT`，新装高位端口须保留在 URL 中，只有 443 可以省略。配置 IPv6 并开启监听时，还会为每个出口增加 `-IPv6` 字面量备用节点，其 SNI 保持相同。订阅服务只监听本机，外部订阅地址为：
 
 ```text
-https://edge.example.com/sub/<VLESS_UUID>?target=ClashMeta
+https://edge.example.com:<DIRECT_PORT>/sub/<VLESS_UUID>?target=ClashMeta
 ```
 
 自有域名模式下 `SUBSCRIPTION_PORT` 默认留空，只显示上面的域名 HTTPS 订阅。显式填写 `SUBSCRIPTION_PORT` 会额外开放 `http://SERVER_IP:SUBSCRIPTION_PORT/sub/...`，简洁输出仍只显示首选域名订阅。
@@ -44,7 +44,7 @@ sudo bash bootstrap.sh --phase output-nodes
 /root/surelay-vless.txt
 ```
 
-这些文件包含 VLESS UUID、Reality public key、short-id 等节点信息，权限为 600，不要公开。
+`surelay-vless.txt` 保留兼容文件名，但内容包含所有已启用协议的分享链接；Mihomo YAML 同时包含这些入口。文件包含 VLESS UUID、Reality public key、short-id 及协议密码等节点信息，权限为 600，不要公开。
 
 如果机器最初只配置了 IPv4，后来只想补出一套 IPv6 字面量本地节点，可以运行：
 
@@ -60,6 +60,10 @@ sudo bash install.sh -6 2001:db8::10
 `SUBSCRIPTION_TARGET` 当前只生成 ClashMeta/Mihomo YAML；旧配置里的其它 target 会警告并按 ClashMeta 处理，旧 URL target 不再兼容。
 
 当节点包含 IPv6 地址，或 `PROXY_IP_VERSION` 为 `ipv6`/`dual` 时，生成的 Mihomo 配置启用 `ipv6: true`。客户端 IPv6 入口不依赖 VPS 出站是否优先 IPv4。CF 灰云域名不能绕过被封的 IPv4，客户端必须具备可用 IPv6；必要时选择 `-IPv6` 节点，或通过 `curl -6` 下载域名订阅。参见 [README](../README.md#ipv6cf-域名与-ipv4-不通)。
+
+## 多协议客户端
+
+VLESS Reality 默认启用，可另外开启 HY2、SOCKS5、Shadowsocks 和 HTTP；入口配置、证书、UDP 与客户端兼容说明见[协议配置](protocols.md)。新增入口默认直连 VPS，不改变原有各 VLESS 中转入口对应的出口。
 
 ## Clash/Mihomo 节点字段
 
@@ -84,10 +88,9 @@ alpn:
   - http/1.1
 ```
 
-443 节点：
+主入口节点（端口以 `DIRECT_PORT` 为准）：
 
-- `MODE_443=direct`：使用 `SERVER_ALIAS`
-- `MODE_443=smart`：使用 `SERVER_ALIAS`
+- 使用 `SERVER_ALIAS`；`MODE_443` 保留兼容字段，当前按 `direct` 处理
 - 启用自有域名时：节点 server 使用 `CUSTOM_DOMAIN`
 
 CSV 行节点：
@@ -96,8 +99,10 @@ CSV 行节点：
 
 ## Windows PowerShell 测端口
 
+将示例端口改为实际 TCP 入口端口；`Test-NetConnection` 不能验证 HY2 的 UDP。
+
 ```powershell
-Test-NetConnection 服务器IP -Port 443
+Test-NetConnection 服务器IP -Port 53000
 Test-NetConnection 服务器IP -Port 51043
 ```
 

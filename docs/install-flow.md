@@ -4,6 +4,8 @@ Alpine 3.19 先按 [Alpine 部署说明](alpine.md) 安装 Bash，并保持 `INS
 
 ## 1. 准备配置
 
+一键安装使用可返回的分组向导，默认开启 CF 域名与静态网页，并为 SSH、公网主入口、订阅服务和 Nginx 内部站点生成互不冲突的高位随机端口。已有 `config.env` 保留原配置，不重新随机。以下手动分阶段流程需要自行填写这些服务的实际端口；NAT 主机应使用服务商允许的本机映射端口。
+
 如果只需要服务器安全防护，可跳过节点配置并使用：
 
 ```bash
@@ -25,7 +27,7 @@ cp upstream-nodes.example.txt upstream-nodes.txt
 nano upstream-nodes.txt
 ```
 
-`443` 不写入 CSV。CSV 只管理 `51043` 起的出口端口。推荐字段顺序为 `tag,type,server,server_port,username,password,network,listen_port`；`listen_port` 可留空自动分配，旧字段顺序仍兼容。
+`DIRECT_PORT` 不写入 CSV。CSV 只管理 `HOME_PORT_START` 起的 VLESS 中转入口端口，并避开 SSH、订阅、Nginx 和其他已启用协议占用的端口。推荐字段顺序为 `tag,type,server,server_port,username,password,network,listen_port`；`listen_port` 可留空自动分配，旧字段顺序仍兼容。
 
 `upstream-nodes.txt` 是可选文件，用来接入上游节点分享链接。当前只支持 `vless://...security=none...` 和 `vless://...security=reality...`。推荐写 `tag,node_url,listen_port`，也可逐行只写节点链接让脚本自动分配端口；旧 `tag,listen_port,node_url` 仍兼容。
 
@@ -39,10 +41,10 @@ CUSTOM_DOMAIN="edge.example.com"
 CLOUDFLARE_ZONE_NAME="example.com"
 LE_EMAIL="admin@example.com"
 CLOUDFLARE_API_TOKEN="Cloudflare DNS API Token"
-NGINX_FALLBACK_PORT="8443"
+NGINX_FALLBACK_PORT="53002"
 ```
 
-启用前需要先在 Cloudflare 添加/托管 zone，并在域名注册商处把 NS 改成 Cloudflare 分配的 nameserver，等待 zone active。细节见 [`cloudflare-domain-preflight.md`](./cloudflare-domain-preflight.md)。脚本会自动创建或更新 `CUSTOM_DOMAIN` 的 A/AAAA 灰云记录；启用后公网 `443` 仍由 sing-box 监听，普通 TLS fallback 到本机 Nginx `127.0.0.1:8443`。
+启用前需要先在 Cloudflare 添加/托管 zone，并在域名注册商处把 NS 改成 Cloudflare 分配的 nameserver，等待 zone active。细节见 [`cloudflare-domain-preflight.md`](./cloudflare-domain-preflight.md)。脚本会自动创建或更新 `CUSTOM_DOMAIN` 的 A/AAAA 灰云记录；公网 `DIRECT_PORT` 由 sing-box 监听，普通 TLS fallback 到本机 Nginx 的 `NGINX_FALLBACK_PORT`。新装 `DIRECT_PORT` 是高位随机端口，HTTPS 静态页与订阅 URL 需要带此端口；本例内部站点使用 `127.0.0.1:53002`。
 
 ## 2. SSH 初始化与加固
 
@@ -51,10 +53,10 @@ sudo bash bootstrap.sh --phase preflight
 sudo bash bootstrap.sh --phase ssh-phase1
 ```
 
-保留当前 SSH 窗口，另开窗口测试：
+保留当前 SSH 窗口，另开窗口测试。下例 `53000` 需要替换为 `config.env` 中的 `SSH_PORT`，并先确保安全组与 NAT 已放行：
 
 ```powershell
-ssh -p 22 -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@服务器IP
+ssh -p 53000 -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@服务器IP
 ```
 
 确认 `whoami` 为 `root` 后：
@@ -69,7 +71,7 @@ sudo CONFIRM_ROOT_KEY_LOGIN=yes bash bootstrap.sh --phase ssh-final
 sudo bash bootstrap.sh --phase fail2ban
 ```
 
-## 4. sing-box VLESS+Reality
+## 4. sing-box 多协议节点
 
 ```bash
 sudo bash bootstrap.sh --phase singbox
@@ -77,14 +79,12 @@ sudo bash bootstrap.sh --phase singbox
 
 此阶段会：
 
-1. 安装 sing-box。
-2. 复制 `home-proxies.csv` 到 `/etc/surelay/home-proxies.csv`，如果存在也会复制 `upstream-nodes.txt`。
-3. 生成 VLESS UUID、Reality keypair、short-id。
-4. 生成 `/etc/sing-box/config.json`。
-5. 执行 `sing-box check`。
-6. 通过后重启 sing-box。
-7. 如果 `ENABLE_SUBSCRIPTION_SERVER=true`，生成并启动订阅服务；不会默认输出 `/root` 节点文件。
-8. 如果 `ENABLE_CUSTOM_DOMAIN=true`，先准备 Cloudflare 灰云 A/AAAA，再通过 Cloudflare DNS-01 申请证书并配置 Nginx fallback。
+1. 安装 sing-box，并准备或复用 UUID、Reality keypair 与 short-id。
+2. 复制出口文件到 `/etc/surelay`，保留原有中转映射。
+3. 如果 `ENABLE_CUSTOM_DOMAIN=true`，先准备 Cloudflare 灰云 A/AAAA，再申请 DNS-01 证书并配置本机 Nginx。HY2 会在内核校验和启动时读取证书，首次部署也必须先完成这一步。
+4. 按协议开关生成 `/etc/sing-box/config.json`，包含原有 VLESS Reality 及主动启用的 HY2、SOCKS5、SS、HTTP 入口。新增入口默认走 VPS 直连；字段与证书要求见[协议配置](protocols.md)。
+5. 执行 `sing-box check`，通过后重启 sing-box 并验证监听。
+6. 如果 `ENABLE_SUBSCRIPTION_SERVER=true`，生成并启动订阅服务；不会默认输出 `/root` 节点文件。
 
 如需在服务器本地额外生成节点文件，可在部署完成后手动执行：
 
@@ -98,7 +98,7 @@ sudo bash bootstrap.sh --phase output-nodes
 sudo bash bootstrap.sh --phase firewall
 ```
 
-UFW 只放行 SSH、`DIRECT_PORT`、`home-proxies.csv` 和 `upstream-nodes.txt` 中实际使用的 `listen_port`。服务商安全组也要手动放行同样端口。
+UFW 按传输类型放行 SSH、`DIRECT_PORT`、出口文件中的 VLESS 中转入口，以及主动启用的新协议入口。VLESS Reality、SOCKS5 和 HTTP 使用 TCP，HY2 使用 UDP，SS 使用 TCP，且 `CLIENT_UDP=true` 时同时开放 UDP。服务商安全组也要手动放行同样端口和传输类型。
 
 如果 `ENABLE_SUBSCRIPTION_SERVER=true` 且公网直连订阅端口已启用，还会放行 `SUBSCRIPTION_PORT`。启用自有域名且 `SUBSCRIPTION_PORT` 留空时，订阅服务只绑定本机 `SUBSCRIPTION_INTERNAL_PORT` 并由 Nginx fallback 反代，不开放订阅端口。
 

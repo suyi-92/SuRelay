@@ -86,7 +86,7 @@ class DiagnosticsTest(unittest.TestCase):
         manager.env = {"SERVER_IP_IPV4": "", "SERVER_IP_IPV6": "2001:db8::1", "ENABLE_IPV6_LISTEN": "true",
                        "ENABLE_CUSTOM_DOMAIN": "true", "ENABLE_SUBSCRIPTION_SERVER": "true",
                        "SUBSCRIPTION_SERVICE": "surelay-sub", "SUBSCRIPTION_PORT": "", "SUBSCRIPTION_LISTEN_PORT": "51040"}
-        with patch.object(diagnostics.GEN, "port_list", return_value=[443]), \
+        with patch.object(diagnostics.GEN, "transport_ports", return_value=[(443, "tcp")]), \
              patch.object(diagnostics, "run", return_value=subprocess.CompletedProcess([], 0)), \
              patch.object(diagnostics.socket, "create_connection", return_value=MagicMock()) as connect, \
              contextlib.redirect_stdout(io.StringIO()) as output:

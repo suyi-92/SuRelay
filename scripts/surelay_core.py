@@ -2,11 +2,13 @@
 from __future__ import annotations
 from contextlib import nullcontext
 import csv
+import errno
 import importlib.util
 import io
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -111,6 +113,65 @@ def port(value):
     if not re.fullmatch(r"[0-9]{1,5}", str(value)) or not 1 <= int(value) <= 65535:
         raise Error("端口必须为 1–65535。")
     return str(int(value))
+
+
+def random_high_ports(count, reserved=()):
+    """Choose distinct free high ports once; callers persist the resulting values."""
+    if not isinstance(count, int) or not 0 <= count <= 16384:
+        raise Error("随机端口数量超出范围。")
+    if count == 0:
+        return []
+    excluded = {int(value) for value in reserved if str(value).isdigit()}
+    candidates = list(set(range(49152, 65536)) - excluded)
+    secrets.SystemRandom().shuffle(candidates)
+    selected = []
+    for candidate in candidates:
+        sockets = []
+        try:
+            # Reserve both transports during the probe, including dual-stack
+            # wildcard listeners. No SO_REUSEADDR: occupied UDP ports must fail.
+            for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+                if family == socket.AF_INET6 and not socket.has_ipv6:
+                    continue
+                for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                    try:
+                        sock = socket.socket(family, kind)
+                        sockets.append(sock)
+                        if family == socket.AF_INET6:
+                            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                        sock.bind((address, candidate))
+                    except OSError as exc:
+                        if family == socket.AF_INET6 and exc.errno in {
+                                errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.ENOPROTOOPT,
+                                errno.EADDRNOTAVAIL, errno.ENODEV}:
+                            break
+                        raise
+        except OSError:
+            continue
+        finally:
+            for sock in sockets:
+                sock.close()
+        selected.append(candidate)
+        if len(selected) == count:
+            return selected
+    raise Error("找不到足够的空闲高位端口，请手动指定。")
+
+
+def udp_listener(port, family=None):
+    """Read kernel listener state; connecting a UDP socket cannot verify a server."""
+    flag = "-6" if family == socket.AF_INET6 else "-4" if family == socket.AF_INET else None
+    args = ["ss", "-H", "-lun"] + ([flag] if flag else [])
+    result = run(args, capture=True, check=False)
+    if result.returncode:
+        return False
+    for line in (result.stdout or "").splitlines():
+        columns = line.split()
+        if len(columns) >= 5 and columns[4].rsplit(":", 1)[-1] == str(port):
+            return True
+        # Some ss versions omit the netid column without -a.
+        if len(columns) >= 4 and columns[3].rsplit(":", 1)[-1] == str(port):
+            return True
+    return False
 
 
 def csv_text(fields, rows):
@@ -237,17 +298,21 @@ class Manager:
             families.append((socket.AF_INET, "127.0.0.1"))
         if self.env["ENABLE_IPV6_LISTEN"] == "true":
             families.append((socket.AF_INET6, "::1"))
-        for p in GEN.port_list(self.env, rows):
+        for p, network in GEN.transport_ports(self.env, rows):
             for family, host in families:
                 for attempt in range(15):
                     try:
-                        with socket.socket(family, socket.SOCK_STREAM) as sock:
-                            sock.settimeout(1)
-                            sock.connect((host, p))
+                        if network == "udp":
+                            if not udp_listener(p, family):
+                                raise OSError("UDP listener missing")
+                        else:
+                            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                                sock.settimeout(1)
+                                sock.connect((host, p))
                         break
                     except OSError:
                         if attempt == 14:
-                            raise Error(f"本机 {host}:{p} 监听验证失败。")
+                            raise Error(f"本机 {host}:{p}/{network} 监听验证失败。")
                         time.sleep(1)
 
     def apply(self, updates=None, files=None, domain=False):
@@ -271,6 +336,11 @@ class Manager:
             # Normalize after file edits too, then reload the configuration used by every phase.
             self.update(updates)
             rows = self.check()
+            if self.env.get("ENABLE_HY2") == "true" and self.env["ENABLE_CUSTOM_DOMAIN"] == "true":
+                cert = Path(self.env["HY2_CERT_PATH"])
+                key = Path(self.env["HY2_KEY_PATH"])
+                if domain or not (cert.is_file() and key.is_file()):
+                    self.phase("custom-domain", RRB_SKIP_PACKAGE_INSTALL="false", RRB_CERTIFICATES_ONLY="true")
             config = GEN.build_config(self.env, rows, GEN.read_vless_uuid(self.env),
                                       GEN.read_reality_private_key(self.env), GEN.read_reality_short_id(self.env))
             target = self.path("SINGBOX_CONFIG_PATH")

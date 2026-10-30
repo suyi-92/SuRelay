@@ -125,7 +125,7 @@ if [[ "$ENABLE_UFW" == "true" && -f /etc/default/ufw ]]; then
   fi
 fi
 
-info "检查更新后的配置，并先同步 UFW IPv4/IPv6 TCP 规则。"
+info "检查更新后的配置，并先同步 UFW IPv4/IPv6 TCP/UDP 规则。"
 python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --check-only --quiet
 bash "$SCRIPT_DIR/09-apply-firewall.sh"
 
@@ -133,15 +133,25 @@ info "重建并重启现有 sing-box；不会重新生成 VLESS/Reality 身份�
 python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --write --quiet
 bash "$SCRIPT_DIR/10-validate.sh" --singbox-only --skip-proxy-tests --restart-singbox
 
-mapfile -t PORTS < <(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-ports)
-for port in "${PORTS[@]}"; do
-  if ! wait_for_local_tcp_family 6 "$port" 15; then
-    diagnose_singbox_listeners
-    die "tcp/$port 无法通过 ::1 建立 IPv6 TCP 连接；本地节点尚不可用。"
-  fi
-  if [[ -n "$SERVER_IP_IPV4" ]] && ! wait_for_local_tcp_family 4 "$port" 15; then
-    diagnose_singbox_listeners
-    die "tcp/$port 无法通过 127.0.0.1 建立 IPv4 TCP 连接；已停止交付以保护原有 v4 节点。"
+transport_output="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-transport-ports)" || die "代理入口端口解析失败。"
+mapfile -t TRANSPORT_PORTS <<<"$transport_output"
+for transport in "${TRANSPORT_PORTS[@]}"; do
+  [[ "$transport" =~ ^[0-9]+/(tcp|udp)$ ]] || die "无效代理监听：$transport"
+  port="${transport%/*}"
+  if [[ "$transport" == */tcp ]]; then
+    if ! wait_for_local_tcp_family 6 "$port" 15; then
+      diagnose_singbox_listeners
+      die "tcp/$port 无法通过 ::1 建立 IPv6 TCP 连接；本地节点尚不可用。"
+    fi
+    if [[ -n "$SERVER_IP_IPV4" ]] && ! wait_for_local_tcp_family 4 "$port" 15; then
+      diagnose_singbox_listeners
+      die "tcp/$port 无法通过 127.0.0.1 建立 IPv4 TCP 连接；已停止交付以保护原有 v4 节点。"
+    fi
+  else
+    wait_for_local_udp_family 6 "$port" 15 || { diagnose_singbox_listeners; die "未发现 IPv6 UDP 监听：$transport"; }
+    if [[ -n "$SERVER_IP_IPV4" ]]; then
+      wait_for_local_udp_family 4 "$port" 15 || { diagnose_singbox_listeners; die "未发现 IPv4 UDP 监听：$transport"; }
+    fi
   fi
 done
 

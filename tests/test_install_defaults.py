@@ -43,31 +43,20 @@ class InstallFlowTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual({name: (root / name).read_bytes() for name in originals}, originals)
 
-    def test_first_install_only_collects_basics_cloudflare_and_public_keys(self):
-        for ipv6 in ("", "2001:db8::10"):
-            with self.subTest(ipv6=ipv6), tempfile.TemporaryDirectory() as temporary:
-                self.check_first_install(Path(temporary), ipv6)
-
-    def test_first_install_defaults_to_current_ssh_connection_port(self):
+    def test_first_install_routes_detected_address_to_grouped_wizard(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result = self.run_bash('''
 public_ipv4() { printf '192.0.2.10'; }
-read_default() {
-  case "$1" in
-    SERVER_ALIAS) printf 'relay' ;;
-    SERVER_IP_IPv4) printf '192.0.2.10' ;;
-    *) printf '%s' "$2" ;;
-  esac
-}
-read_bool_value() { printf false; }
-collect_admin_pubkeys() { printf 'ssh-ed25519 AAAA test\n' >"$1"; }
-configure_install "$1"
-source "$1/config.env"
-printf '%s\n' "$SSH_PORT" >"$1/ssh-port"
-''', root, SSH_CONNECTION="112.193.179.58 47504 217.217.78.142 50396")
+python3() { printf '%s\\n' "$@" >"$TEST_ROOT/wizard-args"; }
+configure_install "$TEST_ROOT"
+''', root, TEST_ROOT=str(root))
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / "ssh-port").read_text().strip(), "50396")
+            self.assertEqual((root / "wizard-args").read_text().splitlines(), [
+                str(root / "scripts/surelay_install.py"), "--project-dir", str(root), "--ipv4", "192.0.2.10",
+            ])
+            self.assertTrue((root / "home-proxies.csv").exists())
+            self.assertTrue((root / "upstream-nodes.txt").exists())
 
     def test_install_flow_preserves_configured_ssh_port_when_session_differs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -101,40 +90,6 @@ run_install_flow "$1"
                 "24087",
             )
             self.assertIn("[Y/n]", prompt)
-
-    def check_first_install(self, root, ipv6):
-        result = self.run_bash('''
-prompt_log="$1/prompts"
-public_ipv4() { printf '192.0.2.10'; }
-public_ipv6() { printf 'Unexpected IPv6 probe' >&2; exit 99; }
-read_default() {
-  printf '%s\n' "$1" >>"$prompt_log"
-  case "$1" in
-    SERVER_ALIAS) printf 'relay' ;;
-    CUSTOM_DOMAIN) printf 'edge.example.com' ;;
-    LE_EMAIL) printf 'admin@example.com' ;;
-    *) printf '%s' "$2" ;;
-  esac
-}
-read_bool_value() { printf '%s\n' "$1" >>"$prompt_log"; printf true; }
-read_secret_default() { printf '%s\n' "$1" >>"$prompt_log"; printf fake-cf-token; }
-collect_admin_pubkeys() { printf 'ADMIN_PUBKEY\n' >>"$prompt_log"; printf 'ssh-ed25519 AAAA test\n' >"$1"; }
-configure_install "$1"
-source "$1/config.env"
-printf '%s\n' "$DIRECT_PORT" "$NGINX_FALLBACK_PORT" "$RESET_PROXY_KEYS" "$ENABLE_SUBSCRIPTION_SERVER" "$SUBSCRIPTION_TARGET" "$CLIENT_UDP" "$ENABLE_IPV6_LISTEN" "$SERVER_IP_IPV6" >"$1/defaults"
-''', root, TEST_IPV6=ipv6)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((root / "prompts").read_text().splitlines(), [
-            "SERVER_ALIAS", "SERVER_IP_IPv4", "SSH_PORT",
-            "ENABLE_CUSTOM_DOMAIN", "CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "LE_EMAIL",
-            "CLOUDFLARE_API_TOKEN", "ADMIN_PUBKEY",
-        ])
-        self.assertEqual((root / "defaults").read_text().splitlines(), [
-            "443", "8443", "false", "true", "ClashMeta", "true", "false", "",
-        ])
-        self.assertNotIn("fake-cf-token", result.stdout + result.stderr)
-        self.assertEqual(len((root / "home-proxies.csv").read_text().splitlines()), 1)
-        self.assertEqual(len((root / "upstream-nodes.txt").read_text().splitlines()), 1)
 
     def test_ssh_confirmation_gates_final_and_summary(self):
         for reply, confirmed in ((b"\n", True), (b"Y\n", True), (b"n\n", False), (b"\x04", False)):

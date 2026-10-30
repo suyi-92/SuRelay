@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Generate VLESS+Reality node text and Clash/Mihomo YAML."""
+"""Generate local import links and Mihomo/sing-box client configurations."""
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib.util
 import json
 import os
@@ -18,6 +19,7 @@ from urllib.parse import quote, urlencode
 # One entry per supported output format, not per client application. Clients
 # consuming the same format share a URL; the panel renders this catalog.
 SUBSCRIPTION_TARGETS = {"ClashMeta": "Mihomo / Clash Meta"}
+RESERVED_NODE_NAMES = {"PROXY", "DIRECT", "REJECT", "REJECT-DROP", "PASS", "GLOBAL", "COMPATIBLE"}
 
 
 def load_generator(path: Path):
@@ -106,6 +108,20 @@ def build_nodes(
 
     nodes = []
     for item in gen.node_list(env, rows):
+        protocol = item.get("type", "vless")
+        if protocol != "vless":
+            node = {"name": item["name"] + name_suffix, "type": protocol,
+                    "server": server, "port": int(item["port"]), "kind": item.get("kind", "direct")}
+            node["password"] = gen.protocol_password(env, protocol, uuid)
+            if protocol == "hysteria2":
+                node.update(sni=env["HY2_SERVER_NAME"], alpn=["h3"], udp=udp,
+                            **{"skip-cert-verify": gen.as_bool(env, "HY2_INSECURE")})
+            elif protocol == "ss":
+                node.update(cipher=env["SHADOWSOCKS_METHOD"], udp=udp)
+            else:
+                node.update(username=env["PROXY_USERNAME"], udp=False)
+            nodes.append(node)
+            continue
         node: Dict[str, Any] = {
             "name": item["name"] + name_suffix,
             "type": "vless",
@@ -126,10 +142,35 @@ def build_nodes(
         if env.get("VLESS_FLOW", ""):
             node["flow"] = env["VLESS_FLOW"]
         nodes.append(node)
-    return nodes
+    return unique_node_names(nodes)
+
+
+def unique_node_names(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Preserve existing VLESS labels; rename only conflicting export names."""
+    result = [dict(node) for node in nodes]
+    original = {node["name"] for node in nodes}
+    used = set(RESERVED_NODE_NAMES)
+    # Additional protocol labels must yield to legacy exit names, including
+    # labels from the IPv6 copy. Also reserve names that occur later so a new
+    # numeric suffix cannot take a user's existing, otherwise unique label.
+    indices = sorted(range(len(result)), key=lambda index: result[index].get("type", "vless") != "vless")
+    for index in indices:
+        node = result[index]
+        name = node["name"]
+        candidate = name
+        if candidate in used:
+            suffix = 2
+            while f"{name}-{suffix}" in used or f"{name}-{suffix}" in original:
+                suffix += 1
+            candidate = f"{name}-{suffix}"
+        node["name"] = candidate
+        used.add(candidate)
+    return result
 
 
 def interleave_nodes(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    combined = unique_node_names([*primary, *secondary])
+    primary, secondary = combined[:len(primary)], combined[len(primary):]
     nodes: List[Dict[str, Any]] = []
     longest = max(len(primary), len(secondary))
     for index in range(longest):
@@ -187,13 +228,16 @@ def print_client_summary(env: Dict[str, str], nodes: List[Dict[str, Any]], proje
         print(f"IPv6 节点：{reason}；VPS 需有可用公网 IPv6。\n开启：{command}")
     for label, url in subscription_links(env, nodes[0]["uuid"]):
         print(f"{cyan}{bold}订阅链接（{label}）{reset}\n{cyan}{url}{reset}")
-    print(f"\n{divider}\n{green}{bold}本地节点（复制 vless:// 链接导入）{reset}")
+    print(f"\n{divider}\n{green}{bold}本地节点（复制协议链接导入）{reset}")
     for node in nodes:
-        print(f"{green}{node_to_vless_uri(node)}{reset}\n")
+        print(f"{green}{node_to_uri(node)}{reset}\n")
     print(divider)
 
 
 def node_to_text(node: Dict[str, Any]) -> str:
+    if node["type"] != "vless":
+        return "\n".join(f"{key}={value if not isinstance(value, (dict, list, bool)) else json.dumps(value, ensure_ascii=False)}"
+                         for key, value in node.items() if key != "kind") + "\n"
     alpn = ",".join(node["alpn"])
     lines = [
         f"name={node['name']}",
@@ -240,6 +284,23 @@ def node_to_vless_uri(node: Dict[str, Any]) -> str:
     return f"vless://{node['uuid']}@{authority_server}:{node['port']}?{query}#{fragment}"
 
 
+def node_to_uri(node: Dict[str, Any]) -> str:
+    if node["type"] == "vless":
+        return node_to_vless_uri(node)
+    server = str(node["server"]).strip().strip("[]")
+    host = f"[{server}]" if ":" in server else server
+    authority = f"{host}:{node['port']}"
+    fragment = quote(node["name"], safe="")
+    if node["type"] == "ss":
+        userinfo = base64.urlsafe_b64encode(f"{node['cipher']}:{node['password']}".encode()).decode().rstrip("=")
+        return f"ss://{userinfo}@{authority}#{fragment}"
+    if node["type"] == "hysteria2":
+        query = urlencode({"sni": node["sni"], "insecure": "1" if node["skip-cert-verify"] else "0", "alpn": "h3"})
+        return f"hysteria2://{quote(node['password'], safe='')}@{authority}/?{query}#{fragment}"
+    userinfo = f"{quote(node['username'], safe='')}:{quote(node['password'], safe='')}"
+    return f"{node['type']}://{userinfo}@{authority}#{fragment}"
+
+
 def write_private_file(path_value: str, text: str) -> None:
     path = Path(path_value)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +330,14 @@ def build_clash_yaml(env: Dict[str, str], nodes: List[Dict[str, Any]], clash_ipv
         "proxies:",
     ]
     for node in nodes:
+        if node["type"] != "vless":
+            lines.extend([f"  - name: {q(node['name'])}", f"    type: {node['type']}",
+                          f"    server: {q(node['server'])}", f"    port: {node['port']}"])
+            for key, value in node.items():
+                if key not in {"name", "type", "server", "port", "kind"}:
+                    lines.append(f"    {key}: {q(value)}")
+            lines.append("")
+            continue
         lines.extend(
             [
                 f"  - name: {q(node['name'])}",
@@ -310,6 +379,40 @@ def build_clash_yaml(env: Dict[str, str], nodes: List[Dict[str, Any]], clash_ipv
     return "\n".join(lines)
 
 
+def build_singbox_client_config(env: Dict[str, str], nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    outbounds = []
+    for node in nodes:
+        protocol = node["type"]
+        item = {"type": {"socks5": "socks", "ss": "shadowsocks"}.get(protocol, protocol),
+                "tag": node["name"], "server": node["server"], "server_port": node["port"]}
+        if protocol == "vless":
+            item["uuid"] = node["uuid"]
+            if node.get("flow"):
+                item["flow"] = node["flow"]
+            item["tls"] = {"enabled": True, "server_name": node["servername"], "alpn": node["alpn"],
+                           "utls": {"enabled": True, "fingerprint": node["client-fingerprint"]},
+                           "reality": {"enabled": True, "public_key": node["reality-opts"]["public-key"],
+                                       "short_id": node["reality-opts"]["short-id"]}}
+        elif protocol == "hysteria2":
+            item["password"] = node["password"]
+            item["tls"] = {"enabled": True, "server_name": node["sni"], "alpn": ["h3"],
+                           "insecure": node["skip-cert-verify"]}
+        elif protocol == "ss":
+            item.update(method=node["cipher"], password=node["password"])
+            if not node["udp"]:
+                item["network"] = "tcp"
+        else:
+            item.update(username=node["username"], password=node["password"])
+            if protocol == "socks5":
+                item.update(version="5", network="tcp")
+        outbounds.append(item)
+    return {"log": {"level": "info"},
+            "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1",
+                          "listen_port": int(env["CLASH_MIXED_PORT"])}],
+            "outbounds": [{"type": "selector", "tag": "PROXY", "outbounds": [item["tag"] for item in outbounds]},
+                          *outbounds], "route": {"final": "PROXY"}}
+
+
 def build_subscription_payload(target: str, clash_yaml: str, nodes: List[Dict[str, Any]]) -> str:
     target = normalize_subscription_target(target)
     if target == "ClashMeta":
@@ -330,6 +433,7 @@ def main() -> int:
     ap.add_argument("--nodes-out", default="/root/surelay-nodes.txt")
     ap.add_argument("--clash-out", default="/root/surelay-clash.yaml")
     ap.add_argument("--vless-out", default="")
+    ap.add_argument("--singbox-out", default="")
     ap.add_argument("--server-override", default="")
     ap.add_argument("--force-server-override", action="store_true")
     ap.add_argument("--name-suffix", default="")
@@ -365,13 +469,15 @@ def main() -> int:
 
     nodes_text = "\n---\n".join(node_to_text(node) for node in nodes) + "\n"
     clash_yaml = build_clash_yaml(env, nodes, args.clash_ipv6)
-    vless_text = "\n".join(node_to_vless_uri(node) for node in nodes) + "\n"
+    vless_text = "\n".join(node_to_uri(node) for node in nodes) + "\n"
 
     if not args.skip_node_files:
         for out, text in [(args.nodes_out, nodes_text), (args.clash_out, clash_yaml)]:
             write_private_file(out, text)
         if args.vless_out:
             write_private_file(args.vless_out, vless_text)
+        if args.singbox_out:
+            write_private_file(args.singbox_out, json.dumps(build_singbox_client_config(env, nodes), ensure_ascii=False, indent=2) + "\n")
 
     if args.subscription_out:
         target = normalize_subscription_target(args.subscription_target or env.get("SUBSCRIPTION_TARGET", "ClashMeta"))
@@ -386,15 +492,10 @@ def main() -> int:
         print(f"已生成节点文件：{args.nodes_out}")
         print(f"已生成 Clash/Mihomo 文件：{args.clash_out}")
         if args.vless_out:
-            print(f"已生成 VLESS 分享链接文件：{args.vless_out}")
+            print(f"已生成协议分享链接文件：{args.vless_out}")
         print("控制台脱敏摘要：")
         for node in nodes:
-            print(
-                f"  {node['name']}: {node['server']}:{node['port']} "
-                f"servername={node['servername']} uuid={mask(node['uuid'])} "
-                f"reality-public-key={mask(node['reality-opts']['public-key'])} "
-                f"short-id={mask(node['reality-opts']['short-id'])} udp={str(node['udp']).lower()}"
-            )
+            print(f"  {node['name']}: {node['type']} {node['server']}:{node['port']} udp={str(node['udp']).lower()}")
     return 0
 
 

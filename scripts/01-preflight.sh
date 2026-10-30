@@ -38,8 +38,8 @@ if [[ -z "$ADMIN_PUBKEY" && ! -s /root/.ssh/authorized_keys ]]; then
   die "ADMIN_PUBKEY/ADMIN_PUBKEYS 为空，且 /root/.ssh/authorized_keys 不存在或为空。请在 config.env 填入至少一个本地公钥。"
 fi
 
-if [[ "$SURELAY_SECURITY_ONLY" != "true" ]] && port_in_use_by_other "$DIRECT_PORT"; then
-  die "DIRECT_PORT=$DIRECT_PORT 已被非 sing-box 进程占用。请停止占用服务或修改端口。"
+if [[ "$SURELAY_SECURITY_ONLY" != "true" ]]; then
+  check_proxy_port_conflicts
 fi
 
 if [[ "$SURELAY_SECURITY_ONLY" == "true" ]]; then

@@ -69,7 +69,15 @@ ClientAliveCountMax 2
 EOF
 }
 
-write_hardening_file "KbdInteractiveAuthentication no"
+if ! write_hardening_file "KbdInteractiveAuthentication no" 2>/tmp/surelay-sshd-test.err; then
+  if grep -qi 'KbdInteractiveAuthentication' /tmp/surelay-sshd-test.err; then
+    warn "当前 OpenSSH 不支持 KbdInteractiveAuthentication，自动改用 ChallengeResponseAuthentication。"
+    write_hardening_file "ChallengeResponseAuthentication no"
+  else
+    cat /tmp/surelay-sshd-test.err >&2
+    die "SSH 候选配置未通过校验，原配置已保留，停止 reload。"
+  fi
+fi
 
 if ! is_dry_run; then
   sshd="$(sshd_bin)"
@@ -185,6 +193,17 @@ if ! is_dry_run; then
 fi
 
 reload_ssh
+configure_sshd_ports final
+
+# The port helper also edits the SSH settings block. Recheck the complete
+# effective policy after that edit so an old maintenance override cannot win.
+if ! is_dry_run; then
+  effective="$("$(sshd_bin)" -T -C "user=root,host=localhost,addr=127.0.0.1")"
+  grep -Eqi '^permitrootlogin (prohibit-password|without-password)$' <<<"$effective" || die "端口迁移后 PermitRootLogin 未保持公钥模式。"
+  grep -qi '^pubkeyauthentication yes$' <<<"$effective" || die "端口迁移后 PubkeyAuthentication 未保持开启。"
+  grep -qi '^passwordauthentication no$' <<<"$effective" || die "端口迁移后 PasswordAuthentication 未保持关闭。"
+  grep -qi '^authenticationmethods publickey$' <<<"$effective" || die "端口迁移后 AuthenticationMethods 未保持 publickey。"
+fi
 
 cat <<EOF
 

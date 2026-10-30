@@ -58,29 +58,20 @@ run_install_flow "$TEST_ROOT"
             self.assertNotIn("singbox", (root / "phases").read_text())
             self.assertIn("未安装 sing-box", result.stdout)
 
-    def test_first_security_only_config_does_not_prompt_for_node_or_domain_settings(self):
+    def test_first_security_only_routes_to_security_wizard_without_exit_lists(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result = self.run_bash(
                 '''
 INSTALL_MODE=security-only
 public_ipv4() { printf '192.0.2.10'; }
-read_default() {
-  printf '%s\\n' "$1" >>"$TEST_ROOT/prompts"
-  printf '%s' "$2"
-}
-collect_admin_pubkeys() { printf 'ssh-ed25519 AAAA test' >"$1"; }
+python3() { printf '%s\\n' "$@" >"$TEST_ROOT/wizard-args"; }
 configure_install "$TEST_ROOT"
-cat "$TEST_ROOT/config.env"
-''',
-                root,
-            )
+''', root)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / "prompts").read_text().splitlines(), ["SERVER_IP_IPv4", "SSH_PORT"])
-            config = (root / "config.env").read_text()
-            self.assertIn("SURELAY_SECURITY_ONLY=true", config)
-            self.assertIn("ENABLE_SUBSCRIPTION_SERVER=false", config)
-            self.assertIn("CLOUDFLARE_API_TOKEN=''", config)
+            args = (root / "wizard-args").read_text().splitlines()
+            self.assertEqual(args[-1], "--security-only")
+            self.assertIn("--ipv4", args)
             self.assertFalse((root / "home-proxies.csv").exists())
             self.assertFalse((root / "upstream-nodes.txt").exists())
 

@@ -261,12 +261,35 @@ class Panel:
             ("刷新订阅", self.refresh_subscription),
             ("修改节点名称", lambda: self.setting("SERVER_ALIAS", "节点名称")),
             ("修改主入口端口", lambda: self.setting("DIRECT_PORT", "主入口端口", port)),
+            ("配置入口协议（HY2 / SOCKS5 / SS / HTTP）", self.protocols),
         ])
+
+    def protocols(self):
+        from surelay_install import Wizard, PROTOCOLS
+        self.m.reload()
+        raw = GEN.parse_env_file(self.m.config)
+        initial = dict(self.m.env)
+        # Empty TLS fields intentionally follow the CF domain; keep them empty
+        # when editing an unrelated protocol or changing only its port.
+        for key in ("HY2_SERVER_NAME", "HY2_CERT_PATH", "HY2_KEY_PATH"):
+            initial[key] = raw.get(key, "")
+        values = Wizard(initial, protocol_only=True,
+                        validate_extra=lambda env: GEN.load_rows(env, self.m.root, allow_empty=True)).run()
+        keys = ["PROXY_USERNAME", "PROXY_PASSWORD", "HY2_PASSWORD", "HY2_CERT_PATH", "HY2_KEY_PATH",
+                "HY2_SERVER_NAME", "HY2_INSECURE", "SHADOWSOCKS_METHOD", "SHADOWSOCKS_PASSWORD"]
+        for key, _, port_key in PROTOCOLS:
+            keys += ["ENABLE_" + key, port_key]
+        updates = {key: values[key] for key in keys if key in values}
+        if all(initial.get(key) == value for key, value in updates.items()):
+            result("入口协议未改变。")
+            return
+        with current_terminal().operation("入口协议已更新，订阅已刷新。") if current_terminal() else nullcontext():
+            self.m.apply(updates)
 
     @operation("客户端配置已导出。")
     def export_clients(self):
         self.m.phase("output-nodes")
-        result("客户端配置已导出。\n节点列表：/root/surelay-nodes.txt\nClash / Mihomo：/root/surelay-clash.yaml\nVLESS 链接：/root/surelay-vless.txt")
+        result("客户端配置已导出。\n节点列表：/root/surelay-nodes.txt\nClash / Mihomo：/root/surelay-clash.yaml\n协议分享链接：/root/surelay-vless.txt")
 
     @operation("订阅已刷新。")
     def refresh_subscription(self):
@@ -295,8 +318,10 @@ class Panel:
         links = []
         for node in nodes:
             host = f"[{node['server']}]" if ":" in node["server"] else node["server"]
-            fields = [("连接地址", host), ("连接端口", str(node["port"])), ("连接协议", "VLESS + Reality")]
-            links.append((node["name"], fields, output.node_to_vless_uri(node)))
+            protocol = {"vless": "VLESS + Reality", "hysteria2": "Hysteria2 / HY2", "ss": "Shadowsocks",
+                        "socks5": "SOCKS5", "http": "HTTP"}.get(node["type"], node["type"])
+            fields = [("连接地址", host), ("连接端口", str(node["port"])), ("连接协议", protocol)]
+            links.append((node["name"], fields, output.node_to_uri(node)))
         if current_terminal():
             current_terminal().set_links(links)
         else:
@@ -353,6 +378,9 @@ class Panel:
     def next_port(self, home, upstream):
         used = {int(r["listen_port"]) for r in [*home, *upstream]}
         used |= {int(self.m.env["DIRECT_PORT"]), int(self.m.env["SSH_PORT"])}
+        used.update(endpoint["port"] for endpoint in GEN.protocol_endpoints(self.m.env))
+        if self.m.env.get("ENABLE_CUSTOM_DOMAIN") == "true":
+            used.add(int(self.m.env["NGINX_FALLBACK_PORT"]))
         if self.m.env["SUBSCRIPTION_LISTEN_PORT"]:
             used.add(int(self.m.env["SUBSCRIPTION_LISTEN_PORT"]))
         return str(GEN.next_available_port(int(self.m.env["HOME_PORT_START"]), int(self.m.env["HOME_PORT_END"]), used))
@@ -568,10 +596,15 @@ class Panel:
     @operation("域名模式已停用，已切换为 IP 节点和 HTTP 订阅。")
     def disable_domain(self):
         old = dict(self.m.env)
-        confirm("停用域名模式，切换为 IP 节点与 HTTP 订阅（公网 51040），删除对应项目 DNS 记录？",
+        raw = GEN.parse_env_file(self.m.config)
+        if old.get("ENABLE_HY2") == "true" and any(
+                not raw.get(key) for key in ("HY2_CERT_PATH", "HY2_KEY_PATH", "HY2_SERVER_NAME")):
+            raise Error("HY2 正在复用 CF 域名证书。请先在入口协议中关闭 HY2，或填全 HY2 的独立证书路径、私钥路径和 TLS 域名，再停用域名。")
+        subscription_port = self.m.env["SUBSCRIPTION_INTERNAL_PORT"]
+        confirm(f"停用域名模式，切换为 IP 节点与 HTTP 订阅（公网 {subscription_port}），删除对应项目 DNS 记录？",
                 action="停用域名模式", danger=True)
         self.m.apply({"ENABLE_CUSTOM_DOMAIN": "false", "CUSTOM_DOMAIN": "",
-                      "SUBSCRIPTION_BASE_URL": "", "SUBSCRIPTION_PORT": "51040", "SUBSCRIPTION_LISTEN_PORT": "51040",
+                      "SUBSCRIPTION_BASE_URL": "", "SUBSCRIPTION_PORT": subscription_port, "SUBSCRIPTION_LISTEN_PORT": subscription_port,
                       "REALITY_SERVER_NAME": "www.microsoft.com", "REALITY_HANDSHAKE_SERVER": "www.microsoft.com",
                       "REALITY_HANDSHAKE_PORT": "443"})
         self.m.remove_old_dns(old, ["A", "AAAA"])

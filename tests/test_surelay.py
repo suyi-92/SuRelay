@@ -20,6 +20,36 @@ import surelay_terminal as terminal
 
 
 class ManagementTest(unittest.TestCase):
+    def test_protocol_edit_keeps_empty_hy2_tls_fields_following_cloudflare_domain(self):
+        self.m.update({"ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": "old.example.com",
+                       "LE_EMAIL": "admin@example.com", "ENABLE_HY2": "true"})
+        import surelay_install
+        received = {}
+        def edit(values, **kwargs):
+            received.update(values)
+            values = {**values, "ENABLE_SOCKS5": "true"}
+            return Mock(run=Mock(return_value=values))
+        with patch.object(surelay_install, "Wizard", side_effect=edit), patch.object(self.m, "apply") as apply:
+            surelay.Panel(self.m).protocols()
+        for key in ("HY2_SERVER_NAME", "HY2_CERT_PATH", "HY2_KEY_PATH"):
+            self.assertEqual(received[key], "")
+            self.assertEqual(apply.call_args.args[0][key], "")
+        self.m.update(apply.call_args.args[0])
+        self.m.update({"CUSTOM_DOMAIN": "new.example.com"})
+        self.assertEqual(self.m.env["HY2_SERVER_NAME"], "new.example.com")
+        self.assertIn("/new.example.com/", self.m.env["HY2_CERT_PATH"])
+
+    def test_domain_disable_explains_hy2_dependency_before_changing_anything(self):
+        self.m.update({"ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": "edge.example.com",
+                       "LE_EMAIL": "admin@example.com", "ENABLE_HY2": "true"})
+        original = self.config.read_bytes()
+        with patch.object(self.m, "apply") as apply, patch.object(surelay, "confirm") as confirm:
+            with self.assertRaisesRegex(core.Error, "HY2.*证书"):
+                surelay.Panel(self.m).disable_domain()
+        apply.assert_not_called()
+        confirm.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), original)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -667,6 +697,7 @@ class ManagementTest(unittest.TestCase):
         with patch.object(security, "Snapshot", side_effect=self.local_snapshot), \
              patch.object(security.shutil, "which", return_value=None), \
              patch.object(secure, "effective", return_value="port 50396"), \
+             patch.object(self.m, "active", return_value=False), \
              patch.object(security, "run") as external:
             secure.change_ssh_port("50396", lambda value: self.fail("existing listener should not ask for login"))
 
@@ -703,7 +734,7 @@ class ManagementTest(unittest.TestCase):
 
     def test_ssh_port_menu_repairs_owned_ufw_rules_when_syncing_listener(self):
         secure = security.Security(self.m)
-        self.m.update({"SSH_PORT": "22"})
+        self.m.update({"SSH_PORT": "22", "ENABLE_UFW": "true"})
         self.snapshot_class = core.Snapshot
         calls = []
 

@@ -15,6 +15,88 @@ from surelay_core import GEN
 
 
 class InstallWizardTest(unittest.TestCase):
+    def fresh_domain_draft(self, alias="AalTR-Verizon", zone="example.com"):
+        values = install.initial_values("192.0.2.10")
+        values.update(SERVER_ALIAS=alias, CLOUDFLARE_ZONE_NAME=zone, LE_EMAIL="admin@example.com",
+                      CLOUDFLARE_API_TOKEN="fixture-secret")
+        wizard = install.Wizard(values)
+        wizard.keys_confirmed = True
+        return wizard
+
+    def test_domain_page_defaults_prefix_from_node_name_and_saves_complete_hostname(self):
+        wizard = self.fresh_domain_draft()
+        labels = [label for label, _ in wizard.domain_fields()]
+        self.assertEqual(labels[1], "一级子域名：aaltr-verizon")
+        self.assertEqual(labels[2], "域名：example.com")
+        values = wizard.validate()
+        self.assertEqual(values["CUSTOM_DOMAIN"], "aaltr-verizon.example.com")
+        self.assertEqual(values["CLOUDFLARE_ZONE_NAME"], "example.com")
+        self.assertEqual(values["REALITY_SERVER_NAME"], values["CUSTOM_DOMAIN"])
+        self.assertIn(values["CUSTOM_DOMAIN"], values["SUBSCRIPTION_BASE_URL"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.example.env").write_bytes((ROOT / "config.example.env").read_bytes())
+            install.save_config(root, values)
+            saved = GEN.parse_env_file(root / "config.env")
+            self.assertEqual(saved["CUSTOM_DOMAIN"], "aaltr-verizon.example.com")
+            self.assertEqual(saved["CLOUDFLARE_ZONE_NAME"], "example.com")
+
+    def test_automatic_prefix_follows_node_changes_even_when_page_is_not_reopened(self):
+        wizard = self.fresh_domain_draft()
+        wizard.domain_fields()
+        with patch("surelay_install.ask", return_value="aaltr-verizon"):
+            wizard.edit_subdomain()
+        wizard.values["SERVER_ALIAS"] = "Next-Node"
+        self.assertIn("next-node.example.com", wizard.summary())
+        self.assertEqual(wizard.validate()["CUSTOM_DOMAIN"], "next-node.example.com")
+
+    def test_custom_prefix_survives_node_rename_and_cf_toggle_and_recombines_new_zone(self):
+        wizard = self.fresh_domain_draft()
+        with patch("surelay_install.ask", return_value="Custom-Edge"):
+            wizard.edit_subdomain()
+        wizard.values["SERVER_ALIAS"] = "Different-Node"
+        wizard.toggle("ENABLE_CUSTOM_DOMAIN")
+        wizard.domain_fields()
+        wizard.toggle("ENABLE_CUSTOM_DOMAIN")
+        with patch("surelay_install.ask", return_value="Example.Co.UK"):
+            wizard.edit("CLOUDFLARE_ZONE_NAME", "域名", validate=install.domain)
+        values = wizard.validate()
+        self.assertEqual(values["CUSTOM_DOMAIN"], "custom-edge.example.co.uk")
+        self.assertEqual(values["CLOUDFLARE_ZONE_NAME"], "example.co.uk")
+        self.assertIn("一级子域名：custom-edge", [label for label, _ in wizard.domain_fields()])
+
+    def test_subdomain_validation_rejects_nested_and_invalid_labels(self):
+        for value in ("", "a.b", "_node", "-node", "node-", "two words", "节点", "a" * 64):
+            with self.subTest(value=value), self.assertRaisesRegex(install.Error, "一级子域名"):
+                install.subdomain(value)
+        self.assertEqual(install.subdomain("AalTR-Verizon"), "aaltr-verizon")
+        self.assertEqual(install.subdomain("a" * 63), "a" * 63)
+        wizard = self.fresh_domain_draft("节点 One")
+        self.assertIn("一级子域名：节点 one", [label for label, _ in wizard.domain_fields()])
+        with self.assertRaisesRegex(install.Error, "一级子域名"):
+            wizard.validate()
+        wizard = self.fresh_domain_draft("a" * 63, ".".join(["b" * 63] * 3))
+        with self.assertRaisesRegex(install.Error, "完整域名"):
+            wizard.validate()
+
+    def test_cancelled_prefix_edit_keeps_automatic_suggestion_and_credentials(self):
+        wizard = self.fresh_domain_draft()
+        with patch("surelay_install.ask", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            wizard.edit_subdomain()
+        wizard.values["SERVER_ALIAS"] = "Changed-Name"
+        self.assertEqual(wizard.validate()["CUSTOM_DOMAIN"], "changed-name.example.com")
+        self.assertEqual(wizard.values["CLOUDFLARE_API_TOKEN"], "fixture-secret")
+
+    def test_protocol_only_keeps_existing_multilevel_domain_and_hy2_tls_values(self):
+        values = self.fresh_domain_draft().values
+        values.update(CUSTOM_DOMAIN="deep.edge.example.com", HY2_SERVER_NAME="tls.example.net",
+                      HY2_CERT_PATH="/certs/custom.pem", HY2_KEY_PATH="/certs/custom.key")
+        wizard = install.Wizard(values, protocol_only=True)
+        wizard.values["SERVER_ALIAS"] = "Renamed"
+        saved = wizard.validate()
+        for key in ("CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "HY2_SERVER_NAME", "HY2_CERT_PATH", "HY2_KEY_PATH"):
+            self.assertEqual(saved[key], values[key])
+
     def draft(self, security=False):
         values = install.initial_values("192.0.2.10", security)
         values.update(SERVER_ALIAS="relay", CUSTOM_DOMAIN="edge.example.com",
@@ -52,7 +134,8 @@ class InstallWizardTest(unittest.TestCase):
         self.assertEqual(wizard.values["ENABLE_CUSTOM_DOMAIN"], "true")
         labels = "\n".join(label for label, _ in wizard.domain_fields())
         self.assertIn("CF 域名与静态网页：开启", labels)
-        self.assertIn("域名：edge.example.com", labels)
+        self.assertIn("一级子域名：edge", labels)
+        self.assertIn("域名：example.com", labels)
         self.assertIn("证书邮箱", labels)
         self.assertIn("已设置（隐藏）", labels)
         self.assertNotIn("fixture-secret", labels + wizard.summary())

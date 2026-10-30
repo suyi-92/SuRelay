@@ -22,13 +22,24 @@
 
 ## 旧安装如何更新
 
-在 VPS 上以 root 执行：
+在已有 VPS 上以 root 执行，然后重新打开面板：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh) --update
+sr update
+sr
 ```
 
-旧默认目录自动迁移到 `/opt/SuRelay`，保留配置、节点和订阅。完成后输入 `sr`，以后用 `sr update` 更新。首次部署见下方「安装」。
+旧版没有 `sr` 时，下载入口再用 Bash 更新；这组命令也适用于 Alpine 的 ash：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.sh -o /tmp/surelay-update.sh
+bash /tmp/surelay-update.sh --update
+sr
+```
+
+更新保留配置、节点身份、密钥、订阅和现有端口，不会自动开启新协议、CF 域名或执行重置，也不会重新打开安装向导。旧默认目录自动迁移到 `/opt/SuRelay`，自定义目录原地更新。新增协议在「节点与订阅 → 配置入口协议」中按需开启；随机端口和默认开启 CF 的设置适用于新装或明确选择引导式重新部署。
+
+自动更新要求源码工作树干净、当前为 `main` 且没有本地独有提交；不能快进时会停止并保留现场。引导部署交接记录处于 `removed` 状态时，可先用 `sr install` 接续；`prepared` 或 `failed` 状态需按备份说明核查恢复。
 
 ## 如何卸载（含旧安装）
 
@@ -44,6 +55,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install
 
 | 选项 | 功能 |
 | --- | --- |
+| 开始引导式节点布置 | 备份后清空本项目旧配置，重新填写向导并交接 SSH，关闭旧项目端口 |
 | 节点与订阅 | 查看订阅/节点、导出配置、刷新订阅、修改名称和端口、配置入口协议 |
 | 出口管理 | HTTP/SOCKS5 与上游 VLESS 的添加、修改、删除和连通性检查 |
 | IPv6 设置 | 查看、探测启用、更换地址、关闭 IPv6 节点 |
@@ -51,7 +63,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/suyi-92/SuRelay/main/install
 | 服务与诊断 | 状态、启动/停止/重启代理与订阅、日志、配置和监听检查 |
 | VPS 安全 | UFW 自定义端口规则、SSH 端口、公钥与密码认证、fail2ban |
 | 高级维护 | 更新脚本/内核、备份恢复、高级配置、继续安装/部署节点代理、目录迁移和重置 |
-| 开始引导式节点布置 | 备份后清空本项目旧配置，重新填写向导并交接 SSH，关闭旧项目端口 |
 | 卸载 SuRelay | 预览清单、备份并卸载部署，保留 SSH |
 
 纯安全防护模式的主菜单也提供“开始引导式节点布置”，并保留“部署节点代理”、VPS 安全、高级维护和卸载；完成节点部署后恢复完整菜单。
@@ -83,7 +94,7 @@ Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以�
 首次安装使用与 `sr` 相同风格的终端向导，依次填写基础信息、服务端口、CF 域名与静态网页、入口协议和管理员公钥。同一组内可查看并修改相关字段，进入下一组后也可返回前面的组继续修改；总览可直接跳回任意组，确认后才写入配置和开始部署。组内用 ↑↓ 或数字选择字段，Enter 编辑；在分组页直接按 **← 上一步 / 下一步 →** 切换，不必再选择编号。文本输入框中的 ← / → 仍用于移动光标，Esc 回到分组。最终总览需明确确认才会保存并部署；文字菜单用 `<` / `>` 切换步骤。
 
 - **基础信息与服务端口**：节点名称、公网 IPv4、SSH、主入口、订阅服务和 Nginx 静态页内部端口。IPv4 自动探测后可改；新安装为这些服务生成互不冲突的 `49152–65535` 高位随机端口，回退修改不会重新抽取。NAT 主机请改为服务商实际映射的本机端口。
-- **Cloudflare 域名与静态页**：默认开启；填写域名、Zone、证书邮箱和 API Token，也可主动关闭。Token 输入隐藏显示。域名应已在 CF 激活，Token 需要对应 Zone 的 DNS 编辑和 Zone 读取权限；[首次配置说明](docs/cloudflare-domain-preflight.md)。
+- **Cloudflare 域名与静态页**：默认开启，也可主动关闭。第 2 项「一级子域名」自动建议使用节点名称的小写形式，可修改；第 3 项「域名」填写 Cloudflare 中的根域/Zone。例：节点名称 `AalTR-Verizon` 对应建议 `aaltr-verizon`，域名填 `example.com`，最终节点域名为 `aaltr-verizon.example.com`。再填写证书邮箱和 API Token；Token 输入隐藏显示，需对应 Zone 的 DNS 编辑和 Zone 读取权限，域名应已在 CF 激活。[首次配置说明](docs/cloudflare-domain-preflight.md)。
 - **节点协议**：保留 VLESS Reality，按需启用 HY2、SOCKS5、SS 和 HTTP，并填写各自端口与认证参数。四种新增协议默认关闭，启用后自动加入订阅和本地输出。参见[协议配置](docs/protocols.md)。
 - **管理员公钥**：可粘贴多把公钥；明确选择复用已有公钥时才使用服务器现有公钥。
 
@@ -117,16 +128,19 @@ RRB_RUN_PHASES=false bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/
 
 ## 开始引导式节点布置
 
-需要把已有机器上 SuRelay 管理的配置全部重新设置时，在 `sr` 主菜单选择 **开始引导式节点布置**，或以 root 执行：
+需要把已有机器上 SuRelay 管理的配置全部重新设置时，选择 `sr` 主菜单第一项 **开始引导式节点布置**，或以 root 执行：
 
 ```bash
-cd /opt/SuRelay
-bash install.sh --redeploy
+sr redeploy
 ```
 
-该入口先展示实际清理清单并备份，再停止旧节点/订阅，清空旧名称、协议、身份密钥、订阅 token、出口列表、域名凭据和项目安全设置，重新打开完整向导。旧代理、订阅和自定义项目端口规则会关闭；新部署重新分配端口，并要求录入与旧 `authorized_keys` 不同的管理员公钥。
+也可从项目目录执行 `bash install.sh --redeploy`。脚本先显示实际清理清单，输入大写 `REDEPLOY` 后备份并核验，再停止旧节点/订阅，清空旧名称、协议、节点身份密钥、订阅 token、出口列表、域名凭据和项目安全设置，重新打开完整向导。旧代理、订阅和项目自定义端口规则会关闭；新配置重新分配高位随机端口，SSH 端口必须不同于旧监听，管理员公钥也必须不同于旧 `authorized_keys` 中的公钥。
 
-当前 SSH 登录通道先保留。另开终端验证**新端口和本次录入的公钥**成功后，才收回旧项目 SSH 入口和可确认属于旧部署的管理员公钥。其他软件的业务端口、手工公钥、系统 SSH 主机密钥、Cloudflare 远程 DNS 记录、云安全组及 NAT 映射不由该入口清除。详细清理、暂停和恢复边界见[重置安装说明](docs/reset-install.md)。
+当前 SSH 登录通道先保留。新端口在交接阶段**只接受本次录入的公钥**，旧端口仍保留旧登录方式；请先在客户端用 `ssh-add` 加载新私钥，或给验证命令加 `-i` 指定本机新私钥。另开终端验证新端口和新公钥成功后，在 `[y/N]` 提示明确输入 `y`；默认回车会暂停。确认后才移除旧项目 SSH 入口、旧项目放行规则和可确认属于旧部署的管理员公钥，并撤下新端口的临时验证限制。
+
+清理后取消向导或暂停 SSH 验证时，旧代理不会自动恢复；交接记录处于 `removed` 状态时，保留当前 SSH 窗口，执行 `sr install` 接续同一引导。`prepared`、`failed` 或无法校验的记录会阻止继续清理，按打印的备份和错误检查恢复；不要重复重置或删除交接记录绕过门禁。
+
+清理仅针对本机 SuRelay 管理的配置和端口。无项目归属的手工公钥、其他软件的业务端口、系统 SSH 主机密钥、Cloudflare 远程 DNS 记录、云安全组及 NAT 映射保留；早期版本中无法追溯来源的公钥会说明并保留。该入口会使旧节点与订阅失效，完成后需更新客户端。它与保留历史 SSH 公钥和自定义业务规则的普通 `--reset` 不同；`sr uninstall` 则只卸载、不重新引导。详细边界见[重置安装说明](docs/reset-install.md)。
 
 ## 重置后重新安装
 

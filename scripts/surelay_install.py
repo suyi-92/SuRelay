@@ -42,6 +42,13 @@ def domain(value):
     return value
 
 
+def subdomain(value):
+    value = value.strip().lower()
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", value):
+        raise Error("一级子域名须为 1–63 位英文字母、数字或内部连字符，不含点，例如 aaltr-verizon。")
+    return value
+
+
 def initial_values(address="", security_only=False):
     # Generate once per draft. Back/next never regenerates ports or credentials.
     keys = ["SSH_PORT", "DIRECT_PORT", "SUBSCRIPTION_INTERNAL_PORT", "NGINX_FALLBACK_PORT",
@@ -88,6 +95,13 @@ class Wizard:
         self.keys_confirmed = protocol_only
         self.validate_extra = validate_extra
         self.error = ""
+        self._subdomain = None
+        zone = self.values.get("CLOUDFLARE_ZONE_NAME", "").strip().lower().rstrip(".")
+        hostname = self.values.get("CUSTOM_DOMAIN", "").strip().lower().rstrip(".")
+        if zone and hostname.endswith("." + zone):
+            # Existing hostnames are explicit choices. New drafts instead
+            # follow the node name until the user changes the suggested label.
+            self._subdomain = hostname[:-(len(zone) + 1)]
 
     def choose(self, title, actions, status="", selected=0, back="返回", *, steps=None):
         window = current()
@@ -122,6 +136,28 @@ class Wizard:
         value = ask(label, old, secret=secret, validate=validate,
                     help=help + (" 输入 - 清空。" if not validate else ""))
         self.values[key] = "" if value == "-" and not validate else value
+        if key in {"SERVER_ALIAS", "CLOUDFLARE_ZONE_NAME"}:
+            self.sync_domain()
+
+    def subdomain_value(self):
+        return self._subdomain if self._subdomain is not None else self.values.get("SERVER_ALIAS", "").strip().lower()
+
+    def sync_domain(self):
+        if self.protocol_only:
+            return
+        prefix = self.subdomain_value()
+        zone = self.values.get("CLOUDFLARE_ZONE_NAME", "").strip().lower().rstrip(".")
+        self.values["CLOUDFLARE_ZONE_NAME"] = zone
+        self.values["CUSTOM_DOMAIN"] = f"{prefix}.{zone}" if prefix and zone else ""
+
+    def edit_subdomain(self):
+        default = self.subdomain_value()
+        value = ask("一级子域名", default, validate=subdomain,
+                    help="只填写域名前的一段，例如 aaltr-verizon；默认取节点名称的小写形式，可修改。")
+        value = subdomain(value)
+        if self._subdomain is not None or value != default:
+            self._subdomain = value
+        self.sync_domain()
 
     def toggle(self, key):
         self.values[key] = "false" if self.values.get(key) == "true" else "true"
@@ -173,13 +209,14 @@ class Wizard:
         self.values.update(zip(keys, map(str, random_high_ports(len(keys), reserved=map(int, reserved)))))
 
     def domain_fields(self):
+        self.sync_domain()
         enabled = self.values["ENABLE_CUSTOM_DOMAIN"] == "true"
         fields = [("CF 域名与静态网页：" + ("开启" if enabled else "关闭"),
                    lambda: self.toggle("ENABLE_CUSTOM_DOMAIN"))]
         if enabled:
-            fields += [self.field("CUSTOM_DOMAIN", "域名", validate=domain),
-                       self.field("CLOUDFLARE_ZONE_NAME", "Cloudflare Zone", validate=domain,
-                                  help="填写 Cloudflare 控制台的完整 Zone 名称，例如 example.com。"),
+            fields += [("一级子域名：" + (self.subdomain_value() or "待填写"), self.edit_subdomain),
+                       self.field("CLOUDFLARE_ZONE_NAME", "域名", validate=domain,
+                                  help="填写 Cloudflare 中托管的域名（Zone），例如 example.com；与一级子域名组合为完整节点域名。"),
                        self.field("LE_EMAIL", "证书邮箱", validate=required),
                        self.field("CLOUDFLARE_API_TOKEN", "Cloudflare API Token", secret=True,
                                   validate=required, help="需要该 Zone 的 DNS 编辑与 Zone 读取权限。")]
@@ -260,6 +297,7 @@ class Wizard:
                 ("明确复用 root 已有 authorized_keys" + ("（已选择）" if self.keys_confirmed and not count else ""), self.reuse_keys)]
 
     def validate(self):
+        self.sync_domain()
         values = prepare_values(self.values)
         if not self.protocol_only:
             ipv4(values["SERVER_IP_IPV4"])
@@ -270,6 +308,7 @@ class Wizard:
             if not self.keys_confirmed:
                 raise Error("请录入管理员公钥，或明确选择复用已有公钥。")
         if values["ENABLE_CUSTOM_DOMAIN"] == "true" and not self.protocol_only:
+            subdomain(self.subdomain_value())
             for key in ("CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME"):
                 domain(values[key])
             for key in ("LE_EMAIL", "CLOUDFLARE_API_TOKEN"):
@@ -283,6 +322,7 @@ class Wizard:
         return values
 
     def summary(self):
+        self.sync_domain()
         v = self.values
         lines = [f"节点：{v.get('SERVER_ALIAS') or '待填写'} · {v.get('SERVER_IP_IPV4') or '待填写'}",
                  f"SSH：{v['SSH_PORT']}"]

@@ -14,7 +14,16 @@
 
 脚本可以用 Cloudflare API 创建 zone，但仍不能替你到域名注册商改 NS。除非你的域名本身也由 Cloudflare Registrar 管理，否则注册商 NS 这一步始终需要手动完成。
 
-## config.env
+## 向导填写
+
+「CF 域名与静态网页」组中，第 2 项是「一级子域名」，第 3 项是「域名」：
+
+- **一级子域名**：自动建议为节点名称的小写形式，可修改。例如节点名称 `AalTR-Verizon`，建议值为 `aaltr-verizon`。只填写一段 1–63 位英文字母、数字或内部连字符；节点名称含中文、空格等字符时，需手动改为有效子域名。
+- **域名**：填写 Cloudflare 控制台中的根域/Zone，例如 `example.com`，不在此项填写完整的节点子域名。
+
+向导将两项组合成完整域名：上例保存为 `CUSTOM_DOMAIN="aaltr-verizon.example.com"`，同时保留 `CLOUDFLARE_ZONE_NAME="example.com"` 用于查找 Cloudflare Zone。随后填写证书邮箱和 API Token。
+
+## config.env（手动配置）
 
 ```bash
 ENABLE_CUSTOM_DOMAIN="true"

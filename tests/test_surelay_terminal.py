@@ -254,6 +254,31 @@ class PlainTerminalTest(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "Requires POSIX terminal")
 class WindowTest(unittest.TestCase):
+    def test_cf_form_uses_node_label_and_root_domain_to_build_complete_hostname(self):
+        self.start('''
+from surelay_install import Wizard, initial_values
+values = initial_values("192.0.2.10")
+values.update(SERVER_ALIAS="AalTR-Verizon", LE_EMAIL="admin@example.com", CLOUDFLARE_API_TOKEN="fixture-secret")
+draft = Wizard(values)
+draft.keys_confirmed = True
+with Terminal():
+    assert draft.group("CF 域名与静态网页", draft.domain_fields)
+    saved = draft.validate()
+assert saved["CUSTOM_DOMAIN"] == "aaltr-verizon.example.co.uk"
+assert saved["CLOUDFLARE_ZONE_NAME"] == "example.co.uk"
+print("COMPOSED_HOSTNAME_OK", flush=True)
+''', direct=True)
+        self.expect("一级子域名：aaltr-verizon")
+        self.expect("3) 域名：待填写")
+        self.send("3\r")
+        self.expect("填写 Cloudflare 中托管的域名")
+        self.send("Example.Co.UK\r")
+        self.expect("域名：example.co.uk")
+        self.send("\033[C")
+        self.expect("COMPOSED_HOSTNAME_OK")
+        self.finish()
+        self.assertNotIn(b"fixture-secret", self.all_output)
+
     def test_step_footer_and_immediate_arrows_work_in_small_real_terminal(self):
         import fcntl
         import termios

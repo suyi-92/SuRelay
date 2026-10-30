@@ -960,7 +960,8 @@ class Panel:
     def install_nodes(self):
         confirm("已完成服务器安全防护。现在切换到完整安装并部署节点代理？", action="部署节点代理")
         self.m.update({"SURELAY_SECURITY_ONLY": "false"})
-        run(["bash", self.m.root / "install.sh"], interactive=True)
+        run(["bash", self.m.root / "install.sh"],
+            env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
         raise SystemExit(0)
 
     @operation("旧安装迁移已完成。重新运行 sr 打开面板。")

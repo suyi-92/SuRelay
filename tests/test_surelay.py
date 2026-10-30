@@ -261,7 +261,8 @@ class ManagementTest(unittest.TestCase):
                 panel.install_nodes()
         confirm.assert_called_once_with(
             "已完成服务器安全防护。现在切换到完整安装并部署节点代理？", action="部署节点代理")
-        run.assert_called_once_with(["bash", self.root / "install.sh"], interactive=True)
+        run.assert_called_once_with(["bash", self.root / "install.sh"],
+                                    env={"RRB_MANAGEMENT_LOCK_HELD": "true"}, interactive=True)
         self.assertEqual(self.m.env["SURELAY_SECURITY_ONLY"], "false")
 
     def test_cancelling_security_only_node_deployment_keeps_security_mode(self):

@@ -94,7 +94,7 @@ Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以�
 首次安装使用与 `sr` 相同风格的终端向导，依次填写基础信息、服务端口、CF 域名与静态网页、入口协议和管理员公钥。同一组内可查看并修改相关字段，进入下一组后也可返回前面的组继续修改；总览可直接跳回任意组，确认后才写入配置和开始部署。组内用 ↑↓ 或数字选择字段，Enter 编辑；在分组页直接按 **← 上一步 / 下一步 →** 切换，不必再选择编号。文本输入框中的 ← / → 仍用于移动光标，Esc 回到分组。最终总览需明确确认才会保存并部署；文字菜单用 `<` / `>` 切换步骤。
 
 - **基础信息与服务端口**：节点名称、公网 IPv4、SSH、主入口、订阅服务和 Nginx 静态页内部端口。IPv4 自动探测后可改；新安装为这些服务生成互不冲突的 `49152–65535` 高位随机端口，回退修改不会重新抽取。NAT 主机请改为服务商实际映射的本机端口。
-- **Cloudflare 域名与静态页**：默认开启，也可主动关闭。第 2 项「一级子域名」自动建议使用节点名称的小写形式，可修改；第 3 项「域名」填写 Cloudflare 中的根域/Zone。例：节点名称 `AalTR-Verizon` 对应建议 `aaltr-verizon`，域名填 `example.com`，最终节点域名为 `aaltr-verizon.example.com`。再填写证书邮箱和 API Token；Token 输入隐藏显示，需对应 Zone 的 DNS 编辑和 Zone 读取权限，域名应已在 CF 激活。[首次配置说明](docs/cloudflare-domain-preflight.md)。
+- **Cloudflare 域名与静态页**：默认开启。第 1 项进入「开启 / 关闭」选择，Enter 默认保留当前状态，Esc 取消；选择关闭后无需填写域名、邮箱或 Token，按 → 进入下一组。第 2 项「一级子域名」自动建议使用节点名称的小写形式，可修改；第 3 项「域名」填写 Cloudflare 中的根域/Zone。例：节点名称 `AalTR-Verizon` 对应建议 `aaltr-verizon`，域名填 `example.com`，最终节点域名为 `aaltr-verizon.example.com`。再填写证书邮箱和 API Token；Token 输入隐藏显示，需对应 Zone 的 DNS 编辑和 Zone 读取权限，域名应已在 CF 激活。[首次配置说明](docs/cloudflare-domain-preflight.md)。
 - **节点协议**：保留 VLESS Reality，按需启用 HY2、SOCKS5、SS 和 HTTP，并填写各自端口与认证参数。四种新增协议默认关闭，启用后自动加入订阅和本地输出。参见[协议配置](docs/protocols.md)。
 - **管理员公钥**：可粘贴多把公钥；明确选择复用已有公钥时才使用服务器现有公钥。
 

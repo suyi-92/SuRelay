@@ -143,6 +143,50 @@ class InstallWizardTest(unittest.TestCase):
         for name in ("HY2", "SOCKS5", "Shadowsocks", "HTTP"):
             self.assertIn(name, labels)
 
+    def test_plain_install_can_disable_cf_and_save_without_domain_or_credentials(self):
+        wizard = install.Wizard(install.initial_values("192.0.2.10"))
+        wizard.values["SERVER_ALIAS"] = "relay"
+        # Reach CF, choose Off, reopen and confirm the current mode, then
+        # finish installation without entering a domain, email or API token.
+        answers = [">", ">", "1", "2", "1", "", ">", ">", "2", ">", "1"]
+        with patch("surelay_install.current", return_value=None), \
+                patch("surelay.current_terminal", return_value=None), \
+                patch("builtins.input", side_effect=answers), contextlib.redirect_stdout(io.StringIO()):
+            values = wizard.run()
+        self.assertEqual(values["ENABLE_CUSTOM_DOMAIN"], "false")
+        for key in ("CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "LE_EMAIL", "CLOUDFLARE_API_TOKEN"):
+            self.assertEqual(values[key], "")
+        self.assertIn("CF 域名与静态页：关闭", wizard.summary())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.example.env").write_bytes((ROOT / "config.example.env").read_bytes())
+            install.save_config(root, values)
+            saved = GEN.defaults(GEN.parse_env_file(root / "config.env"))
+        GEN.validate_env(saved)
+        self.assertEqual(saved["ENABLE_CUSTOM_DOMAIN"], "false")
+        self.assertEqual(saved["REALITY_SERVER_NAME"], "www.microsoft.com")
+        self.assertEqual(saved["REALITY_HANDSHAKE_SERVER"], "www.microsoft.com")
+        self.assertEqual(saved["REALITY_HANDSHAKE_PORT"], "443")
+        self.assertEqual(saved["SUBSCRIPTION_BASE_URL"], "")
+        self.assertEqual(saved["SUBSCRIPTION_PORT"], saved["SUBSCRIPTION_INTERNAL_PORT"])
+        self.assertEqual(saved["SUBSCRIPTION_LISTEN_PORT"], saved["SUBSCRIPTION_INTERNAL_PORT"])
+
+    def test_domain_mode_cancel_and_reenable_preserve_entered_fields(self):
+        wizard = self.draft()
+        original = wizard.validate()
+        for answer, enabled in (("0", "true"), ("2", "false"), ("0", "false"), ("1", "true")):
+            with self.subTest(answer=answer, enabled=enabled), \
+                    patch("surelay.current_terminal", return_value=None), \
+                    patch("builtins.input", return_value=answer), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    wizard.domain_fields()[0][1]()
+                except install.Cancelled:
+                    self.assertEqual(answer, "0")
+                self.assertEqual(wizard.values["ENABLE_CUSTOM_DOMAIN"], enabled)
+                for key in ("CUSTOM_DOMAIN", "CLOUDFLARE_ZONE_NAME", "LE_EMAIL", "CLOUDFLARE_API_TOKEN"):
+                    self.assertEqual(wizard.values[key], original[key])
+        self.assertEqual(wizard.validate(), original)
+
     def test_validation_rejects_port_conflicts_and_missing_keys_without_writing(self):
         wizard = self.draft()
         wizard.keys_confirmed = False

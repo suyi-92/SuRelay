@@ -11,7 +11,7 @@ import sys
 
 from surelay_core import Error, GEN, Manager, ROOT, atomic, env_text, port, random_high_ports
 from surelay_terminal import STEP_NEXT, STEP_PREVIOUS, Terminal, current
-from surelay import ask, Cancelled
+from surelay import ask, Cancelled, pick
 
 
 PROTOCOLS = (
@@ -208,11 +208,18 @@ class Wizard:
         reserved += [self.values.get(key, "0") for _, _, key in PROTOCOLS]
         self.values.update(zip(keys, map(str, random_high_ports(len(keys), reserved=map(int, reserved)))))
 
+    def edit_domain_mode(self):
+        enabled = self.values["ENABLE_CUSTOM_DOMAIN"] == "true"
+        mode = pick("CF 域名与静态网页", ["开启（使用域名和 HTTPS 静态网页、订阅）",
+                                         "关闭（使用 IP 节点和 HTTP 订阅）"],
+                    context=[("当前状态", "开启" if enabled else "关闭")], default=0 if enabled else 1)
+        self.values["ENABLE_CUSTOM_DOMAIN"] = "true" if mode == 0 else "false"
+
     def domain_fields(self):
         self.sync_domain()
         enabled = self.values["ENABLE_CUSTOM_DOMAIN"] == "true"
         fields = [("CF 域名与静态网页：" + ("开启" if enabled else "关闭"),
-                   lambda: self.toggle("ENABLE_CUSTOM_DOMAIN"))]
+                   self.edit_domain_mode)]
         if enabled:
             fields += [("一级子域名：" + (self.subdomain_value() or "待填写"), self.edit_subdomain),
                        self.field("CLOUDFLARE_ZONE_NAME", "域名", validate=domain,

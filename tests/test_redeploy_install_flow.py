@@ -131,7 +131,11 @@ printf '%s\\n' "$RRB_REDEPLOY" "$RRB_RESET_INSTALL" "$RRB_SECURITY_ONLY" "$RRB_R
         (self.root / "scripts").mkdir()
         (self.root / "config.env").write_text('SERVER_IP_IPV4=192.0.2.10\nSSH_PORT=52322\n')
         for filename, phase in (("02-setup-root-ssh.sh", "keys"), ("03-ssh-hardening-phase1.sh", "stage")):
-            (self.root / "scripts" / filename).write_text('printf "' + phase + '\\n" >>"$RRB_PROJECT_DIR/phases"\n')
+            (self.root / "scripts" / filename).write_text(
+                'printf "' + phase + '\\n" >>"$RRB_PROJECT_DIR/phases"\n'
+                'printf "SSH_STEP_NOISE_' + phase + '\\n"\n'
+                'printf "SSH_STEP_STDERR_' + phase + '\\n" >&2\n'
+                'printf "%s" "$RRB_INSTALL_FLOW" >"$RRB_PROJECT_DIR/flow-marker"\n')
         for answer, final in ((b"\n", False), (b"n\n", False), (b"y\n", True)):
             with self.subTest(answer=answer):
                 (self.root / "phases").unlink(missing_ok=True)
@@ -153,7 +157,13 @@ run_install_flow "$1"
                     os.close(slave)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("[y/N]", prompt)
-                self.assertIn("本次录入的公钥", prompt)
+                self.assertIn("本次填写的公钥", prompt)
+                self.assertEqual(result.stdout.count("ssh -p "), 1)
+                self.assertNotIn("SSH_STEP_NOISE", result.stdout + result.stderr)
+                self.assertNotIn("SSH_STEP_STDERR", result.stdout + result.stderr)
+                self.assertIn("SSH_STEP_NOISE_keys", (self.root / "install.log").read_text())
+                self.assertIn("SSH_STEP_STDERR_stage", (self.root / "install.log").read_text())
+                self.assertEqual((self.root / "flow-marker").read_text(), "true")
                 phases = (self.root / "phases").read_text().splitlines()
                 expected = ["preflight", "keys", "stage"]
                 if final:

@@ -134,10 +134,56 @@ class ResetInstallTest(unittest.TestCase):
 
     def test_preview_has_no_writes_or_service_actions(self):
         obj = self.resetter()
-        obj.describe()
+        with patch.dict(os.environ, RRB_VERBOSE='false'), redirect_stdout(io.StringIO()) as output:
+            obj.describe()
+        self.assertEqual(len(output.getvalue().splitlines()), 3)
+        self.assertIn('将先备份', output.getvalue())
+        self.assertNotIn('/opt/relay/config.env', output.getvalue())
+        self.assertNotIn('sing-box', output.getvalue())
         self.assertTrue(self.p('/opt/relay/config.env').exists())
         self.assertFalse(self.p('/root/surelay-backups').exists())
         self.assertEqual(self.calls, [['ufw', 'show', 'added']])
+
+    def test_verbose_preview_keeps_the_complete_plan_without_writing_it(self):
+        obj = self.resetter()
+        with patch.dict(os.environ, RRB_VERBOSE='true'), redirect_stdout(io.StringIO()) as output:
+            obj.describe()
+        self.assertIn('/opt/relay/config.env', output.getvalue())
+        self.assertIn('停用服务：surelay-subscription, sing-box', output.getvalue())
+        self.assertFalse(self.p('/root/surelay-backups').exists())
+
+    def test_quiet_apply_saves_private_plan_and_suppresses_routine_details(self):
+        self.put('/opt/relay/config.env', 'SERVER_ALIAS=old\nPROXY_PASSWORD=private-test-value\n')
+        obj = self.resetter()
+        with patch.dict(os.environ, RRB_VERBOSE='false'), redirect_stdout(io.StringIO()) as output:
+            obj.apply()
+        self.assertNotIn('备份已核验', output.getvalue())
+        self.assertNotIn('保留目录', output.getvalue())
+        self.assertNotIn(str(obj.backup), output.getvalue())
+        plan = obj.backup / 'plan.txt'
+        self.assertEqual(plan.stat().st_mode & 0o777, 0o600)
+        details = plan.read_text()
+        self.assertIn('/opt/relay/config.env', details)
+        self.assertIn('停用服务：surelay-subscription, sing-box', details)
+        self.assertIn('备份已核验', details)
+        self.assertIn('保留目录中的非项目文件：/etc/surelay', details)
+        self.assertNotIn('private-test-value', details)
+
+    def test_quiet_failure_still_displays_recovery_directory(self):
+        obj = self.resetter()
+        def fail():
+            obj.backup = self.p('/root/surelay-backups/reset-failed')
+            raise reset.ResetError('fixture failure')
+        with patch.object(reset, 'ResetDeployment', return_value=obj), \
+                patch.object(obj, 'collect'), patch.object(obj, 'apply', side_effect=fail), \
+                patch('sys.argv', ['reset', '--project-dir', '/opt/relay', '--apply']), \
+                patch.object(os, 'geteuid', return_value=0), patch.dict(os.environ, RRB_VERBOSE='false'), \
+                patch('builtins.open') as tty, redirect_stdout(io.StringIO()) as output:
+            tty.return_value.__enter__.return_value.readline.return_value = 'RESET\n'
+            with self.assertRaisesRegex(reset.ResetError, 'fixture failure'):
+                reset.main()
+        self.assertIn('重置未完成', output.getvalue())
+        self.assertIn(str(obj.backup), output.getvalue())
 
     def test_os_release_symlink_is_read_only_metadata(self):
         for distro in ('debian', 'ubuntu', 'alpine'):

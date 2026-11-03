@@ -234,7 +234,7 @@ class Manager:
     def phase(self, name, **extra):
         run(["bash", self.root / "bootstrap.sh", "--phase", name], env={
             "RRB_SHOW_RESULT": "false", "RRB_SKIP_PACKAGE_INSTALL": "true",
-            "RRB_VERBOSE": "true", **extra,
+            "RRB_VERBOSE": os.environ.get("RRB_VERBOSE", "false"), **extra,
         })
 
     def alpine(self):

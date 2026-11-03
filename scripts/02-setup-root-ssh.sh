@@ -65,6 +65,20 @@ install_authorized_keys() {
   chmod go-w "$home" || true
 }
 
+quiet_root_login() {
+  local home marker
+  home="$(user_home root)"
+  marker="$home/.hushlogin"
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    log "保留已有登录提示设置：$marker"
+  elif is_dry_run; then
+    log "DRY-RUN: create private quiet-login marker $marker"
+  elif ! (umask 077; set -o noclobber; : > "$marker") 2>/dev/null; then
+    # A concurrently created file or link is also preserved without following it.
+    [[ -e "$marker" || -L "$marker" ]] || die "无法创建 SSH 静默登录标记：$marker"
+  fi
+}
+
 root_keys="$(get_pubkey_for_root || true)"
 [[ -n "$root_keys" ]] || die "没有可用 ADMIN_PUBKEY，也无法从 /root/.ssh/authorized_keys 复制。"
 
@@ -78,6 +92,7 @@ if ! is_dry_run; then
 fi
 
 install_authorized_keys root "$root_keys"
+quiet_root_login
 
 if [[ "$ENABLE_SFTP_USER" == "true" ]]; then
   NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
@@ -96,17 +111,4 @@ if [[ "$ENABLE_SFTP_USER" == "true" ]]; then
   fi
 fi
 
-if [[ "$ENABLE_SFTP_USER" == "true" ]]; then
-  sftp_status="true ($SFTP_USER)"
-else
-  sftp_status="false"
-fi
-
-cat <<EOF
-
-用户准备完成：
-  SSH 用户：root
-  SFTP 用户：$sftp_status
-
-下一步会写入 phase1 SSH drop-in，只开启公钥登录，不禁 root/密码。
-EOF
+info "SSH 公钥准备完成。"

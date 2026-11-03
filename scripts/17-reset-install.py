@@ -583,24 +583,42 @@ class ResetDeployment:
         result = self.runner(command, check=check and action != 'active')
         return result.returncode == 0
 
-    def describe(self):
-        print('开始引导式节点布置：清空旧节点、配置、密钥、域名凭据与 SR 安全属性，重新填写全部参数。' if self.redeploy else
-              '卸载将停止节点与订阅，并删除本项目部署配置。' if self.uninstall else
-              '重置安装将停止旧节点和订阅，清空配置/出口列表，并在重装时生成新密钥。')
-        print('备份后删除以下项目文件：')
-        for path in sorted(self.paths):
-            print(f'  {path}')
-        print('停用服务：' + (', '.join(self.services) or '无'))
+    def plan_lines(self):
+        lines = ['开始引导式节点布置：清空旧节点、配置、密钥、域名凭据与 SR 安全属性，重新填写全部参数。' if self.redeploy else
+                 '卸载将停止节点与订阅，并删除本项目部署配置。' if self.uninstall else
+                 '重置安装将停止旧节点和订阅，清空配置/出口列表，并在重装时生成新密钥。',
+                 '备份后删除以下项目文件：', *[f'  {path}' for path in sorted(self.paths)],
+                 '停用服务：' + (', '.join(self.services) or '无')]
         if self.redeploy:
-            print(f'立即清理已确认 SR 防火墙规则：{len(self.firewall)} 条；新 SSH 验证后再清理：{len(self.pending_firewall)} 条。')
-            print('暂时保留当前 SSH 配置和全部公钥以完成交接；新端口与本次录入的公钥验证后，清除未选用且可确认归属的旧 SR 身份。')
-            print('归属不明的手工公钥、无 SR 注释的防火墙规则、其他服务、Cloudflare DNS、云安全组和系统软件包保留。')
+            lines += [f'立即清理已确认 SR 防火墙规则：{len(self.firewall)} 条；新 SSH 验证后再清理：{len(self.pending_firewall)} 条。',
+                      '暂时保留当前 SSH 配置和全部公钥以完成交接；新端口与本次录入的公钥验证后，清除未选用且可确认归属的旧 SR 身份。',
+                      '归属不明的手工公钥、无 SR 注释的防火墙规则、其他服务、Cloudflare DNS、云安全组和系统软件包保留。']
             if self.external_tls_preserved:
-                print('保留用户自行管理的外部 HY2 证书/私钥：' + ', '.join(self.external_tls_preserved))
-            print(f'私有交接记录：{self.handoff_file}；未完成交接时禁止再次重置。')
+                lines.append('保留用户自行管理的外部 HY2 证书/私钥：' + ', '.join(self.external_tls_preserved))
+            lines.append(f'私有交接记录：{self.handoff_file}；未完成交接时禁止再次重置。')
         else:
-            print(f'清理代理/订阅 UFW 规则：{len(self.firewall)} 条；保留 SSH 规则。')
-            print('保留 SSH 配置/公钥/账户、系统软件包、自定义端口规则、其他站点、Cloudflare DNS、代码目录及历史备份。')
+            lines += [f'清理代理/订阅 UFW 规则：{len(self.firewall)} 条；保留 SSH 规则。',
+                      '保留 SSH 配置/公钥/账户、系统软件包、自定义端口规则、其他站点、Cloudflare DNS、代码目录及历史备份。']
+        return lines
+
+    def describe(self):
+        if os.environ.get('RRB_VERBOSE', 'false').lower() == 'true':
+            print('\n'.join(self.plan_lines()))
+            return
+        print('重新布置将停止旧节点与订阅，清空项目配置并重新填写参数。' if self.redeploy else
+              '卸载将停止节点与订阅，并删除本项目部署配置。' if self.uninstall else
+              '重置将停止旧节点与订阅，清空项目配置并重新生成节点密钥。')
+        rules = len(self.firewall) + len(self.pending_firewall)
+        print(f'将先备份，再清理 {len(self.paths)} 项项目文件、{rules} 条项目规则，停止 {len(self.services)} 项服务。')
+        print('保留当前 SSH；验证新端口后才清理未选项目公钥和旧入口。归属不明的公钥和其他服务保留。' if self.redeploy else
+              '保留 SSH 登录、公钥、其他服务与非项目文件。')
+
+    def detail(self, message):
+        if self.backup:
+            with (self.backup / 'plan.txt').open('a', encoding='utf-8') as stream:
+                stream.write(message + '\n')
+        if os.environ.get('RRB_VERBOSE', 'false').lower() == 'true':
+            print(message, flush=True)
 
     def snapshot(self):
         base = self.path('/root/surelay-backups')
@@ -608,6 +626,9 @@ class ResetDeployment:
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
         base.chmod(0o700)
         self.backup = Path(tempfile.mkdtemp(prefix='redeploy-' if self.redeploy else 'reset-', dir=base))
+        plan = self.backup / 'plan.txt'
+        plan.write_text('\n'.join(self.plan_lines()) + '\n', encoding='utf-8')
+        plan.chmod(0o600)
         extra = ['/etc/ssh', '/root/.ssh/authorized_keys', '/etc/ufw', '/etc/default/ufw', *self.backup_extra]
         paths = set(self.paths)
         for value in extra:
@@ -653,7 +674,7 @@ class ResetDeployment:
             'firewall': self.firewall, 'status': 'backed-up',
         }, ensure_ascii=False, indent=2) + '\n')
         (self.backup / 'manifest.json').chmod(0o600)
-        print(f'备份已核验：{self.backup}', flush=True)
+        self.detail(f'备份已核验：{self.backup}')
         return state
 
     def write_handoff(self, status, error=''):
@@ -771,7 +792,7 @@ class ResetDeployment:
                 if not any(p.iterdir()):
                     p.rmdir()
                 else:
-                    print(f'保留目录中的非项目文件：{value}')
+                    self.detail(f'保留目录中的非项目文件：{value}')
         if not self.alpine:
             self.runner(['systemctl', 'daemon-reload'])
         for name in self.shared:
@@ -787,7 +808,7 @@ class ResetDeployment:
         saved = json.loads(manifest.read_text())
         saved['status'] = 'removed'
         manifest.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + '\n')
-        print('旧 SR 部署已清除；SSH 交接尚未完成。请继续向导并验证新端口与本次录入的公钥。' if self.redeploy else
+        print('旧部署已清理，请继续安装向导。' if self.redeploy else
               'SuRelay 已卸载。SSH 登录配置、公钥和代码目录已保留。' if self.uninstall else
               '旧部署已卸载。接下来重新填写配置并执行安装。')
 

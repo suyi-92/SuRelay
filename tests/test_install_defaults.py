@@ -80,8 +80,8 @@ run_install_flow "$1"
                 os.close(slave)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("ssh -p 24087 ", result.stdout)
-            self.assertIn("当前 SSH 会话使用端口 22", result.stderr)
-            self.assertIn("验证命令将按配置端口执行", result.stderr)
+            self.assertNotIn("当前 SSH 会话使用端口 22", result.stderr)
+            self.assertIn("验证命令将按配置端口执行", (root / "install.log").read_text())
             self.assertEqual(
                 subprocess.check_output(
                     ["bash", "-c", 'source "$1"; printf "%s" "$SSH_PORT"', "_", str(root / "config.env")],
@@ -124,7 +124,7 @@ run_install_flow "$1"
                 self.assertEqual("应用配置与验证" in result.stdout, confirmed)
                 self.assertNotIn("\033[", result.stdout + result.stderr)
 
-    def test_quiet_phase_keeps_warnings_and_failure_status(self):
+    def test_quiet_phase_logs_both_streams_and_preserves_failure_status(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "bootstrap.sh").write_text('printf "routine output\\n"\nprintf "WARN: fixture failure\\n" >&2\nexit 7\n')
@@ -132,7 +132,9 @@ run_install_flow "$1"
             self.assertEqual(result.returncode, 7)
             self.assertNotIn("routine output", result.stdout)
             self.assertIn("routine output", (root / "install.log").read_text())
-            self.assertIn("WARN: fixture failure", result.stderr)
+            self.assertNotIn("WARN: fixture failure", result.stderr)
+            self.assertIn("WARN: fixture failure", (root / "install.log").read_text())
+            self.assertEqual((root / "install.log").stat().st_mode & 0o777, 0o600)
             self.assertIn("开始：安装 sing-box", result.stderr)
             self.assertIn("阶段失败：安装 sing-box", result.stderr)
             self.assertNotIn("完成：", result.stderr)
@@ -145,9 +147,38 @@ run_install_flow "$1"
                 result = self.run_bash('cd "$1"; run_install_phase singbox', root, RRB_VERBOSE=verbose)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("开始：安装 sing-box", result.stderr)
-                self.assertIn("完成：安装 sing-box", result.stderr)
+                self.assertEqual("完成：安装 sing-box" in result.stderr, verbose == "true")
                 self.assertNotIn("阶段失败", result.stderr)
                 self.assertEqual("routine output" in result.stdout, verbose == "true")
+
+    def test_successful_warning_is_summarized_without_raw_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "bootstrap.sh").write_text('printf "WARN: fixture detail\\n" >&2\nprintf "%200000s\\n" x\n')
+            result = self.run_bash('cd "$1"; run_install_phase validate', root, RRB_VERBOSE="false")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("fixture detail", result.stdout + result.stderr)
+            self.assertIn("有提示请查看日志", result.stderr)
+            self.assertIn("WARN: fixture detail", (root / "install.log").read_text())
+
+    def test_install_log_rejects_links_and_repairs_existing_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "keep.txt"
+            target.write_text("keep original\n")
+            log = root / "install.log"
+            log.symlink_to(target)
+            result = self.run_bash('run_logged printf "noise"', root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("不能为符号链接", result.stderr)
+            self.assertEqual(target.read_text(), "keep original\n")
+            log.unlink()
+            log.write_text("previous log\n")
+            log.chmod(0o644)
+            result = self.run_bash('run_logged printf "new detail"', root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(log.read_text(), "previous log\nnew detail")
 
     def test_maintenance_lock_blocks_a_concurrent_install(self):
         if not shutil.which("flock"):

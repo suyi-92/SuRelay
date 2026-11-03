@@ -213,28 +213,11 @@ if [[ -n "${RRB_REDEPLOY_HANDOFF:-}" ]]; then
   fi
 fi
 
-cat <<EOF
-
-SSH 最终加固已应用。请不要关闭当前窗口，立刻另开 PowerShell 测试：
-
-$(if [[ -n "$(server_ipv4_hosts)" ]]; then
-  printf 'IPv4:\n'
-  for host in $(server_ipv4_hosts); do
-    printf '  ssh -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@%s\n' "$SSH_PORT" "$host"
+if [[ "${RRB_INSTALL_FLOW:-false}" != "true" ]]; then
+  printf 'SSH 最终加固已完成。请保留当前窗口，另开终端复验：\n'
+  for host in $(server_hosts); do
+    printf '  ssh -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@%s whoami\n' "$SSH_PORT" "$host"
     printf '  ssh -p %s -o PubkeyAuthentication=no -o PreferredAuthentications=password root@%s\n' "$SSH_PORT" "$host"
   done
-  printf '\n'
-fi)
-$(if [[ -n "$(server_ipv6_hosts)" ]]; then
-  printf '\nIPv6:\n'
-  for host in $(server_ipv6_hosts); do
-    printf '  ssh -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no root@%s\n' "$SSH_PORT" "$host"
-    printf '  ssh -p %s -o PubkeyAuthentication=no -o PreferredAuthentications=password root@%s\n' "$SSH_PORT" "$host"
-  done
-  printf '\n'
-fi)
-
-预期：
-  1. root key 登录成功。
-  2. root 密码登录失败。
-EOF
+  printf '公钥登录应输出 root；密码登录应被拒绝。\n'
+fi

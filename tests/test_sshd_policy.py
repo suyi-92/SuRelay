@@ -103,6 +103,75 @@ class SshdPolicyTextTest(unittest.TestCase):
             self.assertEqual(list(Path(temporary).iterdir()), [config])
 
 
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "Requires POSIX Bash and file permissions")
+class RootLoginOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.home = self.root / "root-home"
+        self.home.mkdir()
+        self.marker = self.home / ".hushlogin"
+        self.project = self.root / "project"
+        scripts = self.project / "scripts"
+        scripts.mkdir(parents=True)
+        self.log = self.root / "setup.log"
+        # Exercise the real stage with all account/package/service operations isolated.
+        (scripts / "00-lib.sh").write_text('''
+SCRIPT_DIR="$RRB_PROJECT_DIR/scripts"
+RRB_CONFIG_FILE="$RRB_PROJECT_DIR/config.env"
+require_root() { :; }
+require_supported_os() { :; }
+load_config() { ADMIN_PUBKEY='ssh-ed25519 AAAA fixture'; ENABLE_SFTP_USER=false; }
+pkg_install() { :; }
+is_dry_run() { [[ "$RRB_DRY_RUN" == true ]]; }
+user_home() { printf '%s\\n' "$TEST_ROOT_HOME"; }
+log() { printf '%s\\n' "$*" >>"$TEST_LOG"; }
+info() { log "$*"; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+install() { command mkdir -p -- "${@: -1}"; }
+chown() { :; }
+''')
+        (scripts / "surelay_redeploy.py").write_text("# No host key or service operations.\n")
+
+    def run_stage(self, *, dry_run=False):
+        result = subprocess.run(["bash", str(ROOT / "scripts/02-setup-root-ssh.sh")], text=True,
+                                capture_output=True, env={**os.environ, "RRB_PROJECT_DIR": str(self.project),
+                                "RRB_REDEPLOY_HANDOFF": "", "RRB_DRY_RUN": str(dry_run).lower(),
+                                "TEST_ROOT_HOME": str(self.home), "TEST_LOG": str(self.log)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_root_login_marker_is_private_and_existing_marker_is_preserved(self):
+        self.run_stage()
+        self.assertEqual(self.marker.read_bytes(), b"")
+        self.assertEqual(self.marker.stat().st_mode & 0o777, 0o600)
+        self.marker.write_text("existing user preference\n")
+        self.marker.chmod(0o640)
+        before = self.marker.stat().st_mtime_ns
+        self.run_stage()
+        self.assertEqual(self.marker.read_text(), "existing user preference\n")
+        self.assertEqual(self.marker.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.marker.stat().st_mtime_ns, before)
+
+    def test_existing_and_dangling_login_marker_links_are_not_followed(self):
+        target = self.root / "unrelated-file"
+        target.write_text("keep unrelated content\n")
+        for destination in (target, self.root / "missing-file"):
+            with self.subTest(destination=destination):
+                self.marker.symlink_to(destination)
+                self.run_stage()
+                self.assertTrue(self.marker.is_symlink())
+                self.assertEqual(target.read_text(), "keep unrelated content\n")
+                self.assertFalse((self.root / "missing-file").exists())
+                self.marker.unlink()
+
+    def test_dry_run_only_logs_login_marker_creation(self):
+        self.run_stage(dry_run=True)
+        self.assertFalse(self.marker.exists())
+        self.assertIn("DRY-RUN: create private quiet-login marker", self.log.read_text())
+
+
 @unittest.skipUnless(os.name == "posix" and SSHD and shutil.which("ssh-keygen"), "Requires real OpenSSH server tools")
 class SshdPolicyIntegrationTest(unittest.TestCase):
     @classmethod
@@ -149,7 +218,7 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
         return values
 
     def run_phase(self, script_name, *, confirmed=True, sftp=False, restore=None, dry_run=False,
-                  ssh_port="22", verbose=True):
+                  ssh_port="22", verbose=True, install_flow=False):
         library = (ROOT / "scripts/00-lib.sh").read_text(encoding="utf-8")
         phase = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
         phase = "\n".join(line for line in phase.splitlines() if not line.startswith('source "'))
@@ -167,6 +236,7 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
             "BACKUP_DIR": str(backup),
             "RRB_DRY_RUN": str(dry_run).lower(),
             "RRB_VERBOSE": str(verbose).lower(),
+            "RRB_INSTALL_FLOW": str(install_flow).lower(),
             "CONFIRM_ROOT_KEY_LOGIN": "yes" if confirmed else "",
             "CONFIRM_ROLLBACK": "yes",
             "ENABLE_SFTP_USER": str(sftp).lower(),
@@ -316,6 +386,26 @@ getent() {{
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertFalse(self.reloads.exists())
+
+    def test_install_flow_does_not_repeat_ssh_login_guidance(self):
+        for script in ("03-ssh-hardening-phase1.sh", "04-ssh-hardening-final.sh"):
+            with self.subTest(script=script):
+                result = self.run_phase(script, verbose=False, install_flow=True)
+                self.assert_success(result)
+                self.assertEqual(result.stdout, "")
+        self.assert_final()
+
+    def test_standalone_ssh_phases_keep_compact_verification_commands(self):
+        result = self.run_phase("03-ssh-hardening-phase1.sh", verbose=False)
+        self.assert_success(result)
+        self.assertEqual(result.stdout.count("root@192.0.2.10 whoami"), 1)
+        self.assertEqual(result.stdout.count("CONFIRM_ROOT_KEY_LOGIN=yes"), 1)
+        self.assertNotIn("登录成功后在新窗口执行", result.stdout)
+        result = self.run_phase("04-ssh-hardening-final.sh", verbose=False)
+        self.assert_success(result)
+        self.assertEqual(result.stdout.count("root@192.0.2.10 whoami"), 1)
+        self.assertIn("密码登录应被拒绝", result.stdout)
+        self.assertNotIn("bootstrap.sh --phase ssh-final", result.stdout)
 
     def test_final_port_update_keeps_final_authentication_ahead_of_maintenance_override(self):
         from unittest.mock import Mock

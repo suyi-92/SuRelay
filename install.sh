@@ -39,8 +39,8 @@ section() {
   printf '%b\n' "${CYAN}${BOLD}$*${RESET}"
   line
 }
-info() { printf '%b\n' "${BLUE}INFO${RESET} $*" >&2; }
-warn() { printf '%b\n' "${YELLOW}WARN${RESET} $*" >&2; }
+info() { printf '%b\n' "$*" >&2; }
+warn() { printf '%b\n' "${YELLOW}提示：${RESET}$*" >&2; }
 die() { printf '%b\n' "${RED}ERROR${RESET} $*" >&2; exit 1; }
 
 usage() {
@@ -168,11 +168,50 @@ init_input_tty() {
   fi
 }
 
+prepare_install_log() {
+  [[ ! -L "$INSTALL_LOG_FILE" ]] || die "安装日志不能为符号链接：$INSTALL_LOG_FILE"
+  if [[ -e "$INSTALL_LOG_FILE" ]]; then
+    [[ -f "$INSTALL_LOG_FILE" && -O "$INSTALL_LOG_FILE" ]] \
+      || die "安装日志必须是当前用户拥有的普通文件：$INSTALL_LOG_FILE"
+  else
+    (umask 077; set -o noclobber; : >"$INSTALL_LOG_FILE") \
+      || die "无法创建安装日志：$INSTALL_LOG_FILE"
+  fi
+  chmod 600 "$INSTALL_LOG_FILE" || die "无法设置安装日志权限：$INSTALL_LOG_FILE"
+}
+
+detail() {
+  prepare_install_log
+  printf '%s\n' "$*" >>"$INSTALL_LOG_FILE"
+  if [[ "$RRB_VERBOSE" == "true" ]]; then info "$*"; fi
+}
+
 run_logged() {
+  prepare_install_log
   if [[ "$RRB_VERBOSE" == "true" ]]; then
     "$@"
   else
     "$@" >>"$INSTALL_LOG_FILE" 2>&1
+  fi
+}
+
+run_install_step() {
+  local label="$1" status=0 log_offset
+  shift
+  prepare_install_log
+  log_offset="$(wc -c <"$INSTALL_LOG_FILE")"
+  info "开始：$label"
+  printf '\n--- %s ---\n' "$label" >>"$INSTALL_LOG_FILE"
+  run_logged "$@" || status=$?
+  if (( status != 0 )); then
+    warn "阶段失败：$label（退出码 $status）；详细日志：$INSTALL_LOG_FILE"
+    return "$status"
+  fi
+  if [[ "$RRB_VERBOSE" == "true" ]]; then
+    info "完成：$label"
+  elif tail -c "+$((log_offset + 1))" "$INSTALL_LOG_FILE" \
+      | grep -Ei '(^|[[:space:]])WARN(ING)?([ :]|$)|警告|告警' >/dev/null; then
+    warn "$label 已完成，有提示请查看日志。"
   fi
 }
 
@@ -580,7 +619,7 @@ ensure_proxy_lists() {
 }
 
 run_install_phase() {
-  local phase="$1" label="$1" status=0
+  local phase="$1" label="$1"
   case "$phase" in
     preflight) label="检查系统与依赖" ;;
     ssh-phase1) label="准备 SSH 公钥登录" ;;
@@ -596,18 +635,7 @@ run_install_phase() {
       fi
       ;;
   esac
-  info "开始：$label"
-  if [[ "$RRB_VERBOSE" == "true" ]]; then
-    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" || status=$?
-  else
-    # Routine stdout goes to the log; warnings and failures stay visible on stderr.
-    RRB_SHOW_RESULT=false bash bootstrap.sh --phase "$phase" >>"$INSTALL_LOG_FILE" || status=$?
-  fi
-  if (( status != 0 )); then
-    warn "阶段失败：$label（退出码 $status）；请查看 $INSTALL_LOG_FILE 和 /var/log/surelay.log。"
-    return "$status"
-  fi
-  info "完成：$label"
+  RRB_SHOW_RESULT=false run_install_step "$label" bash bootstrap.sh --phase "$phase"
 }
 
 run_install_flow() {
@@ -620,6 +648,7 @@ run_install_flow() {
   fi
   # Use the saved settings, including ports and file paths customized through config.env.
   source "$project_dir/config.env"
+  export RRB_INSTALL_FLOW=true
   configured_ssh_port="${SSH_PORT:-22}"
   if [[ "$INSTALL_MODE" == "security-only" || "${SURELAY_SECURITY_ONLY:-false}" == "true" || "${RRB_SECURITY_ONLY:-false}" == "true" ]]; then
     security_only_mode=true
@@ -627,7 +656,7 @@ run_install_flow() {
   fi
   current_ssh_port="$(ssh_connection_port)"
   if [[ -n "$current_ssh_port" && "$current_ssh_port" != "$configured_ssh_port" ]]; then
-    warn "当前 SSH 会话使用端口 $current_ssh_port，但 config.env 记录为 $configured_ssh_port；验证命令将按配置端口执行。"
+    detail "当前 SSH 会话使用端口 $current_ssh_port，但 config.env 记录为 $configured_ssh_port；验证命令将按配置端口执行。"
   fi
   ssh_host="${SERVER_IP_IPV4:-${SERVER_IP_IPV6:-${SERVER_IP:-}}}"
   # Prefer the already working SSH address when it is one of the configured endpoints.
@@ -640,14 +669,13 @@ run_install_flow() {
   fi
 
   section "部署准备"
-  info "开始部署；详细日志：$INSTALL_LOG_FILE"
+  info "详细日志：$INSTALL_LOG_FILE"
   run_install_phase preflight
   if [[ "$INSTALL_MODE" == "reset" || "${RRB_RESET_INSTALL:-false}" == "true" ]]; then
     # Keep the working SSH policy until the user has verified the new keys.
-    info "更新 root 公钥，验证前保留当前 SSH 登录策略。"
-    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" \
+    run_install_step "准备管理员公钥" env RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" \
       bash "$project_dir/scripts/02-setup-root-ssh.sh"
-    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_RESET_INSTALL=true \
+    run_install_step "准备 SSH 验证端口" env RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_RESET_INSTALL=true \
       bash "$project_dir/scripts/03-ssh-hardening-phase1.sh"
   else
     run_install_phase ssh-phase1
@@ -657,8 +685,7 @@ run_install_flow() {
   printf '另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
   printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "$configured_ssh_port" "$ssh_host"
   if [[ "${RRB_REDEPLOY:-false}" == true ]]; then
-    printf '请明确使用本次录入的公钥登录（可使用原公钥）；确认后将移除未选用的旧 SuRelay 公钥与旧 SSH 入口。\n'
-    ssh_confirm_prompt="已用本次录入的公钥在新端口登录成功，清理未选用的旧公钥和旧入口？"
+    ssh_confirm_prompt="已用本次填写的公钥通过新端口登录，清理旧入口并继续？"
     ssh_confirm_default=no
   fi
   if read_yes_no "$ssh_confirm_prompt" "$ssh_confirm_default"; then
@@ -705,11 +732,8 @@ run_ipv6_node_flow() {
   normalized_ipv6="$(normalize_ipv6 "$IPV6_NODE_ADDRESS")" || die "IPv6 地址校验失败。"
 
   local -a command=(bash "$project_dir/scripts/16-add-ipv6-node.sh" --address "$normalized_ipv6")
-  if [[ "$RRB_VERBOSE" == "true" ]]; then
-    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_SHOW_RESULT=false "${command[@]}"
-  else
-    RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" RRB_SHOW_RESULT=false "${command[@]}" >>"$INSTALL_LOG_FILE"
-  fi
+  run_install_step "启用 IPv6 节点" env RRB_PROJECT_DIR="$project_dir" RRB_CONFIG_FILE="$project_dir/config.env" \
+    RRB_SHOW_RESULT=false "${command[@]}"
   python3 "$project_dir/scripts/11-output-nodes.py" --config-env "$project_dir/config.env" \
     --generator "$project_dir/scripts/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary
 }
@@ -747,7 +771,7 @@ resume_redeploy() {
       INSTALL_MODE=full
       export RRB_REDEPLOY=true RRB_RESET_INSTALL=true RRB_SECURITY_ONLY=false
       export RRB_REDEPLOY_HANDOFF="$REDEPLOY_HANDOFF_FILE"
-      info "继续尚未完成的引导部署；新 SSH 验证后才清理旧登录入口。"
+      detail "继续尚未完成的引导部署；新 SSH 验证后才清理旧登录入口。"
       ;;
     *) die "未知的引导部署状态，停止安装：$handoff_status" ;;
   esac
@@ -765,7 +789,7 @@ main() {
   if [[ "$INSTALL_MODE" != "update" && ( "$INSTALL_MODE" == "full" || -z "$IPV6_NODE_ADDRESS" ) ]]; then
     init_input_tty
   fi
-  info "SuRelay"
+  detail "SuRelay"
   local project_dir
   ensure_entry_dependencies
   project_dir="$(ensure_project)"
@@ -783,7 +807,7 @@ main() {
   if [[ "$INSTALL_MODE" == "full" || "$INSTALL_MODE" == "redeploy" || "$INSTALL_MODE" == "security-only" || "$INSTALL_MODE" == "ipv6-node" ]]; then
     resume_redeploy "$project_dir"
   fi
-  bash "$project_dir/surelay.sh" --install-command
+  run_logged bash "$project_dir/surelay.sh" --install-command
   if [[ "$INSTALL_MODE" == "ipv6-node" ]]; then
     run_ipv6_node_flow "$project_dir"
     return 0

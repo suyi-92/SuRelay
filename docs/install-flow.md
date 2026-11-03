@@ -1,5 +1,7 @@
 # 安装流程
 
+默认输出只保留步骤进度、必要确认、一次 SSH 验证命令和最终结果。底层输出（包括 stderr）写入权限 `600` 的 `/tmp/surelay-install.log`；失败会保留退出码并提示查看日志，有非致命提示时只显示一行摘要。`RRB_VERBOSE=true` 可显式开启详情。重置预览默认只显示影响和数量，确认后的完整清单保存到备份目录的 `plan.txt`。SSH 准备阶段仅在 root 尚无 `.hushlogin` 时创建静默登录标记，保留已有文件和链接；不修改全局 MOTD 或 PAM 配置。
+
 Alpine 3.19 先按 [Alpine 部署说明](alpine.md) 安装 Bash，并保持 `INSTALL_SINGBOX_METHOD="auto"`。下列阶段在 Alpine 使用 OpenRC，在 Debian/Ubuntu 使用 systemd。
 
 ## 1. 准备配置

@@ -273,7 +273,8 @@ class HandoffTest(unittest.TestCase):
                 return core.run(args, **kwargs)
             return ""
         self.run.side_effect = command
-        self.sec.effective.side_effect = lambda: core.run([wrapper, "-T", "-C", "user=root,host=localhost,addr=127.0.0.1"], capture=True)
+        self.sec.effective.side_effect = lambda local_port="52322": core.run(
+            [wrapper, "-T", "-C", f"user=root,host=localhost,addr=127.0.0.1,lport={local_port}"], capture=True)
         self.operation().stage_keys()
         self.operation().restrict_new_port()
         new_context = core.run([wrapper, "-T", "-C", "user=root,host=localhost,addr=127.0.0.1,lport=52322"], capture=True)

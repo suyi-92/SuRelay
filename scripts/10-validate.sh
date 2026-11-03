@@ -26,11 +26,11 @@ if [[ "$SINGBOX_ONLY" != "true" ]]; then
   if ! is_dry_run; then
     info "检查 sshd -T 最终生效值。"
     if [[ "$RRB_VERBOSE" == "true" ]]; then
-      "$(sshd_bin)" -T -C "user=${ADMIN_USER},host=localhost,addr=127.0.0.1" \
+      "$(sshd_bin)" -T -C "user=${ADMIN_USER},host=localhost,addr=127.0.0.1,lport=${SSH_PORT}" \
         | grep -Ei '^(permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|authenticationmethods|permitemptypasswords|allowusers|maxauthtries|x11forwarding|allowagentforwarding|allowtcpforwarding|permittunnel|gatewayports)\b' \
         | tee -a "$LOG_FILE"
     else
-      "$(sshd_bin)" -T -C "user=${ADMIN_USER},host=localhost,addr=127.0.0.1" \
+      "$(sshd_bin)" -T -C "user=${ADMIN_USER},host=localhost,addr=127.0.0.1,lport=${SSH_PORT}" \
         | grep -Ei '^(permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|authenticationmethods|permitemptypasswords|allowusers|maxauthtries|x11forwarding|allowagentforwarding|allowtcpforwarding|permittunnel|gatewayports)\b' \
         >>"$LOG_FILE"
     fi

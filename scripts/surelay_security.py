@@ -109,9 +109,22 @@ class Security:
     def sshd(self):
         return shutil.which("sshd") or "/usr/sbin/sshd"
 
-    def effective(self):
-        address = os.environ.get("SSH_CONNECTION", "127.0.0.1").split()[0]
-        return run([self.sshd(), "-T", "-C", f"user=root,host=localhost,addr={address}"], capture=True)
+    def effective(self, *, local_port=None):
+        connection = os.environ.get("SSH_CONNECTION", "").split()
+        address = local_address = "127.0.0.1"
+        current_port = self.m.env["SSH_PORT"]
+        if len(connection) == 4:
+            try:
+                ipaddress.ip_address(connection[0])
+                ipaddress.ip_address(connection[2])
+                port(connection[1])
+                current_port = port(connection[3])
+                address, local_address = connection[0], connection[2]
+            except (ValueError, Error):
+                pass
+        selected_port = port(str(local_port)) if local_port is not None else port(str(current_port))
+        context = f"user=root,host=localhost,addr={address},laddr={local_address},lport={selected_port}"
+        return run([self.sshd(), "-T", "-C", context], capture=True)
 
     def ssh_service(self):
         if self.m.alpine():
@@ -122,12 +135,23 @@ class Security:
         run([self.sshd(), "-t"], capture=True)
         self.m.service(self.ssh_service(), "reload")
 
-    def key_path(self):
+    def key_path(self, *, redeploy_handoff=None):
         import pwd
         home = Path(pwd.getpwnam("root").pw_dir)
         expected = {".ssh/authorized_keys", str(home / ".ssh/authorized_keys"), "%h/.ssh/authorized_keys"}
         line = next((s for s in self.effective().splitlines() if s.startswith("authorizedkeysfile ")), "")
-        if not line or line.split()[1] not in expected:
+        configured = line.split()[1:] if line else []
+        if configured and configured[0] in expected:
+            return home / ".ssh/authorized_keys"
+        # Redeployer supplies a read_handoff()-validated record. A resumed
+        # connection on the new port sees its temporary verification file;
+        # key maintenance must still address the original persistent file.
+        managed_verification = (redeploy_handoff is not None
+                                and configured == [str(Path(self.m.env["RRB_STATE_DIR"]) / "redeploy-authorized-keys")]
+                                and redeploy_handoff.get("status") == "removed"
+                                and Path(redeploy_handoff["project"]).resolve() == self.m.root.resolve()
+                                and Path(redeploy_handoff["authorized_keys_path"]).resolve() == (home / ".ssh/authorized_keys").resolve())
+        if not managed_verification:
             raise Error("root 使用了自定义 AuthorizedKeysFile；请先检查有效 SSH 配置。")
         return home / ".ssh/authorized_keys"
 

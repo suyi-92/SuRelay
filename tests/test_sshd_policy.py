@@ -137,8 +137,9 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
         self.sshd_wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(SSHD)} -f {shlex.quote(str(self.config))} -h {shlex.quote(str(self.host_key))} \"$@\"\n")
         self.sshd_wrapper.chmod(0o755)
 
-    def effective(self, user="root"):
-        result = subprocess.run([str(self.sshd_wrapper), "-T", "-C", f"user={user},host=localhost,addr=127.0.0.1"], capture_output=True, text=True)
+    def effective(self, user="root", local_port="22"):
+        context = f"user={user},host=localhost,addr=127.0.0.1,lport={local_port}"
+        result = subprocess.run([str(self.sshd_wrapper), "-T", "-C", context], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         values = {}
         for line in result.stdout.splitlines():
@@ -147,7 +148,8 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
                 values[key] = f"{values[key]} {value}" if key in values else value
         return values
 
-    def run_phase(self, script_name, *, confirmed=True, sftp=False, restore=None, dry_run=False):
+    def run_phase(self, script_name, *, confirmed=True, sftp=False, restore=None, dry_run=False,
+                  ssh_port="22", verbose=True):
         library = (ROOT / "scripts/00-lib.sh").read_text(encoding="utf-8")
         phase = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
         phase = "\n".join(line for line in phase.splitlines() if not line.startswith('source "'))
@@ -164,14 +166,16 @@ class SshdPolicyIntegrationTest(unittest.TestCase):
             "BACKUP_ROOT": str(self.root / "backups"),
             "BACKUP_DIR": str(backup),
             "RRB_DRY_RUN": str(dry_run).lower(),
-            "RRB_VERBOSE": "true",
+            "RRB_VERBOSE": str(verbose).lower(),
             "CONFIRM_ROOT_KEY_LOGIN": "yes" if confirmed else "",
             "CONFIRM_ROLLBACK": "yes",
             "ENABLE_SFTP_USER": str(sftp).lower(),
             "ENABLE_UFW": "false",
+            "ENABLE_FAIL2BAN": "false",
+            "SURELAY_SECURITY_ONLY": str(script_name == "10-validate.sh").lower(),
             "SFTP_USER": "nobody" if sftp else "sftpuser",
             "ADMIN_USER": "root",
-            "SSH_PORT": "22",
+            "SSH_PORT": ssh_port,
             "SERVER_IP_IPV4": "192.0.2.10",
             "SERVER_IP_IPV6": "",
             "SERVER_IP": "192.0.2.10",
@@ -265,6 +269,47 @@ getent() {{
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("实际：yes", result.stderr)
         self.assertFalse(self.reloads.exists())
+
+    def test_final_hardening_checks_new_port_with_temporary_verification_match(self):
+        verification = self.root / "redeploy-authorized-keys"
+        verification.write_bytes(self.host_key.with_suffix(".pub").read_bytes())
+        block = (f"\nMatch User root LocalPort 52322\n"
+                 f"    AuthorizedKeysFile {verification}\n"
+                 "    PubkeyAuthentication yes\n    PasswordAuthentication no\n"
+                 "    AuthenticationMethods publickey\n    PermitRootLogin prohibit-password\n"
+                 "Match all\n").encode()
+        for verbose in (True, False):
+            with self.subTest(verbose=verbose):
+                self.config.write_bytes(self.original + block)
+                self.reloads.unlink(missing_ok=True)
+                self.assert_success(self.run_phase("04-ssh-hardening-final.sh", ssh_port="52322", verbose=verbose))
+                selected = self.effective(local_port="52322")
+                self.assertEqual(selected["authorizedkeysfile"], str(verification))
+                self.assertEqual(selected["authenticationmethods"], "publickey")
+                self.assertEqual(selected["passwordauthentication"], "no")
+                self.assertNotEqual(self.effective(local_port="22")["authorizedkeysfile"], str(verification))
+                self.assertTrue(self.reloads.exists())
+
+    def test_target_localport_policy_conflict_still_stops_before_reload(self):
+        for verbose in (True, False):
+            with self.subTest(verbose=verbose):
+                self.config.write_bytes(self.original + b"\nMatch User root LocalPort 52322\n"
+                                        b"    PasswordAuthentication yes\nMatch all\n")
+                result = self.run_phase("04-ssh-hardening-final.sh", ssh_port="52322", verbose=verbose)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("PasswordAuthentication no 未生效（实际：yes）", result.stderr)
+                self.assertFalse(self.reloads.exists())
+
+    def test_validation_queries_configured_port_in_verbose_and_quiet_modes(self):
+        self.config.write_bytes(self.original + b"\nMatch User root LocalPort 52322\n"
+                                b"    PasswordAuthentication no\nMatch all\n")
+        for verbose in (True, False):
+            with self.subTest(verbose=verbose):
+                (self.root / "phase.log").unlink(missing_ok=True)
+                result = self.run_phase("10-validate.sh", ssh_port="52322", verbose=verbose)
+                self.assert_success(result)
+                self.assertIn("passwordauthentication no", (self.root / "phase.log").read_text().splitlines())
+                self.assertIn("安全防护验证完成", result.stdout)
 
     def test_confirmation_gate_still_stops_before_writing(self):
         result = self.run_phase("04-ssh-hardening-final.sh", confirmed=False)

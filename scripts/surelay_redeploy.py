@@ -188,7 +188,7 @@ class Redeployer:
             raise Error("强重置必须选择不同于旧 SSH 监听的端口。")
 
     def key_path(self):
-        path = self.sec.key_path()
+        path = self.sec.key_path(redeploy_handoff=self.handoff) if self.handoff else self.sec.key_path()
         if self.handoff and Path(self.handoff["authorized_keys_path"]).resolve() != path.resolve():
             raise Error("当前 authorized_keys 与强重置备份路径不同，停止交接。")
         return path
@@ -321,7 +321,7 @@ class Redeployer:
             else:
                 self.sec.reload_ssh()
             self.sec.verify_ssh_listener(new_port)
-            effective = self.sec.effective().splitlines()
+            effective = self.sec.effective(local_port=new_port).splitlines()
             if ("passwordauthentication no" not in effective or "authenticationmethods publickey" not in effective
                     or not any(value in effective for value in ("permitrootlogin prohibit-password", "permitrootlogin without-password"))):
                 raise Error("最终认证策略未达到公钥模式，停止旧身份清理。")

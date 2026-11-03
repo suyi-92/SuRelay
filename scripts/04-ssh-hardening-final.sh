@@ -173,18 +173,18 @@ info "检查最终 sshd -T 生效值。"
 if ! is_dry_run; then
   sshd="$(sshd_bin)"
   if [[ "$RRB_VERBOSE" == "true" ]]; then
-    "$sshd" -T -C "user=root,host=localhost,addr=127.0.0.1" \
+    "$sshd" -T -C "user=root,host=localhost,addr=127.0.0.1,lport=${SSH_PORT}" \
       | grep -Ei '^(permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|authenticationmethods|permitemptypasswords|allowusers|maxauthtries|x11forwarding|allowagentforwarding|allowtcpforwarding|permittunnel|gatewayports)\b' \
       | tee -a "$LOG_FILE"
   else
-    "$sshd" -T -C "user=root,host=localhost,addr=127.0.0.1" \
+    "$sshd" -T -C "user=root,host=localhost,addr=127.0.0.1,lport=${SSH_PORT}" \
       | grep -Ei '^(permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|authenticationmethods|permitemptypasswords|allowusers|maxauthtries|x11forwarding|allowagentforwarding|allowtcpforwarding|permittunnel|gatewayports)\b' \
       >>"$LOG_FILE"
   fi
 fi
 
 if ! is_dry_run; then
-  effective="$("$(sshd_bin)" -T -C "user=root,host=localhost,addr=127.0.0.1")"
+  effective="$("$(sshd_bin)" -T -C "user=root,host=localhost,addr=127.0.0.1,lport=${SSH_PORT}")"
   grep -Eqi '^permitrootlogin (prohibit-password|without-password)$' <<<"$effective" || die "PermitRootLogin prohibit-password 未生效（实际：$(awk '$1 == "permitrootlogin" { print $2 }' <<<"$effective")）；请检查匹配 root 的 Match 配置，停止 reload。"
   grep -qi '^pubkeyauthentication yes$' <<<"$effective" || die "PubkeyAuthentication yes 未生效（实际：$(awk '$1 == "pubkeyauthentication" { print $2 }' <<<"$effective")），停止 reload。"
   grep -qi '^passwordauthentication no$' <<<"$effective" || die "PasswordAuthentication no 未生效（实际：$(awk '$1 == "passwordauthentication" { print $2 }' <<<"$effective")），停止 reload。"
@@ -198,7 +198,7 @@ configure_sshd_ports final
 # The port helper also edits the SSH settings block. Recheck the complete
 # effective policy after that edit so an old maintenance override cannot win.
 if ! is_dry_run; then
-  effective="$("$(sshd_bin)" -T -C "user=root,host=localhost,addr=127.0.0.1")"
+  effective="$("$(sshd_bin)" -T -C "user=root,host=localhost,addr=127.0.0.1,lport=${SSH_PORT}")"
   grep -Eqi '^permitrootlogin (prohibit-password|without-password)$' <<<"$effective" || die "端口迁移后 PermitRootLogin 未保持公钥模式。"
   grep -qi '^pubkeyauthentication yes$' <<<"$effective" || die "端口迁移后 PubkeyAuthentication 未保持开启。"
   grep -qi '^passwordauthentication no$' <<<"$effective" || die "端口迁移后 PasswordAuthentication 未保持关闭。"

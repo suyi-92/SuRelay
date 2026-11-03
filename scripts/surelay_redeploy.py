@@ -118,7 +118,7 @@ def strip_verification(data):
     pattern = rb"(?ms)^# BEGIN SuRelay redeploy SSH verification\r?\n.*?^# END SuRelay redeploy SSH verification\r?\n?"
     found = list(re.finditer(pattern, data))
     if len(found) > 1 or (b"# BEGIN SuRelay redeploy SSH verification" in data and not found):
-        raise Error("SSH 新公钥验证块损坏，停止交接。")
+        raise Error("SSH 本次公钥验证块损坏，停止交接。")
     return re.sub(pattern, b"", data)
 
 
@@ -164,7 +164,7 @@ class Redeployer:
     def new_keys(self):
         lines = config_key_lines(self.m.env)
         if not lines and self.handoff:
-            raise Error("强重置必须填写全新管理员公钥，不能复用已有公钥。")
+            raise Error("重新部署必须明确录入至少一把管理员公钥，可使用现有公钥。")
         for line in lines:
             if not key_identity(line):
                 raise Error("管理员公钥格式无效。")
@@ -182,9 +182,6 @@ class Redeployer:
             return
         if self.handoff["status"] == "finalized":
             raise Error("本次强重置已完成，不能再次清理旧 SSH 身份。")
-        old = {value for line in self.handoff.get("old_authorized_keys", []) if (value := key_identity(line))}
-        if old.intersection(key_identity(line) for line in lines):
-            raise Error("强重置公钥必须与旧 authorized_keys 中的公钥不同。")
         old_ports = {str(value) for value in self.handoff.get("ssh_ports", [])}
         old_ports.update(str(value) for value in (self.handoff.get("current_ssh_port"), self.handoff.get("old_config", {}).get("SSH_PORT")) if value)
         if str(self.m.env["SSH_PORT"]) in old_ports:
@@ -223,7 +220,7 @@ class Redeployer:
         except BaseException:
             backup.restore()
             raise
-        print("新公钥已添加；旧公钥保留到新端口登录验证完成。")
+        print("本次录入的公钥已准备；原公钥保留到新端口登录验证完成。")
         if self.handoff:
             known = self.old_owned_keys()
             unknown = {value for line in self.handoff.get("old_authorized_keys", [])
@@ -232,17 +229,17 @@ class Redeployer:
                 print(f"旧 authorized_keys 中有 {len(unknown)} 把无法归属到 SuRelay 的公钥，将按手工公钥保留。")
 
     def restrict_new_port(self):
-        """Make verification on the new port prove possession of a new private key."""
+        """Verify possession of the explicitly selected keys on the new port."""
         if not self.handoff:
-            raise Error("新公钥端口验证需要强重置交接记录。")
+            raise Error("本次公钥端口验证需要强重置交接记录。")
         lines = self.new_keys()
         self.validate_fresh_identity(lines)
         new_port = port(self.m.env["SSH_PORT"])
         keyfile = self.verification_keys()
         if not keyfile.is_file() or keyfile.is_symlink():
-            raise Error("尚未准备新公钥专用验证文件。")
+            raise Error("尚未准备本次公钥专用验证文件。")
         if {key_identity(line) for line in keyfile.read_text().splitlines()} != {key_identity(line) for line in lines}:
-            raise Error("新公钥验证文件与向导输入不同，停止交接。")
+            raise Error("本次公钥验证文件与向导输入不同，停止交接。")
         backup = Snapshot([self.sec.ssh_config], self.backup_root)
         try:
             original = strip_verification(self.sec.ssh_config.read_bytes()).rstrip(b"\r\n") + b"\n"
@@ -258,14 +255,14 @@ class Redeployer:
             values = effective.splitlines()
             if (f"authorizedkeysfile {keyfile}" not in values or "pubkeyauthentication yes" not in values
                     or "passwordauthentication no" not in values or "authenticationmethods publickey" not in values):
-                raise Error("已有 Match 配置覆盖了新公钥验证路径，未继续交接。")
+                raise Error("已有 Match 配置覆盖了本次公钥验证路径，未继续交接。")
             self.sec.reload_ssh()
             self.sec.verify_ssh_listener(new_port)
         except BaseException:
             backup.restore()
             self.sec.reload_ssh()
             raise
-        print("新 SSH 端口只接受向导填写的新公钥；旧端口保留原公钥以便恢复。")
+        print("新 SSH 端口只接受本次录入的公钥；旧端口保留原公钥以便恢复。")
 
     def finalize(self):
         from surelay_security import ssh_files
@@ -277,7 +274,7 @@ class Redeployer:
         current = path.read_text().splitlines()
         new_ids = {key_identity(line) for line in lines}
         if not new_ids.issubset({key_identity(line) for line in current}):
-            raise Error("新公钥尚未写入 authorized_keys，拒绝移除旧身份。")
+            raise Error("本次录入的公钥尚未写入 authorized_keys，拒绝移除旧身份。")
         new_port = port(self.m.env["SSH_PORT"])
         self.sec.verify_ssh_listener(new_port)
         files = ssh_files(self.sec.ssh_config)
@@ -304,7 +301,9 @@ class Redeployer:
                 if data != original:
                     atomic(file, data, file.stat().st_mode & 0o777)
             old_owned = self.old_owned_keys()
-            kept = [line for line in current if key_identity(line) not in old_owned]
+            # The selected lines already proved login on the isolated new port.
+            # Use those exact lines even when an old entry has different options.
+            kept = [line for line in current if key_identity(line) not in (old_owned | new_ids)] + lines
             atomic(path, "\n".join(kept) + "\n")
             atomic(ledger_path(self.m), json.dumps({"version": 1, "keys": sorted(new_ids)}, indent=2) + "\n")
             if self.verification_keys().exists():
@@ -344,9 +343,9 @@ class Redeployer:
                 self.sec.reload_ssh()
             if firewall_changed:
                 run(["ufw", "reload"], check=False)
-            print(f"SSH 交接未完成，已恢复到保留新旧公钥的安全阶段；恢复资料：{backup.directory}")
+            print(f"SSH 交接未完成，已恢复到保留原登录入口的安全阶段；恢复资料：{backup.directory}")
             raise
-        print(f"新 SSH 身份已接管，旧 SuRelay 公钥/端口覆盖/规则已清理；备份：{backup.directory}")
+        print(f"本次 SSH 公钥已接管，未被本次选用的旧 SuRelay 公钥及旧端口覆盖/规则已清理；备份：{backup.directory}")
 
 
 def main():

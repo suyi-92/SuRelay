@@ -69,7 +69,7 @@ root_keys="$(get_pubkey_for_root || true)"
 [[ -n "$root_keys" ]] || die "没有可用 ADMIN_PUBKEY，也无法从 /root/.ssh/authorized_keys 复制。"
 
 if [[ -n "${RRB_REDEPLOY_HANDOFF:-}" ]]; then
-  [[ -n "$ADMIN_PUBKEY" ]] || die "强重置必须填写全新管理员公钥，不能复用已有公钥。"
+  [[ -n "$ADMIN_PUBKEY" ]] || die "重新部署需明确填写管理员公钥，可填写原公钥。"
 fi
 if ! is_dry_run; then
   redeploy_args=()

@@ -69,8 +69,9 @@ usage() {
 不会重跑 SSH 初始化，也不会轮换 VLESS UUID、Reality keypair 或 short-id。
 --reset 会使旧节点和订阅失效；显示清单后需输入 RESET。保留 SSH 登录通道、
 系统软件包和其他证书；不能与 -6 同时使用。
---redeploy 会重新生成端口和节点身份，要求录入新的管理员公钥；验证新端口与新公钥
-登录成功后，清理旧 SuRelay 公钥、SSH 设置和端口规则。确认词为 REDEPLOY。
+--redeploy 会重新生成端口和节点身份，要求明确录入管理员公钥（可填写原公钥）；
+验证新端口与本次公钥登录成功后，清理未选用的旧 SuRelay 公钥、SSH 设置和端口规则。
+确认词为 REDEPLOY；存在已清理的未完成交接时，继续原安装。
 --security-only 会创建安全配置并执行 SSH 二阶段加固、fail2ban 和 UFW；不会创建
 sing-box、订阅服务、Reality 密钥或任何客户端节点。已有项目配置不会被重置。
 EOF
@@ -656,8 +657,8 @@ run_install_flow() {
   printf '另开终端执行，输出 root 后确认；请保留当前 SSH 窗口：\n'
   printf 'ssh -p %q -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no root@%q whoami\n' "$configured_ssh_port" "$ssh_host"
   if [[ "${RRB_REDEPLOY:-false}" == true ]]; then
-    printf '请明确使用本次录入的新公钥登录；确认后将移除旧 SuRelay 公钥与旧 SSH 入口。\n'
-    ssh_confirm_prompt="已用本次新公钥在新端口登录成功，清理旧公钥和旧入口？"
+    printf '请明确使用本次录入的公钥登录（可使用原公钥）；确认后将移除未选用的旧 SuRelay 公钥与旧 SSH 入口。\n'
+    ssh_confirm_prompt="已用本次录入的公钥在新端口登录成功，清理未选用的旧公钥和旧入口？"
     ssh_confirm_default=no
   fi
   if read_yes_no "$ssh_confirm_prompt" "$ssh_confirm_default"; then
@@ -742,6 +743,8 @@ resume_redeploy() {
     removed)
       [[ "$INSTALL_MODE" == full || "$INSTALL_MODE" == redeploy ]] \
         || die "引导式重新布置尚未完成，请运行 sr install 继续；不能切换到其他部署模式。"
+      # Continue the original install instead of clearing an already removed deployment.
+      INSTALL_MODE=full
       export RRB_REDEPLOY=true RRB_RESET_INSTALL=true RRB_SECURITY_ONLY=false
       export RRB_REDEPLOY_HANDOFF="$REDEPLOY_HANDOFF_FILE"
       info "继续尚未完成的引导部署；新 SSH 验证后才清理旧登录入口。"
@@ -777,7 +780,7 @@ main() {
     info "更新完成。输入 sr 打开 SuRelay；节点与订阅保持原样。"
     return 0
   fi
-  if [[ "$INSTALL_MODE" == "security-only" || "$INSTALL_MODE" == "ipv6-node" ]]; then
+  if [[ "$INSTALL_MODE" == "full" || "$INSTALL_MODE" == "redeploy" || "$INSTALL_MODE" == "security-only" || "$INSTALL_MODE" == "ipv6-node" ]]; then
     resume_redeploy "$project_dir"
   fi
   bash "$project_dir/surelay.sh" --install-command
@@ -799,8 +802,6 @@ main() {
   if [[ "$INSTALL_MODE" == "redeploy" ]]; then
     RRB_INPUT_TTY="$INPUT_TTY" python3 "$project_dir/scripts/17-reset-install.py" \
       --project-dir "$project_dir" --redeploy --apply --handoff-file "$REDEPLOY_HANDOFF_FILE"
-  fi
-  if [[ "$INSTALL_MODE" == "full" || "$INSTALL_MODE" == "redeploy" ]]; then
     resume_redeploy "$project_dir"
   fi
   configure_install "$project_dir"

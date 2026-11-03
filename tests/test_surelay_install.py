@@ -286,14 +286,14 @@ class InstallWizardTest(unittest.TestCase):
         self.assertFalse(group.call_args.kwargs["step_navigation"])
         self.assertEqual(group.call_args.kwargs["finish"], "校验并应用")
 
-    def test_redeploy_requires_new_public_key_and_cannot_reuse_existing_keys(self):
+    def test_redeploy_requires_explicit_public_key_input_even_when_reusing_a_key(self):
         wizard = self.draft()
         wizard.redeploy = True
         self.assertEqual(len(wizard.key_fields()), 1)
-        self.assertIn("新管理员公钥", wizard.key_fields()[0][0])
-        with self.assertRaisesRegex(install.Error, "重新部署需录入新管理员公钥"):
+        self.assertIn("可填写原公钥", wizard.key_fields()[0][0])
+        with self.assertRaisesRegex(install.Error, "重新部署需明确填写管理员公钥"):
             wizard.reuse_keys()
-        with self.assertRaisesRegex(install.Error, "重新部署需录入新管理员公钥"):
+        with self.assertRaisesRegex(install.Error, "重新部署需明确填写管理员公钥"):
             wizard.validate()
         from tests.test_admin_pubkey_input import KEYS
         with patch("surelay_install.ask", side_effect=[KEYS[0], ""]):
@@ -304,15 +304,15 @@ class InstallWizardTest(unittest.TestCase):
         normal.reuse_keys()
         self.assertTrue(normal.keys_confirmed)
 
-    def test_redeploy_preview_rejects_old_identity_before_save_and_allows_correction(self):
+    def test_redeploy_preview_accepts_reentered_key_and_allows_old_port_correction(self):
         from tests.test_admin_pubkey_input import KEYS
-        for conflict, message in (("key", "公钥必须与旧"), ("port", "不同于旧 SSH")):
-            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as directory:
+        for port_conflict in (False, True):
+            with self.subTest(port_conflict=port_conflict), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 wizard = self.draft()
                 wizard.redeploy = True
-                wizard.values["ADMIN_PUBKEY"] = KEYS[0] if conflict == "key" else KEYS[1]
-                old_port = wizard.values["SSH_PORT"] if conflict == "port" else "22"
+                wizard.values["ADMIN_PUBKEY"] = KEYS[0]
+                old_port = wizard.values["SSH_PORT"] if port_conflict else "22"
                 handoff = root / "handoff.json"
                 handoff.write_text(json.dumps({
                     "format": 1, "mode": "redeploy", "project": str(root), "status": "removed",
@@ -328,23 +328,20 @@ class InstallWizardTest(unittest.TestCase):
                     previews.append(status)
                     self.assertFalse((root / "config.env").exists())
                     if len(previews) == 2:
-                        self.assertIn(message, status)
-                        return 5 if conflict == "key" else 2
+                        self.assertIn("不同于旧 SSH", status)
+                        return 2
                     return 0
                 def group(title, fields, **kwargs):
-                    if len(previews) == 2:
-                        if conflict == "key" and "管理员 SSH 公钥" in title:
-                            wizard.values["ADMIN_PUBKEY"] = KEYS[1]
-                        elif conflict == "port" and "服务端口" in title:
-                            wizard.values["SSH_PORT"] = next(str(value) for value in range(49152, 65536)
-                                                             if str(value) not in wizard.values.values())
+                    if len(previews) == 2 and "服务端口" in title:
+                        wizard.values["SSH_PORT"] = next(str(value) for value in range(49152, 65536)
+                                                         if str(value) not in wizard.values.values())
                     return True
                 with patch.object(wizard, "choose", side_effect=choose), \
                         patch.object(wizard, "group", side_effect=group), \
                         patch("surelay_security.run", return_value="fixture fingerprint") as command:
                     values = wizard.run()
-                self.assertEqual(len(previews), 3)
-                self.assertEqual(values["ADMIN_PUBKEY"], KEYS[1])
+                self.assertEqual(len(previews), 3 if port_conflict else 1)
+                self.assertEqual(values["ADMIN_PUBKEY"], KEYS[0])
                 self.assertNotEqual(values["SSH_PORT"], old_port)
                 self.assertEqual(values["CLOUDFLARE_API_TOKEN"], "fixture-secret")
                 self.assertFalse((root / "config.env").exists())

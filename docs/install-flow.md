@@ -16,7 +16,7 @@ sudo bash install.sh --security-only
 
 以后要继续部署节点时，输入 `sr`，从主菜单选择“部署节点代理”；面板会确认后将 `SURELAY_SECURITY_ONLY` 切换为 `false` 并运行普通安装流程。需要订阅时再在“高级维护 → 编辑高级配置并应用”中开启 `ENABLE_SUBSCRIPTION_SERVER`。
 
-已有部署需要连同项目 SSH/安全属性重新配置时，在 `sr` 主菜单选择「开始引导式节点布置」，或运行 `bash install.sh --redeploy`。它先备份并清理旧项目部署，再打开完整向导；新端口和新公钥验证前保留当前 SSH 通道，验证后关闭旧项目 SSH 入口。原有 `bash install.sh --reset` 继续使用保留历史 SSH 公钥和自定义业务端口规则的重装流程，普通重跑仍保留节点身份。见 [重置安装说明](reset-install.md)。
+已有部署需要连同项目 SSH/安全属性重新配置时，在 `sr` 主菜单选择「开始引导式节点布置」，或运行 `bash install.sh --redeploy`。它先备份并清理旧项目部署，再打开完整向导；明确填写本次使用的公钥（可使用原公钥），新端口和本次公钥验证前保留当前 SSH 通道，验证后关闭旧项目 SSH 入口并保留本次选用的公钥。取消后再次进入会继续原交接。原有 `bash install.sh --reset` 继续使用保留历史 SSH 公钥和自定义业务端口规则的重装流程，普通重跑仍保留节点身份。见 [重置安装说明](reset-install.md)。
 
 ```bash
 cp config.example.env config.env

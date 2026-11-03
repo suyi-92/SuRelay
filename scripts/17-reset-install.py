@@ -593,7 +593,7 @@ class ResetDeployment:
         print('停用服务：' + (', '.join(self.services) or '无'))
         if self.redeploy:
             print(f'立即清理已确认 SR 防火墙规则：{len(self.firewall)} 条；新 SSH 验证后再清理：{len(self.pending_firewall)} 条。')
-            print('暂时保留当前 SSH 配置和全部公钥以完成交接；新端口与新公钥验证后清除可确认归属的旧 SR 身份。')
+            print('暂时保留当前 SSH 配置和全部公钥以完成交接；新端口与本次录入的公钥验证后，清除未选用且可确认归属的旧 SR 身份。')
             print('归属不明的手工公钥、无 SR 注释的防火墙规则、其他服务、Cloudflare DNS、云安全组和系统软件包保留。')
             if self.external_tls_preserved:
                 print('保留用户自行管理的外部 HY2 证书/私钥：' + ', '.join(self.external_tls_preserved))
@@ -671,7 +671,7 @@ class ResetDeployment:
                 'ssh_assets': self.ssh_assets,
                 'external_tls_preserved': self.external_tls_preserved,
                 'fail2ban_backup': str(self.backup / 'fail2ban.sqlite3') if self.fail2ban_database is not None else '',
-                'unknown_keys': '只有旧配置或归属账本中可确认的 SR 公钥才应在新公钥验证后移除；其他公钥保留。',
+                'unknown_keys': '本次选用的公钥保留；未选用且可由旧配置或归属账本确认的 SR 公钥才在新端口登录验证后移除；其他公钥保留。',
             }
         self.handoff['status'] = status
         if error:
@@ -787,7 +787,7 @@ class ResetDeployment:
         saved = json.loads(manifest.read_text())
         saved['status'] = 'removed'
         manifest.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + '\n')
-        print('旧 SR 部署已清除；SSH 交接尚未完成。请继续向导并验证新端口与新公钥。' if self.redeploy else
+        print('旧 SR 部署已清除；SSH 交接尚未完成。请继续向导并验证新端口与本次录入的公钥。' if self.redeploy else
               'SuRelay 已卸载。SSH 登录配置、公钥和代码目录已保留。' if self.uninstall else
               '旧部署已卸载。接下来重新填写配置并执行安装。')
 

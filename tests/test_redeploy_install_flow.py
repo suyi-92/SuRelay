@@ -20,10 +20,51 @@ class RedeployInstallFlowTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    def shell(self, body, **env):
-        return subprocess.run(["bash", "--noprofile", "--norc", "-c", self.functions + "\n" + body,
+    def shell(self, body, *, allow_main=False, **env):
+        # Main-flow tests replace every system operation; bypass only its root guard.
+        functions = self.functions.replace('${EUID:-$(id -u)}', '0') if allow_main else self.functions
+        return subprocess.run(["bash", "--noprofile", "--norc", "-c", functions + "\n" + body,
                                "test", str(self.root)], capture_output=True, text=True, timeout=10,
                               env={**os.environ, "RRB_INSTALL_LOG_FILE": str(self.root / "install.log"), **env})
+
+    def main_flow(self, state, *, configured=False):
+        scripts = self.root / "scripts"
+        scripts.mkdir(exist_ok=True)
+        (scripts / "00-lib.sh").write_text('require_supported_os() { :; }\n')
+        (self.root / "surelay.sh").write_text('printf "launcher\\n" >>"$TEST_ROOT/calls"\n')
+        (self.root / "handoff-state").write_text(state)
+        (self.root / "calls").unlink(missing_ok=True)
+        config = self.root / "config.env"
+        if configured:
+            config.write_text('SSH_PORT=52322\n# keep resumed configuration\n')
+        else:
+            config.unlink(missing_ok=True)
+        return self.shell('''
+acquire_maintenance_lock() { :; }
+init_input_tty() { :; }
+ensure_entry_dependencies() { :; }
+ensure_project() { printf '%s' "$TEST_ROOT"; }
+python3() {
+  case "$1" in
+    */surelay_redeploy.py)
+      state="$(cat "$TEST_ROOT/handoff-state")"
+      case "$state" in none|removed|finalized) printf '%s' "$state" ;; *) return 1 ;; esac
+      ;;
+    */17-reset-install.py)
+      printf 'reset\\n' >>"$TEST_ROOT/calls"
+      [[ "$(cat "$TEST_ROOT/handoff-state")" != removed ]] || return 91
+      printf removed >"$TEST_ROOT/handoff-state"
+      ;;
+    *) return 92 ;;
+  esac
+}
+configure_install() {
+  if [[ -f "$1/config.env" ]]; then step=continue; else step=wizard; fi
+  printf '%s %s %s\\n' "$step" "$RRB_REDEPLOY" "$RRB_RESET_INSTALL" >>"$TEST_ROOT/calls"
+}
+run_install_flow() { printf 'flow %s\\n' "$RRB_REDEPLOY" >>"$TEST_ROOT/calls"; }
+main --redeploy
+''', allow_main=True, TEST_ROOT=str(self.root), RRB_REDEPLOY="", RRB_RESET_INSTALL="")
 
     def test_redeploy_cli_is_exclusive_and_never_starts_another_mode(self):
         for args in ("--reset --redeploy", "--redeploy --reset", "--redeploy -6",
@@ -54,6 +95,38 @@ printf '%s\\n' "$RRB_REDEPLOY" "$RRB_RESET_INSTALL" "$RRB_SECURITY_ONLY" "$RRB_R
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "unset")
 
+    def test_redeploy_entry_resumes_removed_handoff_without_repeating_cleanup(self):
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                result = self.main_flow("removed", configured=configured)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                step = "continue" if configured else "wizard"
+                self.assertEqual((self.root / "calls").read_text().splitlines(),
+                                 ["launcher", step + " true true", "flow true"])
+                self.assertEqual((self.root / "handoff-state").read_text(), "removed")
+                if configured:
+                    self.assertEqual((self.root / "config.env").read_text(),
+                                     'SSH_PORT=52322\n# keep resumed configuration\n')
+
+    def test_redeploy_entry_still_cleans_a_new_or_finalized_deployment_once(self):
+        for state in ("none", "finalized"):
+            with self.subTest(state=state):
+                result = self.main_flow(state)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.root / "calls").read_text().splitlines(),
+                                 ["launcher", "reset", "wizard true true", "flow true"])
+
+    def test_redeploy_entry_rejects_invalid_handoff_before_any_changes(self):
+        for state in ("prepared", "failed", "unknown", "invalid"):
+            with self.subTest(state=state):
+                result = self.main_flow(state, configured=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("交接记录未通过检查", result.stderr)
+                self.assertFalse((self.root / "calls").exists())
+                self.assertEqual((self.root / "handoff-state").read_text(), state)
+                self.assertEqual((self.root / "config.env").read_text(),
+                                 'SSH_PORT=52322\n# keep resumed configuration\n')
+
     def test_new_key_confirmation_defaults_to_pause_and_is_required_before_final_cleanup(self):
         (self.root / "scripts").mkdir()
         (self.root / "config.env").write_text('SERVER_IP_IPV4=192.0.2.10\nSSH_PORT=52322\n')
@@ -80,7 +153,7 @@ run_install_flow "$1"
                     os.close(slave)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("[y/N]", prompt)
-                self.assertIn("本次新公钥", prompt)
+                self.assertIn("本次录入的公钥", prompt)
                 phases = (self.root / "phases").read_text().splitlines()
                 expected = ["preflight", "keys", "stage"]
                 if final:

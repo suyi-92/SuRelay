@@ -273,7 +273,7 @@ class Wizard:
         keys = []
         while True:
             value = ask("管理员 SSH 公钥", multiline=True,
-                        help=("重新部署需录入新管理员公钥。" if self.redeploy else "") +
+                        help=("重新部署需明确填写本次使用的公钥，可填写原公钥。" if self.redeploy else "") +
                              "每行一把公钥，可粘贴多行；空行完成。取消后原草稿不变。",
                         context=[("本次已接收", f"{len(keys)} 把")])
             if not value:
@@ -291,7 +291,7 @@ class Wizard:
 
     def reuse_keys(self):
         if self.redeploy:
-            raise Error("重新部署需录入新管理员公钥。")
+            raise Error("重新部署需明确填写管理员公钥，可填写原公钥。")
         # Existing keys are checked by the SSH deployment phase before policy changes.
         self.values["ADMIN_PUBKEY"] = ""
         self.keys_confirmed = True
@@ -299,7 +299,7 @@ class Wizard:
     def key_fields(self):
         count = len(self.values.get("ADMIN_PUBKEY", "").splitlines())
         if self.redeploy:
-            return [(f"录入 / 替换新管理员公钥：已填 {count} 把", self.add_keys)]
+            return [(f"录入 / 替换管理员公钥（可填写原公钥）：已填 {count} 把", self.add_keys)]
         return [(f"录入 / 替换公钥：已填 {count} 把", self.add_keys),
                 ("明确复用 root 已有 authorized_keys" + ("（已选择）" if self.keys_confirmed and not count else ""), self.reuse_keys)]
 
@@ -311,7 +311,7 @@ class Wizard:
             if not self.security_only:
                 required(values["SERVER_ALIAS"])
             if self.redeploy and not values.get("ADMIN_PUBKEY", "").strip():
-                raise Error("重新部署需录入新管理员公钥。")
+                raise Error("重新部署需明确填写管理员公钥，可填写原公钥。")
             if not self.keys_confirmed:
                 raise Error("请录入管理员公钥，或明确选择复用已有公钥。")
         if values["ENABLE_CUSTOM_DOMAIN"] == "true" and not self.protocol_only:

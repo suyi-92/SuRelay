@@ -97,38 +97,98 @@ class HandoffTest(unittest.TestCase):
         self.assertIn(self.data["pending_firewall"][0], [call.args[0] for call in self.run.call_args_list])
 
     def test_cleanup_failure_restores_both_keys_and_handoff_for_retry(self):
-        self.operation().stage_keys()
-        keys_before, ssh_before = self.keys.read_bytes(), self.ssh.read_bytes()
         def command(args, **kwargs):
             if args[:3] == ["ufw", "--force", "delete"]:
                 raise core.Error("fixture firewall failure")
             return ""
         self.run.side_effect = command
-        with self.assertRaises(core.Error):
-            self.operation().finalize()
-        self.assertEqual(self.keys.read_bytes(), keys_before)
-        self.assertEqual(self.ssh.read_bytes(), ssh_before)
-        self.assertEqual(json.loads(self.handoff.read_text())["status"], "removed")
+        for selected in (self.new, self.old):
+            with self.subTest(selected=selected):
+                self.manager.env["ADMIN_PUBKEY"] = selected
+                self.operation().stage_keys()
+                keys_before, ssh_before = self.keys.read_bytes(), self.ssh.read_bytes()
+                verification_before = self.operation().verification_keys().read_bytes()
+                with self.assertRaises(core.Error):
+                    self.operation().finalize()
+                self.assertEqual(self.keys.read_bytes(), keys_before)
+                self.assertEqual(self.ssh.read_bytes(), ssh_before)
+                self.assertEqual(self.operation().verification_keys().read_bytes(), verification_before)
+                self.assertEqual(json.loads(self.handoff.read_text())["status"], "removed")
         self.assertIn(["ufw", "reload"], [call.args[0] for call in self.run.call_args_list])
 
-    def test_reused_key_and_reused_port_are_rejected_before_writes(self):
+    def test_reused_owned_key_is_staged_without_duplicates_and_survives_finalize(self):
         original = self.keys.read_bytes()
         self.manager.env["ADMIN_PUBKEY"] = self.old
-        with self.assertRaises(core.Error):
-            self.operation().stage_keys()
-        self.manager.env.update({"ADMIN_PUBKEY": self.new, "SSH_PORT": "50396"})
-        with self.assertRaises(core.Error):
-            self.operation().stage_keys()
+        self.operation().stage_keys()
         self.assertEqual(self.keys.read_bytes(), original)
+        self.assertEqual(self.operation().verification_keys().read_text().splitlines(), [self.old])
+        self.operation().finalize()
+        self.assertEqual(self.keys.read_text().splitlines(), [self.manual, self.old])
+        self.assertEqual(redeploy.read_ledger(redeploy.ledger_path(self.manager)), {redeploy.key_identity(self.old)})
 
-    def test_multiline_second_old_key_cannot_bypass_fresh_identity_validation(self):
+    def test_reused_manual_key_survives_while_unselected_owned_key_is_removed(self):
+        self.manager.env["ADMIN_PUBKEY"] = self.manual
+        self.operation().stage_keys()
+        self.operation().finalize()
+        self.assertEqual(self.keys.read_text().splitlines(), [self.manual])
+        self.assertEqual(redeploy.read_ledger(redeploy.ledger_path(self.manager)), {redeploy.key_identity(self.manual)})
+
+    def test_multiline_selection_keeps_both_new_and_reused_owned_keys(self):
         self.config.write_text(core.env_text("", {"ADMIN_PUBKEY": self.new + "\n" + self.old,
                                                   "SSH_PORT": "52322", "RRB_STATE_DIR": str(self.root / "state")}))
         self.manager.env = core.GEN.defaults(core.GEN.parse_env_file(self.config))
+        self.operation().stage_keys()
+        self.assertEqual(self.operation().verification_keys().read_text().splitlines(), [self.new, self.old])
+        self.operation().finalize()
+        self.assertEqual(self.keys.read_text().splitlines(), [self.manual, self.new, self.old])
+        self.assertEqual(redeploy.read_ledger(redeploy.ledger_path(self.manager)),
+                         {redeploy.key_identity(self.new), redeploy.key_identity(self.old)})
+
+    def test_reused_restricted_key_final_line_matches_explicit_verification_input(self):
+        restricted = 'from="192.0.2.0/24",no-agent-forwarding ' + self.old
+        selected = redeploy.key_identity(self.old) + " selected-again"
+        self.keys.write_text(restricted + "\n" + self.manual + "\n")
+        self.data["old_authorized_keys"] = [restricted, self.manual]
+        self.save_handoff()
+        self.manager.env["ADMIN_PUBKEY"] = selected
+        before = self.keys.read_bytes()
+        self.operation().stage_keys()
+        self.assertEqual(self.keys.read_bytes(), before)
+        self.assertEqual(self.operation().verification_keys().read_text().splitlines(), [selected])
+        self.operation().finalize()
+        self.assertEqual(self.keys.read_text().splitlines(), [self.manual, selected])
+
+    def test_empty_selection_and_reused_port_are_rejected_before_writes(self):
         original = self.keys.read_bytes()
-        with self.assertRaises(core.Error):
-            self.operation().stage_keys()
+        for selected, selected_port in (("", "52322"), (self.old, "50396")):
+            with self.subTest(selected=selected, port=selected_port):
+                self.manager.env.update({"ADMIN_PUBKEY": selected, "SSH_PORT": selected_port})
+                with self.assertRaises(core.Error):
+                    self.operation().stage_keys()
         self.assertEqual(self.keys.read_bytes(), original)
+        self.assertFalse(self.operation().verification_keys().exists())
+
+    def test_new_port_verification_uses_only_explicitly_selected_existing_key(self):
+        self.manager.env["ADMIN_PUBKEY"] = self.old
+        self.operation().stage_keys()
+        keyfile = self.operation().verification_keys()
+        self.run.return_value = (f"authorizedkeysfile {keyfile}\npubkeyauthentication yes\n"
+                                 "passwordauthentication no\nauthenticationmethods publickey\n")
+        self.operation().restrict_new_port()
+        self.assertEqual(keyfile.read_text().splitlines(), [self.old])
+        self.assertIn(f"Match User root LocalPort 52322\n    AuthorizedKeysFile {keyfile}", self.ssh.read_text())
+        self.assertIn("Port 50396", self.ssh.read_text())
+        self.sec.verify_ssh_listener.assert_called_with("52322")
+
+    def test_finalized_handoff_cannot_stage_or_clean_selected_existing_key_again(self):
+        self.manager.env["ADMIN_PUBKEY"] = self.old
+        self.operation().stage_keys()
+        self.operation().finalize()
+        before = self.keys.read_bytes()
+        for action in ("stage_keys", "finalize"):
+            with self.subTest(action=action), self.assertRaisesRegex(core.Error, "已完成"):
+                getattr(self.operation(), action)()
+        self.assertEqual(self.keys.read_bytes(), before)
 
     def test_socket_overrides_are_replaced_with_only_new_owned_listener(self):
         self.operation().stage_keys()

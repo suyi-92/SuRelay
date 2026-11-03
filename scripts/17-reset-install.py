@@ -323,7 +323,14 @@ class ResetDeployment:
             try:
                 result = self.runner(['fail2ban-client', 'get', 'dbfile'], check=False)
                 configured_database = result.stdout.strip() if result.returncode == 0 else ''
-                if configured_database.lower() == 'none':
+                # The client normally decorates this value with a title and a
+                # tree branch. Decode only that known shape; keep all path checks.
+                lines = configured_database.splitlines()
+                if (len(lines) == 2 and lines[0] == 'Current database file is:'
+                        and lines[1].startswith('`- ')):
+                    configured_database = lines[1][3:].strip()
+                if (configured_database.lower() == 'none'
+                        or configured_database == 'Database currently disabled'):
                     database = ''
                 elif configured_database:
                     database = configured_database

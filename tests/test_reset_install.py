@@ -428,7 +428,8 @@ run_install_flow "$1"
         previous = self.command
         def settings(args, check=True):
             if args == ['fail2ban-client', 'get', 'dbfile']:
-                return subprocess.CompletedProcess(args, 0, '/srv/security/shared-bans.sqlite3\n', '')
+                return subprocess.CompletedProcess(args, 0,
+                    'Current database file is:\n`- /srv/security/shared-bans.sqlite3\n', '')
             return previous(args, check)
         self.command = settings
         obj = self.redeployer()
@@ -438,6 +439,72 @@ run_install_flow "$1"
                 self.assertEqual(connection.execute(f'SELECT * FROM {table}').fetchall(),
                                  [('other-jail', '192.0.2.8')])
         self.assertTrue((obj.backup / 'fail2ban.sqlite3').is_file())
+
+    def test_redeploy_accepts_plain_and_formatted_fail2ban_db_paths(self):
+        database = '/srv/security/shared-bans.sqlite3'
+        self.put(database, 'database selected during read-only collection\n')
+        previous = self.command
+        for output in (database + '\n', 'Current database file is:\n`- ' + database + '\n',
+                       'Current database file is:\r\n`- ' + database + '\r\n'):
+            with self.subTest(output=output), patch.object(self, 'command', side_effect=(
+                    lambda args, check=True: subprocess.CompletedProcess(args, 0, output, '')
+                    if args == ['fail2ban-client', 'get', 'dbfile'] else previous(args, check))):
+                obj = self.redeployer()
+                self.assertEqual(obj.fail2ban_database, Path(database))
+                self.assertIsNone(obj.backup)
+                self.assertFalse(self.p('/root/surelay-backups').exists())
+
+    def test_redeploy_respects_disabled_plain_and_formatted_fail2ban_db(self):
+        self.put('/var/lib/fail2ban/fail2ban.sqlite3', 'existing default database must not be selected\n')
+        previous = self.command
+        for output in ('None\n', 'Current database file is:\n`- None\n', 'Database currently disabled\n'):
+            with self.subTest(output=output), patch.object(self, 'command', side_effect=(
+                    lambda args, check=True: subprocess.CompletedProcess(args, 0, output, '')
+                    if args == ['fail2ban-client', 'get', 'dbfile'] else previous(args, check))):
+                obj = self.redeployer()
+                self.assertIsNone(obj.fail2ban_database)
+                self.assertIsNone(obj.backup)
+
+    def test_redeploy_rejects_ambiguous_or_unsafe_fail2ban_db_output_before_cleanup(self):
+        previous = self.command
+        database = '/var/lib/fail2ban/fail2ban.sqlite3'
+        invalid = ('Current database file is:',
+                   'Current database file is:\n|- ' + database,
+                   'Current database file is:\n`- ' + database + '\nextra output',
+                   'Current database file is:\n`- ' + database + '\n`- /srv/other.sqlite3',
+                   'Database currently disabled\n' + database,
+                   'Database currently disabled but extra text',
+                   database + '\n/srv/other.sqlite3',
+                   'Current database file is:\n`- relative.sqlite3',
+                   'Current database file is:\n`- /srv/../other.sqlite3',
+                   'Current database file is:\n`- /srv/$(touch forbidden).sqlite3',
+                   'Current database file is:\n`- /srv/`touch forbidden`.sqlite3')
+        for output in invalid:
+            with self.subTest(output=output), patch.object(self, 'command', side_effect=(
+                    lambda args, check=True: subprocess.CompletedProcess(args, 0, output, '')
+                    if args == ['fail2ban-client', 'get', 'dbfile'] else previous(args, check))):
+                with self.assertRaises(reset.ResetError):
+                    self.redeployer()
+                self.assertTrue(self.p('/opt/relay/config.env').is_file())
+                self.assertFalse(self.p('/root/surelay-backups').exists())
+        self.assertFalse(any('delete' in args or 'disable' in args or 'restart' in args for args in self.calls))
+
+    def test_redeploy_rejects_formatted_fail2ban_db_symlink(self):
+        database = self.put('/srv/security/shared-bans.sqlite3', 'keep shared database\n')
+        link = self.p('/var/lib/fail2ban/fail2ban.sqlite3')
+        link.parent.mkdir(parents=True)
+        link.symlink_to(database)
+        previous = self.command
+        def settings(args, check=True):
+            if args == ['fail2ban-client', 'get', 'dbfile']:
+                return subprocess.CompletedProcess(args, 0,
+                    'Current database file is:\n`- /var/lib/fail2ban/fail2ban.sqlite3\n', '')
+            return previous(args, check)
+        self.command = settings
+        with self.assertRaisesRegex(reset.ResetError, '符号链接'):
+            self.redeployer()
+        self.assertEqual(database.read_text(), 'keep shared database\n')
+        self.assertFalse(self.p('/root/surelay-backups').exists())
 
     def test_redeploy_unbans_legacy_fail2ban_jail_without_global_unban(self):
         previous = self.command

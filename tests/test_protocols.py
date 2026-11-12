@@ -65,8 +65,9 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(inbounds["hysteria2"]["tls"]["certificate_path"],
                          "/etc/letsencrypt/live/edge.example.com/fullchain.pem")
         self.assertFalse(nodes["hysteria2"]["skip-cert-verify"])
-        self.assertEqual(len(config["route"]["rules"]), 5)
-        self.assertTrue(all(rule["outbound"] == "direct" for rule in config["route"]["rules"]))
+        routes = [rule for rule in config["route"]["rules"] if rule["action"] == "route"]
+        self.assertEqual(len(routes), 5)
+        self.assertTrue(all(rule["outbound"] == "direct" for rule in routes))
 
     def test_credentials_are_stable_separate_and_explicit_values_win(self):
         env = self.all_protocols()

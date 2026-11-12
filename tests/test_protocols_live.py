@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import socket
+import ssl
+import struct
 import subprocess
 import tempfile
 import threading
@@ -35,6 +37,49 @@ class Origin(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_):
         pass
+
+
+class IPv6HTTPServer(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+class FamilyOrigin(Origin):
+    def do_GET(self):
+        body = b"ipv6" if self.server.address_family == socket.AF_INET6 else b"ipv4"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class LocalDoH(Origin):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        query = self.rfile.read(int(self.headers["Content-Length"]))
+        end = 12
+        labels = []
+        while query[end]:
+            length = query[end]
+            labels.append(query[end + 1:end + 1 + length].decode())
+            end += length + 1
+        name = ".".join(labels)
+        query_type = struct.unpack("!H", query[end + 1:end + 3])[0]
+        self.server.queries.append((name, query_type))
+        answer = b""
+        if query_type == 1 and name != "v6-only.test":
+            answer = socket.inet_pton(socket.AF_INET, "127.0.0.1")
+        if query_type == 28 and name != "v4-only.test":
+            answer = socket.inet_pton(socket.AF_INET6, "::1")
+        response = query[:2] + struct.pack("!HHHHH", 0x8180, 1, int(bool(answer)), 0, 0)
+        response += query[12:end + 5]
+        if answer:
+            response += b"\xc0\x0c" + struct.pack("!HHIH", query_type, 1, 60, len(answer)) + answer
+        self.send_response(200)
+        self.send_header("Content-Type", "application/dns-message")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
 
 
 @unittest.skipUnless(SINGBOX and shutil.which("openssl") and shutil.which("curl"),
@@ -74,6 +119,66 @@ class LiveProtocolTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+    def test_dual_stack_same_port_uses_family_doh_and_destination_preference(self):
+        with socket.socket(socket.AF_INET6) as check:
+            try:
+                check.bind(("::1", 0))
+            except OSError:
+                self.skipTest("requires IPv6 loopback")
+        with tempfile.TemporaryDirectory(prefix="surelay-family-") as directory:
+            root = Path(directory)
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
+                            "-subj", "/CN=localhost"], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls.load_cert_chain(root / "cert.pem", root / "key.pem")
+            tls.set_alpn_protocols(["http/1.1"])
+            origin4 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FamilyOrigin)
+            origin6 = IPv6HTTPServer(("::1", origin4.server_port), FamilyOrigin)
+            dns4 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LocalDoH)
+            dns6 = IPv6HTTPServer(("::1", 0), LocalDoH)
+            for server in (origin4, origin6, dns4, dns6):
+                self.addCleanup(server.server_close)
+                if server in (dns4, dns6):
+                    server.queries = []
+                    server.socket = tls.wrap_socket(server.socket, server_side=True)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                self.addCleanup(server.shutdown)
+            pair = subprocess.check_output([SINGBOX, "generate", "reality-keypair"], text=True)
+            private = dict(line.split(": ", 1) for line in pair.splitlines() if ": " in line)["PrivateKey"]
+            direct_port, socks_port = unused_port(), unused_port()
+            while direct_port == socks_port:
+                socks_port = unused_port()
+            env = GEN.defaults({"ENABLE_IPV6_LISTEN": "true", "ENABLE_SOCKS5": "true",
+                                "DIRECT_PORT": str(direct_port), "SOCKS5_PORT": str(socks_port),
+                                "PROXY_USERNAME": "fixture", "PROXY_PASSWORD": "fixture"})
+            config = GEN.build_config(env, [], UUID, private, "abcd")
+            # Replace only the public DoH endpoints with local TLS fixtures.
+            for item in config["dns"]["servers"]:
+                fixture = dns6 if "ipv6" in item["tag"] else dns4
+                item.update(server=fixture.server_address[0], server_port=fixture.server_port,
+                            tls={"enabled": True, "server_name": "localhost", "insecure": True})
+            process, log = self.start(root, "family-server", config)
+            self.wait_tcp(process, socks_port, log)
+            for host, target, expected in (
+                ("127.0.0.1", "dual.test", "ipv4"),
+                ("[::1]", "dual.test", "ipv6"),
+                ("127.0.0.1", "v6-only.test", "ipv6"),
+                ("[::1]", "v4-only.test", "ipv4"),
+                ("[::1]", "127.0.0.1", "ipv4"),
+            ):
+                with self.subTest(entrance=host, destination=target):
+                    result = subprocess.run([
+                        "curl", "--silent", "--show-error", "--fail", "--max-time", "10", "--noproxy", "",
+                        "--proxy", f"socks5h://fixture:fixture@{host}:{socks_port}",
+                        f"http://{target}:{origin4.server_port}/fixture",
+                    ], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr + log.read_text())
+                    self.assertEqual(result.stdout, expected, log.read_text())
+            self.assertEqual({name for name, _ in dns4.queries}, {"dual.test", "v6-only.test"})
+            self.assertEqual({name for name, _ in dns6.queries}, {"dual.test", "v4-only.test"})
 
     def test_new_protocols_forward_tcp_and_reject_wrong_proxy_credentials(self):
         with tempfile.TemporaryDirectory(prefix="surelay-live-") as directory:

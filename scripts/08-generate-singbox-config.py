@@ -10,6 +10,7 @@ Security notes:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
 import hmac
@@ -1019,6 +1020,60 @@ def dns_strategy(env: Dict[str, str]) -> str:
     return strategies[env["PROXY_IP_VERSION"]]
 
 
+def connection_families(env: Dict[str, str]) -> List[str]:
+    return ["ipv4", "ipv6"] if as_bool(env, "ENABLE_IPV6_LISTEN") else ["ipv4"]
+
+
+def dns_server_tag(family: str) -> str:
+    return "dns-cloudflare-ipv6" if family == "ipv6" else "dns-cloudflare"
+
+
+def default_domain_resolver(env: Dict[str, str]) -> Dict[str, str]:
+    return {"server": dns_server_tag(env["PROXY_IP_VERSION"]), "strategy": dns_strategy(env)}
+
+
+def build_dns_config(env: Dict[str, str], cache_capacity: int = 4096) -> Dict[str, Any]:
+    servers = []
+    for tag, address, server_name in (
+        ("dns-cloudflare", "1.1.1.1", "cloudflare-dns.com"),
+        ("dns-google", "8.8.8.8", "dns.google"),
+        ("dns-cloudflare-ipv6", "2606:4700:4700::1111", "cloudflare-dns.com"),
+        ("dns-google-ipv6", "2001:4860:4860::8888", "dns.google"),
+    ):
+        servers.append({
+            "type": "https", "tag": tag, "server": address, "server_port": 443,
+            "path": "/dns-query", "tls": {"enabled": True, "server_name": server_name},
+        })
+    return {
+        "servers": servers,
+        "final": dns_server_tag(env["PROXY_IP_VERSION"]),
+        "strategy": dns_strategy(env),
+        "independent_cache": True,
+        "cache_capacity": cache_capacity,
+    }
+
+
+def family_outbound(outbound: Dict[str, Any], family: str) -> Dict[str, Any]:
+    outbound = copy.deepcopy(outbound)
+    if family == "ipv6":
+        # '/' cannot occur in user exit tags, so a legacy exit cannot collide.
+        outbound["tag"] += "/ipv6"
+    outbound["domain_resolver"] = {"server": dns_server_tag(family), "strategy": f"prefer_{family}"}
+    return outbound
+
+
+def resolve_rule(inbound: Any, family: str) -> Dict[str, Any]:
+    # Source is the outer connection address, normalized by sing-box's listener.
+    # The ip_version matcher describes the requested destination.
+    return {
+        "inbound": inbound,
+        "source_ip_cidr": ["::/0" if family == "ipv6" else "0.0.0.0/0"],
+        "action": "resolve",
+        "server": dns_server_tag(family),
+        "strategy": f"prefer_{family}",
+    }
+
+
 def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, private_key: str, short_id: str) -> Dict[str, Any]:
     direct_port = as_port(env, "DIRECT_PORT")
     direct_inbound_tag = "vless-direct-443"
@@ -1028,47 +1083,38 @@ def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, pri
         inbounds.append(build_vless_reality_inbound(f"vless-{row['tag']}", row["listen_port"], uuid, private_key, short_id, env))
     inbounds.extend(build_protocol_inbound(endpoint, env, uuid) for endpoint in protocol_endpoints(env))
 
-    outbounds: List[Dict[str, Any]] = [{"type": "direct", "tag": "direct"}]
-    for row in rows:
-        outbounds.append(build_home_outbound(row))
+    families = connection_families(env)
+    base_outbounds = [{"type": "direct", "tag": "direct"}]
+    base_outbounds.extend(build_home_outbound(row) for row in rows)
+    outbounds = [family_outbound(outbound, family) for family in families for outbound in base_outbounds]
     outbounds.append({"type": "block", "tag": "block"})
 
-    route_rules: List[Dict[str, Any]] = [
-        {"inbound": direct_inbound_tag, "action": "route", "outbound": "direct"},
-    ]
+    mappings = {direct_inbound_tag: "direct"}
     for row in rows:
-        route_rules.append({"inbound": f"vless-{row['tag']}", "action": "route", "outbound": f"out-{row['tag']}"})
+        mappings[f"vless-{row['tag']}"] = f"out-{row['tag']}"
     for endpoint in protocol_endpoints(env):
-        route_rules.append({"inbound": f"{endpoint['type']}-direct", "action": "route", "outbound": "direct"})
+        mappings[f"{endpoint['type']}-direct"] = "direct"
+
+    # Resolve destination domains here so chained proxies receive the selected
+    # address family too. Literal IP destinations continue to work as supplied.
+    route_rules = [resolve_rule(list(mappings), family) for family in families]
+    for inbound, outbound in mappings.items():
+        for family in reversed(families):
+            route_rules.append({
+                "inbound": inbound,
+                "source_ip_cidr": ["::/0" if family == "ipv6" else "0.0.0.0/0"],
+                "action": "route",
+                "outbound": outbound + ("/ipv6" if family == "ipv6" else ""),
+            })
 
     return {
         "log": {"level": "info", "timestamp": True},
-        "dns": {
-            "servers": [
-                {
-                    "type": "https",
-                    "tag": "dns-cloudflare",
-                    "server": "1.1.1.1",
-                    "server_port": 443,
-                    "path": "/dns-query",
-                },
-                {
-                    "type": "https",
-                    "tag": "dns-google",
-                    "server": "8.8.8.8",
-                    "server_port": 443,
-                    "path": "/dns-query",
-                },
-            ],
-            "final": "dns-cloudflare",
-            "strategy": dns_strategy(env),
-            "cache_capacity": 4096,
-        },
+        "dns": build_dns_config(env),
         "inbounds": inbounds,
         "outbounds": outbounds,
         "route": {
             "auto_detect_interface": True,
-            "default_domain_resolver": "dns-cloudflare",
+            "default_domain_resolver": default_domain_resolver(env),
             "rules": route_rules,
             "final": "block",
         },
@@ -1113,7 +1159,8 @@ def node_list(env: Dict[str, str], rows: List[Dict[str, Any]]) -> List[Dict[str,
 def print_summary(env: Dict[str, str], rows: List[Dict[str, Any]]) -> None:
     print("配置检查通过。")
     print("入站协议：VLESS + Reality" + "".join(f"、{item['type'].upper()}" for item in protocol_endpoints(env)))
-    print(f"代理 IP 版本：{env['PROXY_IP_VERSION']}（DNS strategy: {dns_strategy(env)}）")
+    print(f"辅助连接默认解析：{env['PROXY_IP_VERSION']}（{dns_strategy(env)}）")
+    print("节点 DNS 与目标解析：按实际入口地址族选择，同族优先。")
     print(f"直连出口：direct，端口：{env['DIRECT_PORT']}")
     print(f"Reality server_name：{env['REALITY_SERVER_NAME']}")
     print(f"Reality handshake：{env['REALITY_HANDSHAKE_SERVER']}:{env['REALITY_HANDSHAKE_PORT']}")

@@ -109,7 +109,7 @@ normalized_ipv6="$(python3 "$SCRIPT_DIR/16-update-ipv6-config.py" \
   --address "$normalized_ipv6")"
 info "已更新现有配置：SERVER_IP_IPV6=$normalized_ipv6、ENABLE_IPV6_LISTEN=true、CLIENT_UDP=true、RESET_PROXY_KEYS=false。"
 
-# 重新加载更新后的值；PROXY_IP_VERSION 保持原样，避免改变既有出口/DNS 策略。
+# 重新加载配置后按实际入口地址族应用 DNS 和出站偏好，PROXY_IP_VERSION 沿用原值。
 load_config
 [[ "$SERVER_IP_IPV6" == "$normalized_ipv6" ]] || die "config.env 中的 SERVER_IP_IPV6 更新失败。"
 

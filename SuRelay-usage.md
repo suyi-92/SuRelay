@@ -77,7 +77,7 @@ sudo bash install.sh
 
 ### 3.0.1 已部署机器单独补 IPv6 本地节点
 
-如果常规部署已经完成，只需要在不改现有 v4 身份和出口策略的前提下补一套 IPv6 字面量节点，使用短选项 `-6`：
+如果常规部署已经完成，需要复用现有节点身份和出口映射补一套 IPv6 字面量节点，可以使用短选项 `-6`。
 
 ```bash
 # 自动探测公网 IPv6，并允许交互确认
@@ -99,7 +99,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/suyi-92/SuRelay/main/install.
 1. 安装目录里必须已有 `config.env`，系统必须已有可运行的 sing-box。
 2. `VLESS_UUID_PATH`、Reality private/public key 和 short-id 四份材料必须存在；缺任一项都会在修改前停止。
 3. 修改前会把 `config.env`、当前 sing-box 配置和必要的 UFW 配置放进 `/root/surelay-backups/backup-*-ipv6-node/`。
-4. 只更新 `SERVER_IP_IPV6`、`ENABLE_IPV6_LISTEN=true`、`CLIENT_UDP=true`、`RESET_PROXY_KEYS=false`；不会修改 `SERVER_IP_IPV4` 或 `PROXY_IP_VERSION`，因此 v6 只是新增客户端入口地址，原有出口/DNS 策略保持不变。
+4. 更新 `SERVER_IP_IPV6`、`ENABLE_IPV6_LISTEN=true`、`CLIENT_UDP=true`、`RESET_PROXY_KEYS=false`，沿用现有 `SERVER_IP_IPV4` 和 `PROXY_IP_VERSION` 的值。应用后的节点按实际入站地址族选择 DNS，IPv4 入口优先 IPv4，IPv6 入口优先 IPv6。
 5. `net.ipv6.bindv6only=1` 且已有 IPv4 节点时会在修改前停止，避免 `::` 监听导致 v4 节点掉线。重启后还会按每个实际入口端口分别验证 IPv4 和 IPv6 listener。
 6. UFW 启用时会确保 `/etc/default/ufw` 使用 `IPV6=yes`，规则仍只开放实际 VLESS TCP 端口；云厂商 IPv6 安全组需要手动同步。
 7. 即使启用了 `CUSTOM_DOMAIN`，这三份专用文件也会强制使用 IPv6 字面量作为 `server`，但继续复用现有 Reality SNI 与其它参数。
@@ -457,13 +457,15 @@ REALITY_HANDSHAKE_PORT="443"
 REALITY_MAX_TIME_DIFFERENCE="1m"
 ```
 
-`PROXY_IP_VERSION` 控制代理解析/出站 IP 版本：
+`PROXY_IP_VERSION` 控制辅助连接及无入站上下文时的默认解析策略。
 
 | 值 | 说明 |
 |---|---|
-| `ipv4` | 只走 IPv4，默认值 |
-| `ipv6` | 只走 IPv6 |
-| `dual` | IPv4/IPv6 双栈，优先 IPv4 |
+| `ipv4` | 经 IPv4 DoH 查询 IPv4 地址，默认值 |
+| `ipv6` | 经 IPv6 DoH 查询 IPv6 地址 |
+| `dual` | 经 IPv4 DoH 查询双栈地址，优先 IPv4 |
+
+节点流量按实际入站连接的地址族分流。IPv4 入口使用 `1.1.1.1` 的 DoH，目标域名解析采用 `prefer_ipv4`。IPv6 入口使用 `2606:4700:4700::1111` 的 DoH，采用 `prefer_ipv6`。VPS 在转发前解析目标域名，家宽和上游服务器的域名也按同族优先解析。单栈域名可使用另一地址族，固定 IP 上游按配置地址连接，上游的最终出口能力由上游提供。客户端已提交的目标 IP 按该地址连接，客户端本机 DNS 由客户端设置决定。
 
 `RESET_PROXY_KEYS=false` 时重复运行 `singbox` 或一键安装不会轮换 VLESS UUID、Reality keypair 和 short-id；一键安装重跑时会优先继承旧 `config.env` 的值，找不到旧值时默认 `false`。修改家宽/上游落地节点时通常保持 `false`；改成 `true` 会生成新密钥，旧节点和旧订阅 token 会失效。
 
@@ -911,7 +913,7 @@ https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta
 
 如果同时配置了 IPv4 和 IPv6，两个订阅链接都返回同一份完整节点；IPv4 节点名称保持不变，IPv6 节点名称追加 `-IPv6`。
 如果 Clash Verge 或浏览器无法导入 IPv6 字面量订阅地址，有 IPv4 时直接用 IPv4 订阅地址即可，它会返回同一份完整节点。
-启用自有域名时保留域名节点；已配置 IPv6 且开启监听时，每个出口还提供 `-IPv6` 字面量备用节点，保留相同 Reality SNI。生成配置会启用客户端 IPv6，与 VPS 的 `PROXY_IP_VERSION` 出站策略分别处理。CF 灰云不会绕过 IPv4 封锁，客户端仍需可达的 IPv6。
+启用自有域名时保留域名节点，已配置 IPv6 且开启监听时，每个出口还提供 `-IPv6` 字面量备用节点，复用相同 Reality SNI。生成配置会启用客户端 IPv6，VPS 按实际入口地址族选择 DNS 和同族优先的解析策略。客户端需要可达的 IPv6 才能使用 IPv6 入口。
 
 ---
 

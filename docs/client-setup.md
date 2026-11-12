@@ -59,7 +59,9 @@ sudo bash install.sh -6 2001:db8::10
 
 `SUBSCRIPTION_TARGET` 当前只生成 ClashMeta/Mihomo YAML；旧配置里的其它 target 会警告并按 ClashMeta 处理，旧 URL target 不再兼容。
 
-当节点包含 IPv6 地址，或 `PROXY_IP_VERSION` 为 `ipv6`/`dual` 时，生成的 Mihomo 配置启用 `ipv6: true`。客户端 IPv6 入口不依赖 VPS 出站是否优先 IPv4。CF 灰云域名不能绕过被封的 IPv4，客户端必须具备可用 IPv6；必要时选择 `-IPv6` 节点，或通过 `curl -6` 下载域名订阅。参见 [README](../README.md#ipv6cf-域名与-ipv4-不通)。
+当节点包含 IPv6 地址，或 `PROXY_IP_VERSION` 为 `ipv6`/`dual` 时，生成的 Mihomo 配置启用 `ipv6: true`。VPS 按实际入站连接的地址族选择 DNS，IPv4 入口经 IPv4 DoH 查询，IPv6 入口经 IPv6 DoH 查询。目标域名和上游服务器域名均优先使用同族地址，单栈目标可使用另一地址族，固定 IP 上游按配置地址连接。客户端本机 DNS 由客户端设置决定，客户端已提交的目标 IP 按该地址连接。
+
+客户端需要可用 IPv6 才能连接 IPv6 入口。必要时选择 `-IPv6` 节点，或通过 `curl -6` 下载域名订阅。参见 [README](../README.md#ipv6cf-域名与-ipv4-不通)。
 
 ## 多协议客户端
 

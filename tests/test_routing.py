@@ -46,7 +46,7 @@ class RoutingTest(unittest.TestCase):
 
         self.assertEqual("direct", env["MODE_443"])
 
-    def test_generated_routes_only_contain_fixed_inbound_mappings(self):
+    def test_generated_routes_resolve_by_family_and_keep_fixed_inbound_mappings(self):
         with contextlib.redirect_stderr(io.StringIO()):
             env = gen.defaults(
                 {
@@ -68,8 +68,12 @@ class RoutingTest(unittest.TestCase):
 
         self.assertEqual(
             [
-                {"inbound": "vless-direct-443", "action": "route", "outbound": "direct"},
-                {"inbound": "vless-frontier", "action": "route", "outbound": "out-frontier"},
+                {"inbound": ["vless-direct-443", "vless-frontier"], "source_ip_cidr": ["0.0.0.0/0"],
+                 "action": "resolve", "server": "dns-cloudflare", "strategy": "prefer_ipv4"},
+                {"inbound": "vless-direct-443", "source_ip_cidr": ["0.0.0.0/0"],
+                 "action": "route", "outbound": "direct"},
+                {"inbound": "vless-frontier", "source_ip_cidr": ["0.0.0.0/0"],
+                 "action": "route", "outbound": "out-frontier"},
             ],
             rules,
         )

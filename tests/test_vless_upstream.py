@@ -156,9 +156,15 @@ class VlessUpstreamTest(unittest.TestCase):
             self.assertTrue(vless_outbounds[0]["tls"]["reality"]["enabled"])
             self.assertEqual(
                 [
-                    {"inbound": "vless-direct-443", "action": "route", "outbound": "direct"},
-                    {"inbound": "vless-reality", "action": "route", "outbound": "out-reality"},
-                    {"inbound": "vless-plain", "action": "route", "outbound": "out-plain"},
+                    {"inbound": ["vless-direct-443", "vless-reality", "vless-plain"],
+                     "source_ip_cidr": ["0.0.0.0/0"], "action": "resolve",
+                     "server": "dns-cloudflare", "strategy": "prefer_ipv4"},
+                    {"inbound": "vless-direct-443", "source_ip_cidr": ["0.0.0.0/0"],
+                     "action": "route", "outbound": "direct"},
+                    {"inbound": "vless-reality", "source_ip_cidr": ["0.0.0.0/0"],
+                     "action": "route", "outbound": "out-reality"},
+                    {"inbound": "vless-plain", "source_ip_cidr": ["0.0.0.0/0"],
+                     "action": "route", "outbound": "out-plain"},
                 ],
                 config["route"]["rules"],
             )

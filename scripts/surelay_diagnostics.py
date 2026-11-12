@@ -19,16 +19,27 @@ def endpoint(host, port):
     return f"[{host.strip('[]')}]:{port}" if ":" in host else f"{host}:{port}"
 
 
-def probe_config(outbound, listen_port, env):
+def probe_families(env):
+    if (env.get("ENABLE_IPV6_LISTEN") == "true" and not env.get("SERVER_IP_IPV4")
+            and env.get("PROXY_IP_VERSION") == "ipv6"):
+        return ["ipv6"]
+    return GEN.connection_families(env)
+
+
+def probe_config(outbound, listen_port, env, family=None):
+    family = family or ("ipv6" if env.get("PROXY_IP_VERSION") == "ipv6" else "ipv4")
+    probe_env = {**env, "PROXY_IP_VERSION": family}
+    outbound = GEN.family_outbound(outbound, family)
+    resolve = GEN.resolve_rule("probe", family)
+    resolve.pop("source_ip_cidr", None)
     return {
         "log": {"level": "error"},
-        "dns": {
-            "servers": [{"type": "https", "tag": "dns-cloudflare", "server": "1.1.1.1", "server_port": 443, "path": "/dns-query"}],
-            "final": "dns-cloudflare", "strategy": GEN.dns_strategy(env),
-        },
+        "dns": GEN.build_dns_config(probe_env, cache_capacity=256),
         "inbounds": [{"type": "socks", "tag": "probe", "listen": "127.0.0.1", "listen_port": listen_port}],
         "outbounds": [outbound],
-        "route": {"auto_detect_interface": True, "default_domain_resolver": "dns-cloudflare", "final": outbound["tag"]},
+        "route": {"auto_detect_interface": True,
+                  "default_domain_resolver": GEN.default_domain_resolver(probe_env),
+                  "rules": [resolve], "final": outbound["tag"]},
     }
 
 
@@ -42,14 +53,15 @@ def stop(proc):
             proc.wait(timeout=2)
 
 
-def probe(binary, outbound, env):
+def probe(binary, outbound, env, family=None):
     """Exercise the proxy protocol and credentials, not only its TCP port."""
+    family = family or ("ipv6" if env.get("PROXY_IP_VERSION") == "ipv6" else "ipv4")
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         listen_port = reservation.getsockname()[1]
     with tempfile.TemporaryDirectory(prefix="surelay-probe-") as folder:
         config = Path(folder) / "probe.json"
-        config.write_text(json.dumps(probe_config(outbound, listen_port, env)), encoding="utf-8")
+        config.write_text(json.dumps(probe_config(outbound, listen_port, env, family)), encoding="utf-8")
         os.chmod(config, 0o600)
         # Credentials stay in a private temporary file, never in argv/output.
         with subprocess.Popen([binary, "run", "-c", str(config)], stdout=subprocess.DEVNULL,
@@ -80,7 +92,8 @@ def probe(binary, outbound, env):
                     address = ipaddress.ip_address(result.stdout.strip())
                 except ValueError:
                     return False, "检测站点未返回有效 IP，暂时无法确认。"
-                return True, f"出口 IP {address} · 请求耗时 {round((time.monotonic() - started) * 1000)} ms"
+                fallback = f" · 回退 IPv{address.version}" if address.version != int(family[-1]) else ""
+                return True, f"出口 IP {address}{fallback} · 请求耗时 {round((time.monotonic() - started) * 1000)} ms"
             except subprocess.TimeoutExpired:
                 return False, "检测请求超时。"
             finally:
@@ -93,18 +106,20 @@ def check_exits(manager):
     items = [("服务器直连", "本机网络", {"type": "direct", "tag": "probe-direct"})]
     items += [(row["tag"], f"{row['type'].upper()} · {endpoint(row['server'], row['server_port'])}", GEN.build_home_outbound(row))
               for row in rows]
-    print(f"出口连通性 · 共 {len(items)} 项", flush=True)
+    checks = [(name, address, outbound, family) for family in probe_families(manager.env)
+              for name, address, outbound in items]
+    print(f"出口连通性 · 共 {len(checks)} 项", flush=True)
     print("通过各出口请求 HTTPS 检测站点；不会修改配置或重启现有服务。\n", flush=True)
     passed = 0
-    for index, (name, address, outbound) in enumerate(items, 1):
-        print(f"{index}/{len(items)}  {name}\n目标  {address}", flush=True)
+    for index, (name, address, outbound, family) in enumerate(checks, 1):
+        print(f"{index}/{len(checks)}  {name} · IPv{family[-1]}\n目标  {address}", flush=True)
         try:
-            ok, detail = probe(binary, outbound, manager.env)
+            ok, detail = probe(binary, outbound, manager.env, family)
         except OSError as exc:
             ok, detail = False, f"无法启动检测（{exc.__class__.__name__}）。"
         print(f"{'通过' if ok else '失败'}  {detail}\n", flush=True)
         passed += int(ok)
-    print(f"检查完成：通过 {passed} 项，失败 {len(items) - passed} 项。", flush=True)
+    print(f"检查完成：通过 {passed} 项，失败 {len(checks) - passed} 项。", flush=True)
     print("结果反映 VPS 到检测站点的连接；客户端到 VPS 的公网入口需从客户端验证。", flush=True)
 
 

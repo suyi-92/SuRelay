@@ -28,7 +28,9 @@ UUID = "11111111-2222-4333-8444-555555555555"
 class ProtocolTest(unittest.TestCase):
     def env(self, **updates):
         return GEN.defaults({"SERVER_IP_IPV4": "192.0.2.10", "ENABLE_CUSTOM_DOMAIN": "true",
-                             "CUSTOM_DOMAIN": "edge.example.com", "LE_EMAIL": "admin@example.com", **updates})
+                             "CUSTOM_DOMAIN": "edge.example.com", "LE_EMAIL": "admin@example.com",
+                             "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
+                             "PROXY_SOURCE_ALLOWLIST": "192.0.2.0/24", **updates})
 
     def all_protocols(self, **updates):
         return self.env(ENABLE_HY2="true", ENABLE_SOCKS5="true", ENABLE_HTTP="true",
@@ -96,7 +98,7 @@ class ProtocolTest(unittest.TestCase):
                 GEN.validate_env(self.all_protocols(**updates))
 
     def test_hy2_requires_certificate_and_explicit_insecure_choice(self):
-        env = GEN.defaults({"ENABLE_HY2": "true"})
+        env = GEN.defaults({"ENABLE_HY2": "true", "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24"})
         with self.assertRaisesRegex(GEN.ConfigError, "HY2_CERT_PATH"):
             GEN.validate_env(env)
         env.update(HY2_CERT_PATH="/private/cert.pem", HY2_KEY_PATH="/private/key.pem", HY2_SERVER_NAME="edge.example.com")

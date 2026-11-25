@@ -63,12 +63,14 @@ case "$PHASE" in
   fail2ban) run_phase 05-install-fail2ban.sh ;;
   singbox)
     run_phase 07-install-singbox.sh
+    # Install and verify source ACLs before any new public listener starts.
+    RRB_SOURCE_KEEP_STOPPED=true run_phase 09-apply-firewall.sh
     # HY2 reads TLS files during sing-box check/start, so obtain DNS-01 certs first.
     run_phase 14-setup-cloudflare-dns.sh
-    run_phase 15-setup-custom-domain.sh
+    RRB_SOURCE_POLICY_READY=true run_phase 15-setup-custom-domain.sh
     python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --write --quiet
     run_phase 10-validate.sh --singbox-only --skip-proxy-tests --restart-singbox
-    RRB_SHOW_RESULT=false run_phase 13-setup-subscription.sh
+    RRB_SHOW_RESULT=false RRB_SOURCE_POLICY_READY=true run_phase 13-setup-subscription.sh
     if [[ "$RRB_DRY_RUN" != "true" && "${RRB_SHOW_RESULT:-true}" == "true" ]]; then
       python3 "$SCRIPT_DIR/11-output-nodes.py" --config-env "$RRB_CONFIG_FILE" \
         --generator "$SCRIPT_DIR/08-generate-singbox-config.py" --skip-node-files --quiet --print-summary

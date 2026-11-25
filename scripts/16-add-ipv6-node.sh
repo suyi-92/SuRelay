@@ -176,7 +176,7 @@ ROLLBACK_ARMED="false"
 # Listener validation has committed the local change. A publication failure must
 # leave that working configuration in place; retry the named publication phase.
 if [[ "$ENABLE_SUBSCRIPTION_SERVER" == "true" ]]; then
-  RRB_SHOW_RESULT=false bash "$SCRIPT_DIR/13-setup-subscription.sh"
+  RRB_SHOW_RESULT=false RRB_SOURCE_POLICY_READY=true bash "$SCRIPT_DIR/13-setup-subscription.sh"
 fi
 if custom_domain_enabled; then
   bash "$SCRIPT_DIR/14-setup-cloudflare-dns.sh"

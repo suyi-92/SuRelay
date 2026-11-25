@@ -23,6 +23,23 @@ class InstallWizardTest(unittest.TestCase):
         wizard.keys_confirmed = True
         return wizard
 
+    def test_plaintext_protocol_cannot_be_saved_without_source_allowlist(self):
+        wizard = self.fresh_domain_draft()
+        wizard.values["ENABLE_HTTP"] = "true"
+        with self.assertRaisesRegex(GEN.ConfigError, "PROXY_SOURCE_ALLOWLIST"):
+            wizard.validate()
+        wizard.values["PROXY_SOURCE_ALLOWLIST"] = "192.0.2.10,2001:db8::10"
+        saved = wizard.validate()
+        self.assertEqual(saved["PROXY_SOURCE_ALLOWLIST"], "192.0.2.10,2001:db8::10")
+
+    def test_web_port_selection_requires_sources_even_with_proxy_password(self):
+        wizard = self.fresh_domain_draft()
+        wizard.values.update(DIRECT_PORT="443", PROXY_PASSWORD="strong-fixture-password")
+        with self.assertRaisesRegex(GEN.ConfigError, "WEB_SOURCE_ALLOWLIST"):
+            wizard.validate()
+        wizard.values["WEB_SOURCE_ALLOWLIST"] = "198.51.100.10"
+        self.assertEqual(wizard.validate()["DIRECT_PORT"], "443")
+
     def test_domain_page_defaults_prefix_from_node_name_and_saves_complete_hostname(self):
         wizard = self.fresh_domain_draft()
         labels = [label for label, _ in wizard.domain_fields()]
@@ -231,7 +248,8 @@ class InstallWizardTest(unittest.TestCase):
     def test_protocol_validation_can_be_fixed_without_discarding_draft(self):
         wizard = self.draft()
         wizard.protocol_only = True
-        wizard.values.update(ENABLE_HTTP="true", HTTP_PORT=wizard.values["SSH_PORT"])
+        wizard.values.update(ENABLE_HTTP="true", HTTP_PORT=wizard.values["SSH_PORT"],
+                             PROXY_SOURCE_ALLOWLIST="192.0.2.0/24")
         calls = []
         def group(*args, **kwargs):
             calls.append(wizard.error)

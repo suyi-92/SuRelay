@@ -245,8 +245,14 @@ class Manager:
             try:
                 config = json.loads(self.path("SINGBOX_CONFIG_PATH").read_text(encoding="utf-8"))
                 GEN.check_generated_reality_handshakes(config, self.env)
+                GEN.check_source_firewall(self.env, config)
             except (OSError, ValueError, TypeError, AttributeError, GEN.ConfigError) as exc:
                 raise Error(f"无法检查 sing-box 的 Reality 回落配置：{exc}") from exc
+        elif name == self.env.get("SUBSCRIPTION_SERVICE") and action in {"start", "restart", "reload"}:
+            try:
+                GEN.check_source_firewall(self.env, subscription_only=True)
+            except GEN.ConfigError as exc:
+                raise Error(str(exc)) from exc
         args = ["rc-service", name, action] if self.alpine() else ["systemctl", action, name]
         return run(args, check=check)
 
@@ -328,13 +334,19 @@ class Manager:
         files = files or {}
         old = dict(self.env)
         paths = self.owned_paths() + list(files)
-        paths += [Path("/etc/ufw/user.rules"), Path("/etc/ufw/user6.rules"), Path("/etc/default/ufw")]
+        paths += [Path("/etc/ufw/user.rules"), Path("/etc/ufw/user6.rules"), Path("/etc/default/ufw"),
+                  Path("/etc/ufw/after.init"), self.path("RRB_STATE_DIR") / "source-guard.json",
+                  self.path("RRB_STATE_DIR") / "source-firewall.json"]
+        for name in ("sing-box", self.env["SUBSCRIPTION_SERVICE"]):
+            paths += [Path(f"/etc/systemd/system/{name}.service.d/surelay-source.conf"),
+                      Path(f"/etc/conf.d/{name}"), Path(f"/etc/init.d/{name}")]
         if domain:
             paths += [self.nginx_path(), self.path("CLOUDFLARE_API_TOKEN_FILE")]
         enabled_site = Path("/etc/nginx/http.d" if self.alpine() else "/etc/nginx/sites-enabled") / self.nginx_path().name
         site_existed = enabled_site.exists() or enabled_site.is_symlink()
         backup = Snapshot(paths)
         restarted = firewall_changed = domain_changed = False
+        stopped_services = []
         print(f"变更前备份：{backup.directory}")
         try:
             for path, content in files.items():
@@ -354,9 +366,17 @@ class Manager:
             try:
                 atomic(candidate, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
                 run([self.core_binary(), "check", "-c", candidate], capture=True)
+                # Do not remove an old port's ACL while its old process still
+                # listens. Both listeners remain stopped until policy commits.
+                for name in ("sing-box", self.env["SUBSCRIPTION_SERVICE"]):
+                    if self.active(name):
+                        self.service(name, "stop")
+                        stopped_services.append(name)
+                firewall_changed = True
+                self.phase("firewall", RRB_SOURCE_KEEP_STOPPED="true")
                 if domain and self.env["ENABLE_CUSTOM_DOMAIN"] == "true":
                     domain_changed = True
-                    self.phase("custom-domain", RRB_SKIP_PACKAGE_INSTALL="false")
+                    self.phase("custom-domain", RRB_SKIP_PACKAGE_INSTALL="false", RRB_SOURCE_POLICY_READY="true")
                 atomic(target, candidate.read_bytes())
             finally:
                 if candidate.exists():
@@ -364,16 +384,33 @@ class Manager:
             restarted = True
             self.service("sing-box", "restart")
             self.check_listeners(rows)
-            if self.env["ENABLE_UFW"] == "true":
-                firewall_changed = True
-                self.phase("firewall")
         except BaseException:
+            new_source_plan = self.path("RRB_STATE_DIR") / "source-firewall.json"
+            new_source_bytes = new_source_plan.read_bytes() if new_source_plan.is_file() else None
             backup.restore()
             self.reload()
+            if not self.alpine():
+                run(["systemctl", "daemon-reload"], check=False)
             if firewall_changed and shutil.which("ufw"):
                 run(["ufw", "reload"], check=False)
+                old_source_plan = self.path("RRB_STATE_DIR") / "source-firewall.json"
+                if old_source_plan.is_file():
+                    run(["python3", self.root / "scripts/source_firewall.py", "--restore", old_source_plan], check=False)
+                elif new_source_bytes is not None:
+                    atomic(old_source_plan, new_source_bytes)
+                    try:
+                        run(["python3", self.root / "scripts/source_firewall.py", "--remove-persistence", old_source_plan], check=False)
+                    finally:
+                        old_source_plan.unlink()
+            restore_services = set(stopped_services)
             if restarted:
-                self.service("sing-box", "restart", check=False)
+                restore_services.add("sing-box")
+            for name in ("sing-box", self.env["SUBSCRIPTION_SERVICE"]):
+                if name in restore_services:
+                    try:
+                        self.service(name, "restart", check=False)
+                    except (Error, OSError, GEN.ConfigError) as exc:
+                        notice(f"旧服务未通过安全恢复检查，保持停止：{name}：{exc}")
             if domain_changed:
                 if not site_existed and enabled_site.is_symlink() and enabled_site.resolve() == self.nginx_path().resolve():
                     enabled_site.unlink()
@@ -386,7 +423,7 @@ class Manager:
             for key, name in (("CSV_PATH", "home-proxies.csv"), ("UPSTREAM_NODES_PATH", "upstream-nodes.txt")):
                 if self.path(key).exists():
                     atomic(state / name, self.path(key).read_bytes())
-            self.phase("subscription")
+            self.phase("subscription", RRB_SOURCE_POLICY_READY="true")
             if self.env["ENABLE_CUSTOM_DOMAIN"] == "true":
                 self.phase("cloudflare-dns")
             if old.get("SERVER_IP_IPV6") and old.get("SERVER_IP_IPV6") != self.env.get("SERVER_IP_IPV6"):

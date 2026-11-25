@@ -7,7 +7,49 @@ require_root
 load_config
 require_supported_os
 
+source_policy_plan='{"version":1,"ipv6":false,"entries":[]}'
+source_guard_needed=false
+source_core_was_active=false
+source_subscription_was_active=false
+if [[ "$SURELAY_SECURITY_ONLY" != "true" ]]; then
+  source_policy_plan="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-source-policy)" || die "来源白名单计划校验失败。"
+  source_guard_needed="$(printf '%s\n' "$source_policy_plan" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin)["entries"] else "false")')" || die "来源白名单计划格式不正确。"
+  [[ ! -e "$RRB_STATE_DIR/source-firewall.json" ]] || source_guard_needed=true
+fi
+
+if [[ "$SURELAY_SECURITY_ONLY" != "true" ]]; then
+  if is_dry_run; then
+    log "DRY-RUN: 来源白名单变更前停止运行中的 sing-box 和订阅服务。"
+  else
+    if service_active sing-box; then
+      service_stop sing-box || die "无法停止旧代理服务；未修改来源白名单。"
+      source_core_was_active=true
+    fi
+    if service_active "$SUBSCRIPTION_SERVICE"; then
+      service_stop "$SUBSCRIPTION_SERVICE" || die "无法停止旧订阅服务；未修改来源白名单。"
+      source_subscription_was_active=true
+    fi
+  fi
+fi
+
+restore_source_services() {
+  [[ "${RRB_SOURCE_KEEP_STOPPED:-false}" != true ]] || return 0
+  if [[ "$source_core_was_active" == true ]]; then
+    singbox_check "$SINGBOX_CONFIG_PATH" || die "旧代理配置未通过检查；请重新应用 singbox 阶段。"
+    service_restart sing-box || die "来源白名单已应用，但代理服务尚未恢复。"
+  fi
+  if [[ "$source_subscription_was_active" == true ]]; then
+    RRB_SOURCE_POLICY_READY=true RRB_SHOW_RESULT=false bash "$SCRIPT_DIR/13-setup-subscription.sh" \
+      || die "来源白名单已应用，但订阅服务尚未按新监听配置恢复。"
+  fi
+}
+
 if [[ "$ENABLE_UFW" != "true" ]]; then
+  # The generator rejects restricted listeners without UFW before this branch.
+  if [[ "$SURELAY_SECURITY_ONLY" != "true" ]]; then
+    install_source_policy_guard || die "无法安装来源白名单启动检查。"
+    restore_source_services
+  fi
   info "ENABLE_UFW=false，跳过防火墙配置。"
   exit 0
 fi
@@ -129,7 +171,24 @@ else
   fi
 fi
 
+if declare -F install_source_policy_guard >/dev/null; then
+  install_source_policy_guard || die "无法安装来源白名单启动检查。"
+else
+  die "缺少来源白名单启动检查；请使用同一版本的完整 SuRelay 脚本。"
+fi
+if [[ "$source_guard_needed" == true ]]; then
+  if is_dry_run; then
+    printf '%s\n' "$source_policy_plan" | python3 "$SCRIPT_DIR/source_firewall.py" --apply --dry-run >>"$LOG_FILE" 2>&1 \
+      || die "来源白名单规则预检失败。"
+  else
+    printf '%s\n' "$source_policy_plan" | run python3 "$SCRIPT_DIR/source_firewall.py" --apply --persist "$RRB_STATE_DIR/source-firewall.json" \
+      || die "来源白名单未完整下发；服务保持停止，请修正后重新应用。"
+  fi
+fi
+
 if is_alpine; then service_enable ufw; fi
+
+restore_source_services
 
 cat <<EOF
 

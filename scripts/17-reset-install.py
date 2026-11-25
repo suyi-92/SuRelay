@@ -48,6 +48,8 @@ class ResetDeployment:
         self.ssh_assets = []
         self.old_managed_keys = []
         self.managed_sshd_jail = False
+        self.source_firewall_plan = None
+        self.openrc_source_configs = {}
 
     def check_handoff(self):
         self.safe_path(self.handoff_file)
@@ -215,6 +217,7 @@ class ResetDeployment:
                      'surelay-v6-nodes.txt', 'surelay-v6-clash.yaml', 'surelay-v6-vless.txt'):
             self.add(Path('/root') / name)
         self.add('/usr/local/lib/surelay/subscription-server.py')
+        self.collect_source_policy(state)
         self.empty_dirs.add('/usr/local/lib/surelay')
         self.add('/etc/systemd/system/surelay-subscription.service', marker='SuRelay')
         if '/etc/systemd/system/surelay-subscription.service' in self.paths and 'surelay-subscription' not in self.services:
@@ -289,6 +292,70 @@ class ResetDeployment:
         if self.redeploy:
             self.collect_redeploy(state)
         self.collect_firewall(env)
+
+    def collect_source_policy(self, state):
+        """Keep UFW's shared hook out of the delete list; restore it via its owner."""
+        for name in ('source_firewall.py', 'source_policy.py', 'source_guard.py'):
+            self.add(Path('/usr/local/lib/surelay') / name, marker='Managed by surelay source guard.')
+        for name in ('source-firewall.json', 'source-guard.json'):
+            self.add(state / name)
+        guard = state / 'source-guard.json'
+        if self.exists(guard):
+            try:
+                saved = json.loads(self.text(guard))
+            except (ValueError, OSError) as exc:
+                raise ResetError('来源启动保护归属记录无法读取；未开始清理。') from exc
+            if not isinstance(saved, dict) or saved.get('owner') != 'surelay-source-guard-v1':
+                raise ResetError('来源启动保护归属记录不属于 SuRelay；未开始清理。')
+        plan = state / 'source-firewall.json'
+        hook_path = self.path('/etc/ufw/after.init')
+        # An unrelated shared symlink remains untouched. Our persistence cannot
+        # be removed safely through one, so require a regular hook when owned.
+        hook = self.text('/etc/ufw/after.init') if self.exists(plan) or not hook_path.is_symlink() else ''
+        if self.exists(plan):
+            self.source_firewall_plan = plan
+            if '# SuRelay source ACL after.init wrapper v1' in hook:
+                try:
+                    commands = [shlex.split(line)[:4] for line in hook.splitlines() if '--restore' in line]
+                except ValueError as exc:
+                    raise ResetError('来源保护的共享 UFW hook 无法安全解析；未开始清理。') from exc
+                expected = ['/usr/bin/python3', '/usr/local/lib/surelay/source_firewall.py', '--restore', str(plan)]
+                if (hook.count('# BEGIN SURELAY ORIGINAL AFTER.INIT') != 1
+                        or hook.count('# END SURELAY ORIGINAL AFTER.INIT') != 1 or expected not in commands):
+                    raise ResetError('来源保护的共享 UFW hook 归属不符或标记损坏；未开始清理。')
+            elif 'SURELAY ORIGINAL AFTER.INIT' in hook:
+                raise ResetError('来源保护的共享 UFW hook 标记损坏；未开始清理。')
+        elif '# SuRelay source ACL after.init wrapper v1' in hook:
+            raise ResetError('来源保护的持久化计划缺失，不能安全恢复共享 UFW hook；未开始清理。')
+        for service in ('sing-box', 'surelay-subscription', 'reality-relay-subscription'):
+            directory = Path('/etc/systemd/system') / f'{service}.service.d'
+            dropin = directory / 'surelay-source.conf'
+            if self.exists(dropin):
+                contents = self.text(dropin)
+                if str(state / 'source-guard.json') not in contents:
+                    raise ResetError(f'来源保护 drop-in 不属于当前 state，未卸载：{dropin}')
+                self.add(dropin, marker='Managed by surelay source guard.')
+                self.empty_dirs.add(str(directory))
+                if service not in self.services:
+                    self.services.append(service)
+            conf = Path('/etc/conf.d') / service
+            if not self.exists(conf) or str(conf) in self.paths:
+                continue
+            contents = self.text(conf)
+            match = re.search(r'(?m)^rrb_source_plan=(.*)$', contents)
+            if not match:
+                continue
+            try:
+                values = shlex.split(match[1])
+            except ValueError as exc:
+                raise ResetError(f'OpenRC 来源保护配置无法安全解析：{conf}') from exc
+            if values != [str(state / 'source-guard.json')]:
+                raise ResetError(f'OpenRC 来源保护不属于当前 state，未卸载：{conf}')
+            self.openrc_source_configs[str(conf)] = re.sub(
+                r'(?m)^rrb_source_[a-z0-9_]+=.*\n?', '', contents)
+            self.backup_extra.add(str(conf))
+            if service not in self.services:
+                self.services.append(service)
 
     def collect_redeploy(self, state):
         """Keep the working SSH channel; record only evidence of managed identity."""
@@ -472,7 +539,8 @@ class ResetDeployment:
         unit = f'/etc/systemd/system/{service}.service'
         if self.exists(unit):
             self.add(unit, marker='SuRelay')
-            self.services.append(service)
+            if service not in self.services:
+                self.services.append(service)
         for name in ('sing-box', service):
             init = f'/etc/init.d/{name}'
             if 'Managed by reality-relay-bootstrap' in self.text(init):
@@ -589,6 +657,8 @@ class ResetDeployment:
                  '重置安装将停止旧节点和订阅，清空配置/出口列表，并在重装时生成新密钥。',
                  '备份后删除以下项目文件：', *[f'  {path}' for path in sorted(self.paths)],
                  '停用服务：' + (', '.join(self.services) or '无')]
+        if self.source_firewall_plan is not None:
+            lines.append('停止节点和订阅后，恢复原 UFW after.init 并清除自有来源链；共享 hook 不直接删除。')
         if self.redeploy:
             lines += [f'立即清理已确认 SR 防火墙规则：{len(self.firewall)} 条；新 SSH 验证后再清理：{len(self.pending_firewall)} 条。',
                       '暂时保留当前 SSH 配置和全部公钥以完成交接；新端口与本次录入的公钥验证后，清除未选用且可确认归属的旧 SR 身份。',
@@ -777,6 +847,12 @@ class ResetDeployment:
                 raise ResetError(f'服务仍在运行，停止清理：{name}')
         for command in self.firewall:
             self.runner(command)
+        if self.source_firewall_plan is not None:
+            self.runner(['python3', str(Path(__file__).with_name('source_firewall.py')),
+                         '--remove-persistence', str(self.source_firewall_plan)])
+        for value, contents in self.openrc_source_configs.items():
+            self.safe_path(value)
+            self.path(value).write_text(contents)
         # Remove links before their targets, then only exact planned files/trees.
         for value in sorted(self.paths, key=lambda v: not self.path(v).is_symlink()):
             p = self.path(value)

@@ -11,6 +11,7 @@ error_log="$output_log"
 
 depend() {
     need net
+    if [ "${rrb_source_ufw:-false}" = true ]; then need ufw; fi
     after firewall
 }
 
@@ -19,5 +20,31 @@ start_pre() {
     checkpath --file --mode 0600 "$output_log" || return 1
     if [ -n "${rrb_check_config:-}" ]; then
         "$command" check -c "$rrb_check_config" || return 1
+    fi
+    if [ -n "${rrb_source_plan:-}" ]; then
+        if [ -n "${rrb_source_port:-}" ]; then
+            /usr/bin/python3 /usr/local/lib/surelay/source_guard.py --plan "$rrb_source_plan" \
+                --service "$rrb_source_service" --port "$rrb_source_port" --bind "${rrb_source_bind:-unprepared}" \
+                --ipv4 "${rrb_source_ipv4:-false}" --ipv6 "${rrb_source_ipv6:-false}" || return 1
+        else
+            /usr/bin/python3 /usr/local/lib/surelay/source_guard.py --plan "$rrb_source_plan" \
+                --service "$rrb_source_service" || return 1
+        fi
+        # supervise-daemon respawns the command without calling start_pre again.
+        # Keep the guard in the actual exec path so every respawn checks the ACL.
+        command_args="$(/usr/bin/python3 - "$rrb_source_plan" "$rrb_source_service" \
+            "${rrb_source_port:-}" "${rrb_source_bind:-unprepared}" "${rrb_source_ipv4:-false}" \
+            "${rrb_source_ipv6:-false}" "$command" "${command_args:-}" <<'PY'
+import shlex, sys
+args = ['/usr/local/lib/surelay/source_guard.py', '--plan', sys.argv[1], '--service', sys.argv[2]]
+if sys.argv[3]:
+    args += ['--port', sys.argv[3]]
+if sys.argv[2] == 'subscription':
+    args += ['--bind', sys.argv[4], '--ipv4', sys.argv[5], '--ipv6', sys.argv[6]]
+args += ['--execute', sys.argv[7], *shlex.split(sys.argv[8])]
+print(shlex.join(args))
+PY
+)" || return 1
+        command=/usr/bin/python3
     fi
 }

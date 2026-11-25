@@ -100,7 +100,7 @@ class VlessUpstreamTest(unittest.TestCase):
             "legacy_csv": f"tag,listen_port,node_url\nreality,,{REALITY_URL}\nplain,51049,{PLAIN_URL}\n",
             "raw_urls": f"{REALITY_URL}#reality\n{PLAIN_URL}#plain\n",
         }
-        env = gen.defaults({})
+        env = gen.defaults({"WEB_SOURCE_ALLOWLIST": "192.0.2.0/24"})
         for name, content in formats.items():
             with self.subTest(format=name), tempfile.TemporaryDirectory() as tmp:
                 base = Path(tmp)
@@ -131,6 +131,8 @@ class VlessUpstreamTest(unittest.TestCase):
             ):
                 (base / filename).write_text(value, encoding="utf-8")
             settings = {
+                "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
+                "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
                 "VLESS_UUID_PATH": str(base / "uuid.txt"),
                 "REALITY_PRIVATE_KEY_PATH": str(base / "private.key"),
                 "REALITY_SHORT_ID_PATH": str(base / "short-id.txt"),

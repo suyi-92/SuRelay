@@ -301,6 +301,9 @@ load_config() {
   : "${REALITY_HANDSHAKE_SERVER:=www.microsoft.com}"
   : "${REALITY_HANDSHAKE_PORT:=443}"
   : "${REALITY_MAX_TIME_DIFFERENCE:=1m}"
+  : "${PROXY_SOURCE_ALLOWLIST:=}"
+  : "${WEB_SOURCE_ALLOWLIST:=}"
+  : "${TCP_PUBLIC_PORT_MAP:=}"
   : "${CLIENT_FINGERPRINT:=chrome}"
   : "${CLIENT_UDP:=true}"
   : "${CLIENT_ALPN:=h2,http/1.1}"
@@ -587,6 +590,144 @@ validate_config_basics() {
     [[ "$used_ports" != *" $value "* ]] || die "$key 与现有服务端口冲突：$value"
     used_ports+="$value "
   done
+  # The same parser is used by Python generation, CLI phases and service guards.
+  python3 - "$SCRIPT_DIR" "$PROXY_SOURCE_ALLOWLIST" "$WEB_SOURCE_ALLOWLIST" "$TCP_PUBLIC_PORT_MAP" \
+    "$ENABLE_UFW" "$ENABLE_IPV6_LISTEN" "$SURELAY_SECURITY_ONLY" "$DIRECT_PORT" "$SSH_PORT" \
+    "$ENABLE_HTTP" "$HTTP_PORT" "$ENABLE_SOCKS5" "$SOCKS5_PORT" "$ENABLE_SHADOWSOCKS" "$SHADOWSOCKS_PORT" \
+    "$ENABLE_SUBSCRIPTION_SERVER" "$ENABLE_CUSTOM_DOMAIN" "$SUBSCRIPTION_PORT" "$SUBSCRIPTION_INTERNAL_PORT" "$SERVER_IP_IPV6" <<'PY' || die "来源白名单配置校验失败。"
+import sys
+sys.path.insert(0, sys.argv[1])
+from source_policy import SourcePolicyError, validate_source_policy
+keys = ('PROXY_SOURCE_ALLOWLIST', 'WEB_SOURCE_ALLOWLIST', 'TCP_PUBLIC_PORT_MAP', 'ENABLE_UFW',
+        'ENABLE_IPV6_LISTEN', 'SURELAY_SECURITY_ONLY', 'DIRECT_PORT', 'SSH_PORT', 'ENABLE_HTTP',
+        'HTTP_PORT', 'ENABLE_SOCKS5', 'SOCKS5_PORT', 'ENABLE_SHADOWSOCKS', 'SHADOWSOCKS_PORT',
+        'ENABLE_SUBSCRIPTION_SERVER', 'ENABLE_CUSTOM_DOMAIN', 'SUBSCRIPTION_PORT',
+        'SUBSCRIPTION_INTERNAL_PORT', 'SERVER_IP_IPV6')
+try:
+    validate_source_policy(dict(zip(keys, sys.argv[2:])))
+except SourcePolicyError as exc:
+    raise SystemExit(str(exc))
+PY
+}
+
+service_stop() {
+  if is_alpine; then run rc-service "$1" stop; else run systemctl stop "$1"; fi
+}
+
+install_source_policy_guard() {
+  local payload name
+  payload="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --print-source-guard)" || return "$?"
+  run mkdir -p /usr/local/lib/surelay "$RRB_STATE_DIR" || return "$?"
+  for name in source_policy.py source_firewall.py source_guard.py; do
+    if [[ -L "/usr/local/lib/surelay/$name" ]] || { [[ -e "/usr/local/lib/surelay/$name" ]] && ! grep -Fq '# Managed by surelay source guard.' "/usr/local/lib/surelay/$name"; }; then
+      die "来源保护辅助脚本归属不明，未覆盖：/usr/local/lib/surelay/$name"
+    fi
+    run install -m 0755 -o root -g root "$SCRIPT_DIR/$name" "/usr/local/lib/surelay/$name" || return "$?"
+  done
+  [[ ! -L "$RRB_STATE_DIR/source-guard.json" ]] || die "来源策略状态文件不能是符号链接。"
+  if [[ -e "$RRB_STATE_DIR/source-guard.json" ]]; then
+    python3 - "$RRB_STATE_DIR/source-guard.json" <<'PY' || return "$?"
+import json, sys
+from pathlib import Path
+if json.loads(Path(sys.argv[1]).read_text()) .get('owner') != 'surelay-source-guard-v1':
+    raise SystemExit('来源策略状态文件归属不明，未覆盖。')
+PY
+  fi
+  printf '%s\n' "$payload" | write_root_file "$RRB_STATE_DIR/source-guard.json" 0600 || return "$?"
+  if is_alpine; then
+    # Older OpenRC services get the current pre-start hook without changing args.
+    if [[ -f /etc/conf.d/sing-box ]]; then
+      write_source_openrc_guard sing-box sing-box || return "$?"
+    fi
+    if [[ -f "/etc/conf.d/$SUBSCRIPTION_SERVICE" ]]; then
+      write_source_openrc_guard "$SUBSCRIPTION_SERVICE" subscription || return "$?"
+    fi
+  else
+    write_source_systemd_guard sing-box sing-box || return "$?"
+    write_source_systemd_guard "$SUBSCRIPTION_SERVICE" subscription || return "$?"
+  fi
+}
+
+write_source_systemd_guard() {
+  local service="$1" kind="$2" port_arg="${3:-}" bind_arg="${4:-unprepared}" ip4_arg="${5:-false}" ip6_arg="${6:-false}"
+  local core_bin=""
+  if [[ "$kind" == sing-box ]]; then
+    core_bin="$(singbox_bin)"
+    if [[ -z "$core_bin" ]]; then
+      is_dry_run || die "找不到受托管的 sing-box 内核，未写入服务配置。"
+      core_bin=/usr/bin/sing-box
+    fi
+  fi
+  run mkdir -p "/etc/systemd/system/$service.service.d" || return "$?"
+  local dropin="/etc/systemd/system/$service.service.d/surelay-source.conf"
+  if [[ -L "$dropin" ]] || { [[ -e "$dropin" ]] && ! grep -Fq '# Managed by surelay source guard.' "$dropin"; }; then
+    die "来源保护服务配置归属不明，未覆盖：$dropin"
+  fi
+  python3 - "$RRB_STATE_DIR/source-guard.json" "$kind" "$port_arg" "$ENABLE_UFW" "$bind_arg" "$ip4_arg" "$ip6_arg" "$core_bin" "$SINGBOX_CONFIG_PATH" <<'PY' | write_root_file "$dropin" 0644 || return "$?"
+import sys
+def quoted(value):
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$').replace('\n', '\\n').replace('\r', '\\r') + '"'
+args = ['/usr/bin/python3', '/usr/local/lib/surelay/source_guard.py', '--plan', sys.argv[1], '--service', sys.argv[2]]
+if sys.argv[3]:
+    args += ['--port', sys.argv[3]]
+if sys.argv[2] == 'subscription':
+    args += ['--bind', sys.argv[5], '--ipv4', sys.argv[6], '--ipv6', sys.argv[7]]
+print('# Managed by surelay source guard.\n[Unit]\nAfter=ufw.service')
+if sys.argv[4] == 'true':
+    print('Requires=ufw.service')
+print('\n[Service]')
+print('ExecStartPre=' + ' '.join(map(quoted, args)))
+if sys.argv[2] == 'sing-box':
+    print('ExecStart=')
+    print('ExecStart=' + ' '.join(map(quoted, [sys.argv[8], 'run', '-c', sys.argv[9]])))
+    print('ExecReload=')
+    print('ExecReload=' + ' '.join(map(quoted, args + ['--execute', '/bin/kill', '-HUP'])) + ' $MAINPID')
+PY
+  service_daemon_reload
+}
+
+write_source_openrc_guard() {
+  local service="$1" kind="$2" port_arg="${3:-}" bind_arg="${4:-unprepared}" ip4_arg="${5:-false}" ip6_arg="${6:-false}"
+  run mkdir -p /etc/conf.d /etc/init.d || return "$?"
+  if [[ -L "/etc/conf.d/$service" || -L "/etc/init.d/$service" ]] || { [[ -e "/etc/init.d/$service" ]] && ! grep -Fq 'Managed by surelay' "/etc/init.d/$service"; }; then
+    die "OpenRC 服务配置归属不明，未覆盖：$service"
+  fi
+  if ! is_dry_run; then
+    python3 - "/etc/conf.d/$service" "$RRB_STATE_DIR/source-guard.json" "$kind" "$port_arg" "$ENABLE_UFW" "$bind_arg" "$ip4_arg" "$ip6_arg" "$SINGBOX_CONFIG_PATH" <<'PY' || return "$?"
+import re, shlex, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+text = path.read_text() if path.exists() else ''
+text = re.sub(r'(?m)^rrb_source_[a-z0-9_]+=.*\n?', '', text)
+for name, value in zip(('plan', 'service', 'port', 'ufw', 'bind', 'ipv4', 'ipv6'), sys.argv[2:9]):
+    text += '\nrrb_source_' + name + '=' + shlex.quote(value) + '\n'
+if sys.argv[3] == 'sing-box':
+    text = re.sub(r'(?m)^(?:command_args|rrb_check_config)=.*\n?', '', text)
+    text += '\ncommand_args=' + shlex.quote(shlex.join(['run', '-c', sys.argv[9]])) + '\n'
+    text += 'rrb_check_config=' + shlex.quote(sys.argv[9]) + '\n'
+path.write_text(text)
+path.chmod(0o600)
+PY
+  fi
+  write_root_file "/etc/init.d/$service" 0755 <"$RRB_PROJECT_DIR/templates/surelay-service.openrc"
+}
+
+mark_subscription_source_ready() {
+  if ! is_dry_run; then
+    python3 - "$RRB_STATE_DIR/source-guard.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding='utf-8'))
+if payload.get('owner') != 'surelay-source-guard-v1':
+    raise SystemExit('来源策略文件归属不明，未覆盖。')
+payload['subscription']['ready'] = True
+tmp = path.with_name(path.name + '.ready.tmp')
+tmp.write_text(json.dumps(payload, ensure_ascii=False) + '\n', encoding='utf-8')
+os.chmod(tmp, 0o600)
+tmp.replace(path)
+PY
+  fi
 }
 
 resolve_csv_path() {

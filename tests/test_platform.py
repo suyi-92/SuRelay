@@ -19,7 +19,7 @@ class PlatformTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.os_release = self.root / "os-release"
         self.config = self.root / "config.env"
-        self.config.write_text('SERVER_ALIAS="test"\nSERVER_IP="192.0.2.10"\n')
+        self.config.write_text('SERVER_ALIAS="test"\nSERVER_IP="192.0.2.10"\nDIRECT_PORT="55443"\n')
 
     def run_shell(self, body, *, distro="alpine", version="3.19.9", dry_run=False):
         self.os_release.write_text(f'ID={distro}\nVERSION_ID={version}\nPRETTY_NAME="test {distro}"\n')
@@ -115,6 +115,7 @@ fi
                     'SERVER_ALIAS="test"\nENABLE_CUSTOM_DOMAIN="true"\n'
                     'CUSTOM_DOMAIN="edge.example.com"\nLE_EMAIL="admin@example.com"\n'
                     f'DIRECT_PORT="{port}"\nSUBSCRIPTION_BASE_URL="{override}"\n'
+                    'WEB_SOURCE_ALLOWLIST="192.0.2.0/24"\n'
                 )
                 result = self.run_shell('load_config; printf "%s\\n" "$DIRECT_PORT" "$SSH_PORT" "$SUBSCRIPTION_BASE_URL" "$SUBSCRIPTION_LISTEN_PORT" "$REALITY_HANDSHAKE_PORT"; if subscription_public_enabled; then exit 91; fi')
                 self.assert_ok(result)

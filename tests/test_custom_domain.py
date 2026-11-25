@@ -38,6 +38,7 @@ class CustomDomainConfigTest(unittest.TestCase):
             "ENABLE_CUSTOM_DOMAIN": "true",
             "CUSTOM_DOMAIN": "edge.example.com",
             "LE_EMAIL": "admin@example.com",
+            "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
         }
         env.update(overrides)
         return gen.defaults(env)
@@ -69,6 +70,7 @@ class CustomDomainConfigTest(unittest.TestCase):
             "SERVER_ALIAS": "edge",
             "SERVER_IP_IPV4": "203.0.113.10",
             "ENABLE_CUSTOM_DOMAIN": "false",
+            "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
             "SUBSCRIPTION_PORT": "",
         })
 
@@ -104,12 +106,14 @@ class CustomDomainConfigTest(unittest.TestCase):
             generate = ('set -e\nrun() { :; }\nwrite_root_file() { cat > "$HOOK_OUTPUT"; }\n'
                         f'python3() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
                         f'SCRIPT_DIR={shlex.quote((ROOT / "scripts").as_posix())}\n'
-                        'is_alpine() { return 1; }\nSINGBOX_CONFIG_PATH="$1"\n'
+                        'is_alpine() { return 1; }\nSINGBOX_CONFIG_PATH="$1"\nRRB_STATE_DIR="$2"\n'
                         + function + '\nwrite_renew_hook\n')
-            result = subprocess.run([BASH, "--noprofile", "--norc", "-c", generate, "generate", config.as_posix()],
+            result = subprocess.run([BASH, "--noprofile", "--norc", "-c", generate, "generate", config.as_posix(), root.as_posix()],
                                     env=environment, capture_output=True, text=True, encoding="utf-8", timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
-            runner = (f'python3() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
+            runner = ('python3() { if [[ "$1" == /usr/local/lib/surelay/source_guard.py ]]; then '
+                      'printf "source guard check\\n" >> "$SERVICE_LOG"; return "$SOURCE_CHECK_STATUS"; fi; '
+                      f'{shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
                       'systemctl() { printf "%s\\n" "$*" >> "$SERVICE_LOG"; }\n'
                       'rc-service() { printf "%s\\n" "$*" >> "$SERVICE_LOG"; }\n'
                       'source "$1"\n')
@@ -118,14 +122,15 @@ class CustomDomainConfigTest(unittest.TestCase):
                 return {"tls": {"reality": {"enabled": True, "handshake": {
                     "server": server, "server_port": port}}}}
 
-            for target, accepted in ((inbound(), True), (inbound("192.0.2.30", 443), True),
-                                     (inbound("104.16.0.1"), False), (inbound("www.microsoft.com"), False),
-                                     (inbound("64:ff9b::6810:1"), False)):
-                with self.subTest(target=target):
+            for target, source_status, accepted in ((inbound(), 0, True), (inbound("192.0.2.30", 443), 0, True),
+                                     (inbound("104.16.0.1"), 0, False), (inbound("www.microsoft.com"), 0, False),
+                                     (inbound("64:ff9b::6810:1"), 0, False), (inbound(), 42, False)):
+                with self.subTest(target=target, source_status=source_status):
                     config.write_text(json.dumps({"inbounds": [inbound(), target]}), encoding="utf-8")
                     service_log.write_text("", encoding="utf-8")
                     result = subprocess.run([BASH, "--noprofile", "--norc", "-c", runner, "renew", hook.as_posix()],
-                                            env=environment, capture_output=True, text=True, encoding="utf-8", timeout=15)
+                                            env={**environment, "SOURCE_CHECK_STATUS": str(source_status)},
+                                            capture_output=True, text=True, encoding="utf-8", timeout=15)
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
                     calls = service_log.read_text(encoding="utf-8")
                     restarted = "restart sing-box" in calls or "sing-box restart" in calls

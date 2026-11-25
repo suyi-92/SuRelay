@@ -56,7 +56,9 @@ class ClientOutputTest(unittest.TestCase):
             "SERVER_ALIAS": "edge", "SERVER_IP_IPV4": "192.0.2.10", "SERVER_IP_IPV6": "2001:db8::10",
             "ENABLE_IPV6_LISTEN": "true", "PROXY_IP_VERSION": "ipv4",
             "ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": "edge.example.com", "LE_EMAIL": "admin@example.com",
-            "RRB_STATE_DIR": root.as_posix(), "CSV_PATH": (root / "home-proxies.csv").as_posix(),
+            "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
+            "RRB_STATE_DIR": "//?/" + root.as_posix() if os.name == "nt" else root.as_posix(),
+            "CSV_PATH": (root / "home-proxies.csv").as_posix(),
             "UPSTREAM_NODES_PATH": (root / "upstream-nodes.txt").as_posix(),
         }
         env.update(overrides)
@@ -66,7 +68,7 @@ class ClientOutputTest(unittest.TestCase):
             sys.executable, "-B", str(ROOT / "scripts/11-output-nodes.py"),
             "--config-env", str(config), "--generator", str(ROOT / "scripts/08-generate-singbox-config.py"),
             "--subscription-out", str(root / "subscription.yaml"), "--skip-node-files", "--quiet", "--print-summary",
-        ], capture_output=True, text=True, encoding="utf-8")
+        ], capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         self.assertEqual(result.returncode, 0, result.stderr)
         yaml = (root / "subscription.yaml").read_text(encoding="utf-8")
         links = [urlsplit(line) for line in result.stdout.splitlines() if line.startswith("vless://")]

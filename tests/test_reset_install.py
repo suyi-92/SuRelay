@@ -132,6 +132,91 @@ class ResetInstallTest(unittest.TestCase):
         self.assertIn(['rc-service', 'sing-box', 'stop'], self.calls)
         self.assertFalse(any(c[0] == 'systemctl' for c in self.calls))
 
+    def source_policy(self):
+        self.put('/etc/surelay/source-firewall.json', json.dumps({
+            'version': 1, 'ipv6': True, 'entries': [{'port': 443, 'sources': ['192.0.2.10/32']}]}))
+        self.put('/etc/surelay/source-guard.json', '{"version": 1, "owner": "surelay-source-guard-v1"}\n')
+        for name in ('source_firewall.py', 'source_policy.py', 'source_guard.py'):
+            self.put('/usr/local/lib/surelay/' + name, '# Managed by surelay source guard.\n')
+        for service in ('sing-box', 'surelay-subscription'):
+            self.put(f'/etc/systemd/system/{service}.service.d/surelay-source.conf',
+                     '# Managed by surelay source guard.\n[Service]\nExecStartPre=/usr/bin/python3 /usr/local/lib/surelay/source_guard.py '
+                     '--plan /etc/surelay/source-guard.json\n')
+            self.put(f'/etc/systemd/system/{service}.service.d/user.conf', '# keep other override\n')
+        original = '#!/bin/sh\n# existing user hook\nprintf original\n'
+        self.put('/etc/ufw/after.init', '#!/bin/sh\n# SuRelay source ACL after.init wrapper v1\n'
+                 '# BEGIN SURELAY ORIGINAL AFTER.INIT\n' + original.split('\n', 1)[1] +
+                 '# END SURELAY ORIGINAL AFTER.INIT\n'
+                 '/usr/bin/python3 /usr/local/lib/surelay/source_firewall.py --restore '
+                 '/etc/surelay/source-firewall.json\n')
+        return original
+
+    def test_source_policy_cleanup_restores_shared_hook_only_after_snapshot_and_stop(self):
+        original = self.source_policy()
+        previous = self.command
+        def commands(args, check=True):
+            if '--remove-persistence' in args:
+                self.assertNotIn('sing-box', self.active)
+                self.assertNotIn('surelay-subscription', self.active)
+                self.assertTrue(obj.backup.joinpath('files.tar.gz').is_file())
+                self.assertTrue(self.p('/etc/surelay/source-firewall.json').is_file())
+                self.assertTrue(self.p('/usr/local/lib/surelay/source_firewall.py').is_file())
+                self.put('/etc/ufw/after.init', original)
+            return previous(args, check)
+        self.command = commands
+        obj = self.resetter()
+        self.assertNotIn('/etc/ufw/after.init', obj.paths)
+        obj.apply()
+        self.assertEqual(self.p('/etc/ufw/after.init').read_text(), original)
+        with tarfile.open(obj.backup / 'files.tar.gz') as archive:
+            self.assertIn(b'SuRelay source ACL', archive.extractfile('etc/ufw/after.init').read())
+        for service in ('sing-box', 'surelay-subscription'):
+            self.assertFalse(self.p(f'/etc/systemd/system/{service}.service.d/surelay-source.conf').exists())
+            self.assertTrue(self.p(f'/etc/systemd/system/{service}.service.d/user.conf').is_file())
+        self.assertFalse(self.p('/etc/surelay/source-guard.json').exists())
+        self.assertIn(['python3', str(ROOT / 'scripts/source_firewall.py'), '--remove-persistence',
+                       '/etc/surelay/source-firewall.json'], self.calls)
+
+    def test_source_policy_cleanup_failure_keeps_plan_helpers_and_dropins_for_retry(self):
+        self.source_policy()
+        previous = self.command
+        def commands(args, check=True):
+            if '--remove-persistence' in args:
+                raise reset.ResetError('fixture source hook ownership failure')
+            return previous(args, check)
+        self.command = commands
+        obj = self.resetter()
+        with self.assertRaisesRegex(reset.ResetError, 'ownership failure'):
+            obj.apply()
+        for path in ('/etc/surelay/source-firewall.json', '/usr/local/lib/surelay/source_firewall.py',
+                     '/etc/systemd/system/sing-box.service.d/surelay-source.conf'):
+            self.assertTrue(self.p(path).is_file())
+
+    def test_source_policy_refuses_foreign_hook_or_guard_plan_before_stopping(self):
+        self.source_policy()
+        hook = self.p('/etc/ufw/after.init')
+        hook.write_text(hook.read_text().replace('/etc/surelay/source-firewall.json', '/other/plan.json'))
+        with self.assertRaisesRegex(reset.ResetError, '归属'):
+            self.resetter()
+        self.assertEqual(self.active, {'sing-box', 'surelay-subscription', 'nginx', 'fail2ban'})
+        self.source_policy()
+        self.put('/etc/systemd/system/sing-box.service.d/surelay-source.conf',
+                 '# Managed by surelay source guard.\nExecStartPre=/usr/local/lib/surelay/source_guard.py --plan /other/guard.json\n')
+        with self.assertRaisesRegex(reset.ResetError, '当前 state'):
+            self.resetter()
+
+    def test_source_policy_openrc_variables_are_removed_without_touching_user_config(self):
+        self.source_policy()
+        conf = self.put('/etc/conf.d/sing-box', "command=/usr/bin/sing-box\n# user setting\n"
+                        "rrb_source_plan=/etc/surelay/source-guard.json\n"
+                        "rrb_source_service=sing-box\nrrb_source_port=''\n")
+        obj = self.resetter()
+        self.assertNotIn('/etc/conf.d/sing-box', obj.paths)
+        obj.apply()
+        self.assertEqual(conf.read_text(), 'command=/usr/bin/sing-box\n# user setting\n')
+        with tarfile.open(obj.backup / 'files.tar.gz') as archive:
+            self.assertIn(b'rrb_source_plan', archive.extractfile('etc/conf.d/sing-box').read())
+
     def test_preview_has_no_writes_or_service_actions(self):
         obj = self.resetter()
         with patch.dict(os.environ, RRB_VERBOSE='false'), redirect_stdout(io.StringIO()) as output:

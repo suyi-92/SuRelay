@@ -42,6 +42,7 @@ class RoutingTest(unittest.TestCase):
                     "SMART_AI_HOME_TAG": "frontier",
                     "REJECT_CN_PRIVATE": "true",
                     "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
+                    "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
                 }
             )
 
@@ -57,6 +58,7 @@ class RoutingTest(unittest.TestCase):
                     "SMART_AI_HOME_TAG": "frontier",
                     "REJECT_CN_PRIVATE": "true",
                     "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
+                    "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24",
                 }
             )
         config = gen.build_config(

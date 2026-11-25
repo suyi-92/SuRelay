@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import ipaddress
 import inspect
+import importlib.util
 import json
 import os
 import re
@@ -57,6 +58,10 @@ EXTRA_PROTOCOLS = (
     ("http", "ENABLE_HTTP", "HTTP_PORT", ("tcp",)),
 )
 SHADOWSOCKS_METHODS = {"aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"}
+
+_policy_spec = importlib.util.spec_from_file_location("surelay_source_policy", Path(__file__).with_name("source_policy.py"))
+SOURCE_POLICY = importlib.util.module_from_spec(_policy_spec)
+_policy_spec.loader.exec_module(SOURCE_POLICY)
 
 # Cloudflare's published HTTP proxy networks, verified 2026-11-25.
 # https://www.cloudflare.com/ips/ (ips-v4 and ips-v6)
@@ -206,6 +211,9 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
         "HTTP_PORT": "58080",
         "PROXY_USERNAME": "surelay",
         "PROXY_PASSWORD": "",
+        "PROXY_SOURCE_ALLOWLIST": "",
+        "WEB_SOURCE_ALLOWLIST": "",
+        "TCP_PUBLIC_PORT_MAP": "",
         "ENABLE_SHADOWSOCKS": "false",
         "SHADOWSOCKS_PORT": "58388",
         "SHADOWSOCKS_METHOD": "aes-128-gcm",
@@ -270,6 +278,28 @@ def defaults(env: Dict[str, str]) -> Dict[str, str]:
 
 def custom_domain_enabled(env: Dict[str, str]) -> bool:
     return env.get("ENABLE_CUSTOM_DOMAIN", "false").lower() == "true"
+
+
+def validate_source_policy(env: Dict[str, str], rows=None) -> None:
+    try:
+        SOURCE_POLICY.validate_source_policy(env, rows)
+    except SOURCE_POLICY.SourcePolicyError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def check_source_firewall(env: Dict[str, str], config=None, *, subscription_only=False) -> None:
+    try:
+        plan = SOURCE_POLICY.source_policy_plan(env, config={"inbounds": []} if subscription_only else config)
+        if not plan["entries"] and not subscription_only:
+            return
+        # Installed metadata records the entire kernel chain; a single service
+        # may need only a subset, but must not start against a stale whitelist.
+        sys.path.insert(0, str(Path(__file__).parent))
+        import source_guard
+        payload = json.loads((Path(env["RRB_STATE_DIR"]) / "source-guard.json").read_text(encoding="utf-8"))
+        source_guard.check(payload, "subscription" if subscription_only else "sing-box", config=config, env=env)
+    except (ValueError, OSError, RuntimeError, KeyError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"来源防火墙尚未生效，拒绝启动公网入口：{exc}") from exc
 
 
 def checked_handshake_address(value: str):
@@ -580,6 +610,7 @@ def validate_env(env: Dict[str, str]) -> None:
         if env["REALITY_HANDSHAKE_PORT"] != env["NGINX_FALLBACK_PORT"]:
             raise ConfigError("启用自有域名时 REALITY_HANDSHAKE_PORT 必须等于 NGINX_FALLBACK_PORT")
     validate_protocols(env)
+    validate_source_policy(env)
 
 
 def protocol_endpoints(env: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -1037,6 +1068,7 @@ def load_rows(env: Dict[str, str], base: Path, allow_empty: bool = True) -> List
     rows.extend(load_upstream_rows(env, base, used_tags, used_ports))
     if not rows and not allow_empty:
         raise ConfigError("没有任何家宽代理或上游节点行。")
+    validate_source_policy(env, rows)
     return rows
 
 
@@ -1204,6 +1236,7 @@ def resolve_rule(inbound: Any, family: str) -> Dict[str, Any]:
 
 
 def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, private_key: str, short_id: str) -> Dict[str, Any]:
+    validate_source_policy(env, rows)
     # Resolve once for every inbound, preserving the caller's domain/SNI and env.
     env = {**env, "REALITY_HANDSHAKE_SERVER": resolve_reality_handshake_server(env)}
     direct_port = as_port(env, "DIRECT_PORT")
@@ -1319,6 +1352,9 @@ def main() -> int:
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--audit-config", type=Path, help="check Reality fallback safety in an existing sing-box JSON")
     ap.add_argument("--export-reality-auditor", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--print-source-policy", action="store_true")
+    ap.add_argument("--print-source-guard", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--check-subscription-source", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--print-ports", action="store_true")
     ap.add_argument("--print-transport-ports", action="store_true")
     ap.add_argument("--print-nodes-json", action="store_true")
@@ -1338,10 +1374,21 @@ def main() -> int:
         try:
             config = json.loads(args.audit_config.read_text(encoding="utf-8"))
             check_generated_reality_handshakes(config, env)
+            check_source_firewall(env, config)
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             raise ConfigError(f"无法检查现有 sing-box 配置的 Reality 回落：{exc}") from exc
         return 0
+    if args.check_subscription_source:
+        check_source_firewall(env, subscription_only=True)
+        return 0
     rows = load_rows(env, base, allow_empty=True)
+
+    if args.print_source_policy:
+        print(json.dumps(SOURCE_POLICY.source_policy_plan(env, rows), ensure_ascii=False))
+        return 0
+    if args.print_source_guard:
+        print(json.dumps(SOURCE_POLICY.guard_payload(env, rows), ensure_ascii=False))
+        return 0
 
     if args.print_ports:
         for p in port_list(env, rows):

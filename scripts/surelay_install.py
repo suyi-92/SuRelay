@@ -67,6 +67,7 @@ def initial_values(address="", security_only=False):
         "HY2_CERT_PATH": "", "HY2_KEY_PATH": "", "HY2_SERVER_NAME": "", "HY2_PASSWORD": "",
         "HY2_INSECURE": "false",
         "PROXY_USERNAME": "surelay", "PROXY_PASSWORD": "",
+        "PROXY_SOURCE_ALLOWLIST": "", "WEB_SOURCE_ALLOWLIST": "", "TCP_PUBLIC_PORT_MAP": "",
         "SHADOWSOCKS_METHOD": "aes-128-gcm", "SHADOWSOCKS_PASSWORD": "",
     })
     values.update({"ENABLE_" + key: "false" for key, _, _ in PROTOCOLS})
@@ -90,6 +91,8 @@ def prepare_values(values):
 class Wizard:
     def __init__(self, values, *, security_only=False, protocol_only=False, validate_extra=None, redeploy=False):
         self.values = dict(values)
+        for key in ("PROXY_SOURCE_ALLOWLIST", "WEB_SOURCE_ALLOWLIST", "TCP_PUBLIC_PORT_MAP"):
+            self.values.setdefault(key, "")
         self.security_only, self.protocol_only = security_only, protocol_only
         self.redeploy = redeploy
         self.keys_confirmed = protocol_only
@@ -199,8 +202,15 @@ class Wizard:
             fields += [self.field("DIRECT_PORT", "VLESS / 域名 HTTPS 入口", validate=port),
                        self.field("SUBSCRIPTION_INTERNAL_PORT", "订阅服务端口", validate=port),
                        self.field("NGINX_FALLBACK_PORT", "静态网页内部端口", validate=port)]
+            fields += self.web_source_fields()
         fields.append(("重新随机生成高位端口", self.reroll))
         return fields
+
+    def web_source_fields(self):
+        return [self.field("WEB_SOURCE_ALLOWLIST", "受限 Web 端口来源白名单",
+                           help="TCP 80、443、8080、8443 上的网页伪装和公网订阅必须限制来源。用空格或逗号分隔 IP/CIDR；IPv4 白名单不会放行 IPv6。"),
+                self.field("TCP_PUBLIC_PORT_MAP", "NAT 公网端口映射",
+                           help="仅记录实际映射，格式为 本机端口:公网端口，多个用空格或逗号分隔，例如 55443:443。不会创建映射或修改节点地址。")]
 
     def reroll(self):
         keys = ["SSH_PORT"] if self.security_only else ["SSH_PORT", "DIRECT_PORT", "SUBSCRIPTION_INTERNAL_PORT", "NGINX_FALLBACK_PORT"]
@@ -235,6 +245,8 @@ class Wizard:
             enabled = self.values.get("ENABLE_" + key) == "true"
             fields.append((label + ("：开启 · " + self.values.get(port_key, "") if enabled else "：关闭"),
                            lambda k=key, l=label, p=port_key: self.protocol(k, l, p)))
+        if self.protocol_only:
+            fields += self.web_source_fields()
         return fields
 
     def protocol(self, key, label, port_key):
@@ -255,7 +267,9 @@ class Wizard:
                            lambda: self.toggle("HY2_INSECURE"))]
             elif key in {"SOCKS5", "HTTP"}:
                 items += [self.field("PROXY_USERNAME", "代理用户名", validate=required),
-                          self.field("PROXY_PASSWORD", "代理密码", secret=True)]
+                          self.field("PROXY_PASSWORD", "代理密码", secret=True),
+                          self.field("PROXY_SOURCE_ALLOWLIST", "HTTP / SOCKS5 来源白名单",
+                                     help="启用前必须填写允许访问的 IP/CIDR，多个用空格或逗号分隔。密码不能替代来源限制；还须启用 UFW。")]
             else:
                 items += [self.field("SHADOWSOCKS_METHOD", "加密算法", validate=self.ss_method),
                           self.field("SHADOWSOCKS_PASSWORD", "认证密码", secret=True)]
@@ -337,6 +351,12 @@ class Wizard:
             lines += [f"主入口：{v['DIRECT_PORT']} · 订阅：{v['SUBSCRIPTION_INTERNAL_PORT']} · 静态页：{v['NGINX_FALLBACK_PORT']}",
                       "协议：VLESS Reality" + "".join("、" + label for key, label, _ in PROTOCOLS if v.get("ENABLE_" + key) == "true"),
                       "CF 域名与静态页：" + (v.get("CUSTOM_DOMAIN") or "待填写" if v["ENABLE_CUSTOM_DOMAIN"] == "true" else "关闭")]
+            if any(v.get("ENABLE_" + key) == "true" for key in ("SOCKS5", "HTTP")):
+                lines.append("HTTP / SOCKS5 来源：" + (v["PROXY_SOURCE_ALLOWLIST"] or "未填写，无法启用"))
+            if v.get("WEB_SOURCE_ALLOWLIST"):
+                lines.append("受限 Web 来源：" + v["WEB_SOURCE_ALLOWLIST"])
+            if v.get("TCP_PUBLIC_PORT_MAP"):
+                lines.append("NAT 公网端口映射：" + v["TCP_PUBLIC_PORT_MAP"])
         lines.append("草稿保留全部输入；可返回任意分组修改。密码和 Token 均隐藏。")
         return "\n".join(lines)
 

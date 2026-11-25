@@ -61,6 +61,7 @@ class ManagementTest(unittest.TestCase):
             "SERVER_ALIAS": "fixture", "SERVER_IP_IPV4": "192.0.2.1",
             "SINGBOX_CONFIG_PATH": str(self.root / "sing-box.json"),
             "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
+            "DIRECT_PORT": "55443",
             "RRB_STATE_DIR": str(self.state), "ENABLE_UFW": "false",
         }))
         (self.root / "home-proxies.csv").write_text("tag,type,server,server_port,username,password,network,listen_port\n")
@@ -75,7 +76,7 @@ class ManagementTest(unittest.TestCase):
     def test_service_rejects_unsafe_stored_reality_before_start_restart_or_reload(self):
         config_path = self.root / "sing-box.json"
         for server in ("104.16.0.1", "innocent.example"):
-            config_path.write_text(json.dumps({"inbounds": [{"type": "vless", "tls": {
+            config_path.write_text(json.dumps({"inbounds": [{"type": "vless", "listen_port": 55443, "tls": {
                 "enabled": True, "reality": {"enabled": True, "handshake": {
                     "server": server, "server_port": 443}}}}]}))
             for action in ("start", "restart", "reload"):
@@ -87,9 +88,9 @@ class ManagementTest(unittest.TestCase):
 
     def test_service_accepts_safe_custom_reality_and_keeps_stop_available(self):
         self.m.update({"ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": "edge.example.com",
-                       "LE_EMAIL": "admin@example.com"})
+                       "LE_EMAIL": "admin@example.com", "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24"})
         config_path = self.root / "sing-box.json"
-        config_path.write_text(json.dumps({"inbounds": [{"type": "vless", "tls": {
+        config_path.write_text(json.dumps({"inbounds": [{"type": "vless", "listen_port": 55443, "tls": {
             "enabled": True, "reality": {"enabled": True, "handshake": {
                 "server": "127.0.0.1", "server_port": 8443}}}}]}))
         with patch.object(self.m, "alpine", return_value=False), patch.object(core, "run") as invoke:
@@ -104,6 +105,19 @@ class ManagementTest(unittest.TestCase):
                 self.m.service(name, action)
                 invoke.assert_called_once_with(["systemctl", action, name], check=True)
 
+    def test_core_and_subscription_start_stop_before_system_command_when_source_guard_fails(self):
+        config_path = self.root / "sing-box.json"
+        config_path.write_text(json.dumps({"inbounds": [{"type": "http", "listen": "0.0.0.0", "listen_port": 58080}]}))
+        for name in ("sing-box", self.m.env["SUBSCRIPTION_SERVICE"]):
+            for action in ("start", "restart", "reload"):
+                with self.subTest(name=name, action=action), patch.object(self.m, "alpine", return_value=False), \
+                        patch.object(core.GEN, "check_source_firewall", side_effect=core.GEN.ConfigError("source ACL missing")) as guard, \
+                        patch.object(core, "run") as invoke:
+                    with self.assertRaises(core.Error):
+                        self.m.service(name, action, check=False)
+                    invoke.assert_not_called()
+                    self.assertEqual(guard.call_count, 1)
+
     def local_snapshot(self, paths):
         # Production snapshot paths are confined to the fixture for this test.
         selected = [p for p in paths if Path(p).is_relative_to(self.root)]
@@ -116,9 +130,94 @@ class ManagementTest(unittest.TestCase):
         stack.enter_context(patch.object(core, "Snapshot", side_effect=self.local_snapshot))
         stack.enter_context(patch.object(core, "run", return_value=""))
         stack.enter_context(patch.object(core.shutil, "which", return_value=None))
+        stack.enter_context(patch.object(self.m, "active", return_value=False))
+        stack.enter_context(patch.object(self.m, "alpine", return_value=False))
         for name in ("service", "check_listeners", "phase", "output", "core_binary"):
             stack.enter_context(patch.object(self.m, name))
         return stack
+
+    def test_apply_stops_old_listeners_and_applies_firewall_before_new_config_or_restart(self):
+        self.mock_system()
+        events = []
+        original = (self.root / "sing-box.json").read_bytes()
+        self.m.active.return_value = True
+        self.m.service.side_effect = lambda name, action, **kwargs: events.append((name, action))
+
+        def phase(name, **kwargs):
+            events.append(("phase", name))
+            if name == "firewall":
+                self.assertEqual((self.root / "sing-box.json").read_bytes(), original)
+                self.assertIn(("sing-box", "stop"), events)
+                self.assertIn((self.m.env["SUBSCRIPTION_SERVICE"], "stop"), events)
+
+        self.m.phase.side_effect = phase
+        with patch.object(self.m, "alpine", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+            self.m.apply({"ENABLE_UFW": "true", "ENABLE_HTTP": "true",
+                          "PROXY_SOURCE_ALLOWLIST": "192.0.2.10",
+                          "CLOUDFLARE_API_TOKEN_FILE": "/fixture/cloudflare.ini"})
+        self.assertLess(events.index(("phase", "firewall")), events.index(("sing-box", "restart")))
+        self.assertTrue(any(item.get("type") == "http" for item in json.loads(
+            (self.root / "sing-box.json").read_text())["inbounds"]))
+
+    def test_failed_source_firewall_leaves_old_json_and_never_starts_new_proxy(self):
+        self.mock_system()
+        original = (self.root / "sing-box.json").read_bytes()
+
+        def phase(name, **kwargs):
+            if name == "firewall":
+                raise core.Error("firewall rejected")
+
+        self.m.phase.side_effect = phase
+        with patch.object(self.m, "alpine", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(core.Error, "firewall rejected"):
+                self.m.apply({"ENABLE_UFW": "true", "ENABLE_HTTP": "true",
+                              "PROXY_SOURCE_ALLOWLIST": "192.0.2.10",
+                              "CLOUDFLARE_API_TOKEN_FILE": "/fixture/cloudflare.ini"})
+        self.assertEqual((self.root / "sing-box.json").read_bytes(), original)
+        self.assertFalse(any(call.args[1] in {"start", "restart"} for call in self.m.service.call_args_list))
+
+    def test_rollback_reloads_systemd_before_guarded_restore_and_removes_new_acl_by_original_path(self):
+        self.mock_system()
+        self.m.active.return_value = True
+        plan_path = self.state / "source-firewall.json"
+        new_plan = b'{"version":1,"ipv6":false,"entries":[{"port":58080,"sources":["192.0.2.10/32"]}]}\n'
+        events = []
+        guard_calls = []
+
+        def phase(name, **kwargs):
+            if name == "firewall":
+                plan_path.write_bytes(new_plan)
+                raise core.Error("firewall commit failed")
+
+        def invoke(args, **kwargs):
+            events.append(list(args))
+            if "--remove-persistence" in args:
+                self.assertEqual(args[-1], plan_path)
+                self.assertEqual(plan_path.read_bytes(), new_plan)
+            return ""
+
+        def service(name, action, check=True):
+            if action == "restart":
+                self.assertIn(["systemctl", "daemon-reload"], events)
+                return core.Manager.service(self.m, name, action, check=check)
+            return None
+
+        def reject_source(env, *args, **kwargs):
+            guard_calls.append((args, kwargs))
+            raise core.GEN.ConfigError("restored source ACL missing")
+
+        self.m.phase.side_effect = phase
+        self.m.service.side_effect = service
+        with patch.object(core, "run", side_effect=invoke), patch.object(core.shutil, "which", return_value="ufw"), \
+                patch.object(core.GEN, "check_source_firewall", side_effect=reject_source), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(core.Error, "firewall commit failed"):
+                self.m.apply({"ENABLE_UFW": "true", "ENABLE_HTTP": "true",
+                              "PROXY_SOURCE_ALLOWLIST": "192.0.2.10",
+                              "CLOUDFLARE_API_TOKEN_FILE": "/fixture/cloudflare.ini"})
+        self.assertEqual(len(guard_calls), 2)
+        self.assertFalse(plan_path.exists())
+        self.assertFalse(any(args[:2] == ["systemctl", "restart"] for args in events))
 
     @contextlib.contextmanager
     def panel_window(self):

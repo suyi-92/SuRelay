@@ -7,6 +7,10 @@ require_root
 load_config
 require_supported_os
 
+if custom_domain_enabled && [[ "${RRB_CERTIFICATES_ONLY:-false}" != true && "${RRB_SOURCE_POLICY_READY:-false}" != true ]]; then
+  bash "$SCRIPT_DIR/09-apply-firewall.sh"
+fi
+
 if ! custom_domain_enabled; then
   info "ENABLE_CUSTOM_DOMAIN=false，跳过自有域名和 Nginx fallback 配置。"
   exit 0
@@ -189,14 +193,16 @@ write_renew_hook() {
   {
     printf '#!/usr/bin/env bash\n'
     printf 'surelay_config=%q\n' "$SINGBOX_CONFIG_PATH"
+    printf 'surelay_source_plan=%q\n' "$RRB_STATE_DIR/source-guard.json"
     cat <<'EOF'
 set -Eeuo pipefail
 check_reality_fallback() {
-  python3 - "$surelay_config" <<'SURELAY_REALITY_AUDITOR'
+  python3 - "$surelay_config" <<'SURELAY_REALITY_AUDITOR' || return "$?"
 EOF
     printf '%s\n' "$auditor"
     cat <<'EOF'
 SURELAY_REALITY_AUDITOR
+  python3 /usr/local/lib/surelay/source_guard.py --plan "$surelay_source_plan" --service sing-box
 }
 if [[ -x /sbin/openrc-run ]]; then
   if rc-service nginx status >/dev/null 2>&1; then

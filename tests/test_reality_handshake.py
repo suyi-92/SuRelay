@@ -31,7 +31,8 @@ def dns_answers(*addresses):
 
 class RealityHandshakeTest(unittest.TestCase):
     def env(self, **updates):
-        return gen.defaults({"SERVER_ALIAS": "edge", "SERVER_IP_IPV4": "192.0.2.10", **updates})
+        return gen.defaults({"SERVER_ALIAS": "edge", "SERVER_IP_IPV4": "192.0.2.10",
+                             "WEB_SOURCE_ALLOWLIST": "192.0.2.0/24", **updates})
 
     def custom_env(self, **updates):
         return self.env(ENABLE_CUSTOM_DOMAIN="true", CUSTOM_DOMAIN="edge.example.com",
@@ -172,7 +173,7 @@ class RealityHandshakeTest(unittest.TestCase):
     def test_cli_check_only_rejects_cf_dns_before_reading_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.env"
-            config.write_text('SERVER_ALIAS="edge"\nSERVER_IP_IPV4="192.0.2.10"\n'
+            config.write_text('SERVER_ALIAS="edge"\nSERVER_IP_IPV4="192.0.2.10"\nDIRECT_PORT="55443"\n'
                               'REALITY_HANDSHAKE_SERVER="innocent.example"\n', encoding="utf-8")
             with patch.object(sys, "argv", ["generator", "--config-env", str(config), "--check-only", "--quiet"]), \
                     patch.object(gen.socket, "getaddrinfo", return_value=dns_answers("104.16.0.1")), \
@@ -187,7 +188,7 @@ class RealityHandshakeTest(unittest.TestCase):
             generated = root / "singbox.json"
             original = b'{"previous": "working configuration"}\n'
             generated.write_bytes(original)
-            config.write_text('SERVER_ALIAS="edge"\nSERVER_IP_IPV4="192.0.2.10"\n'
+            config.write_text('SERVER_ALIAS="edge"\nSERVER_IP_IPV4="192.0.2.10"\nDIRECT_PORT="55443"\n'
                               'REALITY_HANDSHAKE_SERVER="innocent.example"\n'
                               f'SINGBOX_CONFIG_PATH="{generated.as_posix()}"\n', encoding="utf-8")
             with patch.object(sys, "argv", ["generator", "--config-env", str(config), "--write", "--quiet"]), \
@@ -202,7 +203,7 @@ class RealityHandshakeTest(unittest.TestCase):
             self.assertFalse((root / "singbox.json.tmp").exists())
 
     def stored_config(self, server="127.0.0.1", port=8443):
-        return {"inbounds": [{"type": "vless", "tag": "fixture", "tls": {
+        return {"inbounds": [{"type": "vless", "tag": "fixture", "listen_port": 55443, "tls": {
             "enabled": True, "reality": {"enabled": True, "handshake": {
                 "server": server, "server_port": port}}}}]}
 
@@ -228,7 +229,7 @@ class RealityHandshakeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env_file, json_file = root / "config.env", root / "singbox.json"
-            env_file.write_text('SERVER_ALIAS="edge"\nSERVER_IP_IPV4="192.0.2.10"\n', encoding="utf-8")
+            env_file.write_text('SERVER_ALIAS="edge"\nSERVER_IP_IPV4="192.0.2.10"\nDIRECT_PORT="55443"\n', encoding="utf-8")
             with patch.object(sys, "argv", ["generator", "--config-env", str(env_file),
                                              "--audit-config", str(json_file), "--quiet"]), \
                     patch.object(gen, "load_rows", side_effect=AssertionError("unexpected CSV read")), \

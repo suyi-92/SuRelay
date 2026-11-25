@@ -277,7 +277,8 @@ class Panel:
         values = Wizard(initial, protocol_only=True,
                         validate_extra=lambda env: GEN.load_rows(env, self.m.root, allow_empty=True)).run()
         keys = ["PROXY_USERNAME", "PROXY_PASSWORD", "HY2_PASSWORD", "HY2_CERT_PATH", "HY2_KEY_PATH",
-                "HY2_SERVER_NAME", "HY2_INSECURE", "SHADOWSOCKS_METHOD", "SHADOWSOCKS_PASSWORD"]
+                "HY2_SERVER_NAME", "HY2_INSECURE", "SHADOWSOCKS_METHOD", "SHADOWSOCKS_PASSWORD",
+                "PROXY_SOURCE_ALLOWLIST", "WEB_SOURCE_ALLOWLIST", "TCP_PUBLIC_PORT_MAP"]
         for key, _, port_key in PROTOCOLS:
             keys += ["ENABLE_" + key, port_key]
         updates = {key: values[key] for key in keys if key in values}
@@ -891,9 +892,31 @@ class Panel:
         menu("高级维护", [
             ("更新 SuRelay", self.update_code), ("更新 sing-box", self.update_core),
             ("备份节点配置", self.backup_nodes), ("恢复节点配置", self.restore),
+            ("来源白名单与公网端口映射", self.source_policy),
             ("编辑高级配置并应用", self.edit_config), ("重置并重新安装", self.reset),
             install_action, ("迁移旧安装目录", self.migrate),
         ])
+
+    @operation("来源访问策略已更新。")
+    def source_policy(self):
+        self.m.reload()
+        definitions = [
+            ("PROXY_SOURCE_ALLOWLIST", "HTTP / SOCKS5 来源白名单",
+             "启用 HTTP/SOCKS5 前必须填写允许访问的 IP/CIDR；密码不能替代白名单。"),
+            ("WEB_SOURCE_ALLOWLIST", "受限 Web 端口来源白名单",
+             "TCP 80、443、8080、8443 上的网页伪装和公网订阅必须限制来源。"),
+            ("TCP_PUBLIC_PORT_MAP", "NAT 公网端口映射",
+             "填写实际的 本机端口:公网端口，例如 55443:443。不会创建映射或修改节点地址。"),
+        ]
+        updates = {}
+        for key, label, help in definitions:
+            value = ask(label, self.m.env.get(key, ""),
+                        help=help + " 多项用空格或逗号分隔，输入 - 清空。")
+            updates[key] = "" if value == "-" else value
+        if all(self.m.env.get(key, "") == value for key, value in updates.items()):
+            result("来源访问策略未改变。")
+            return
+        self.m.apply(updates)
 
     def update_code(self):
         window = current_terminal()

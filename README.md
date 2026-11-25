@@ -106,6 +106,8 @@ Alpine 需要已启动的 OpenRC、同版本的 `main`/`community` 软件源以�
 
 默认保留 VLESS Reality、Mihomo 订阅、UUID/Reality 密钥和 UDP 转发支持。`DIRECT_PORT` 是 VLESS Reality、域名 HTTPS 订阅和静态网页共用的公网入口，新装也使用高位随机端口；CF 访问地址会带上实际端口。内部订阅服务与 Nginx 各用独立的高位端口；无域名时订阅使用生成的公网 HTTP 端口。以向导总览、`config.env` 和安装输出的实际值为准，旧配置重跑不会轮换端口。其他选项见 [config.example.env](config.example.env)。
 
+来源访问保护默认开启校验：启用 HTTP/SOCKS5 必须填写 `PROXY_SOURCE_ALLOWLIST`；TCP `80/443/8080/8443` 上的 Reality 网页伪装或公网订阅必须填写 `WEB_SOURCE_ALLOWLIST`。这些受限入口要求启用 UFW，并先落实来源规则再启动服务；密码不能替代来源白名单。向导可编辑白名单与实际 NAT 映射，安装后使用 **sr → 高级维护 → 来源白名单与公网端口映射** 修改。[配置与迁移说明](SuRelay-usage.md#551-来源白名单与公网端口映射)。
+
 NAT VPS 若只有服务商分配的业务端口，须把向导中的 `DIRECT_PORT` 随机建议值改为服务商的同号映射端口；Reality 与域名 HTTPS 订阅共用该端口。`SSH_PORT` 仍填写本机监听端口，迁移与验证步骤见 [NAT 端口配置](docs/nat-ports.md)。
 
 **重跑安装会沿用已有 `config.env` 和出口列表，不重新提问或覆盖它们。** 已安装后，需要修改配置并重新运行安装流程：

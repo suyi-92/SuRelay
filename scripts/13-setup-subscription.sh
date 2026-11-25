@@ -32,6 +32,13 @@ if [[ "${RRB_SKIP_PACKAGE_INSTALL:-false}" != true ]] || ! command -v python3 >/
   pkg_install python3
 fi
 
+# Stop an old listener before changing the port/allowlist recorded for it.
+if service_active "$SERVICE_NAME"; then service_stop "$SERVICE_NAME"; fi
+if [[ "${RRB_SOURCE_POLICY_READY:-false}" != true ]]; then
+  bash "$SCRIPT_DIR/09-apply-firewall.sh"
+fi
+install_source_policy_guard
+
 if is_dry_run; then
   log "DRY-RUN: mkdir -p $SUBSCRIPTION_DIR"
   log "DRY-RUN: generate subscription files into $SUBSCRIPTION_DIR"
@@ -72,6 +79,7 @@ if is_alpine; then
     "$SERVER_INSTALL_PATH" --root "$SUBSCRIPTION_DIR" --port "$SUBSCRIPTION_LISTEN_PORT" \
     --ipv4 "$sub_ipv4" --ipv6 "$sub_ipv6" --bind "$bind_mode" \
     --token-file "$VLESS_UUID_PATH" --default-target "$SUBSCRIPTION_TARGET"
+  write_source_openrc_guard "$SERVICE_NAME" subscription "$SUBSCRIPTION_LISTEN_PORT" "$bind_mode" "$sub_ipv4" "$sub_ipv6"
 else
   run mkdir -p /etc/systemd/system
   write_root_file "$SERVICE_FILE" 0644 <<EOF_SERVICE
@@ -90,9 +98,14 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF_SERVICE
+  write_source_systemd_guard "$SERVICE_NAME" subscription "$SUBSCRIPTION_LISTEN_PORT" "$bind_mode" "$sub_ipv4" "$sub_ipv6"
 fi
 service_daemon_reload
+mark_subscription_source_ready
 service_enable "$SERVICE_NAME"
+if ! is_dry_run; then
+  python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --check-subscription-source --quiet
+fi
 service_restart "$SERVICE_NAME"
 if ! is_dry_run; then
   service_wait_active "$SERVICE_NAME" || die "订阅服务未运行。"

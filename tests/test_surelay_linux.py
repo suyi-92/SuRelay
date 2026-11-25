@@ -22,7 +22,7 @@ class CoreIntegrationTest(unittest.TestCase):
             pair = subprocess.run(["sing-box", "generate", "reality-keypair"], text=True, capture_output=True, check=True).stdout
             private = next(line.split(": ", 1)[1] for line in pair.splitlines() if line.lower().startswith("private"))
             env = core.GEN.defaults({"SERVER_IP_IPV4": "192.0.2.1", "SERVER_ALIAS": "fixture",
-                                     "REALITY_HANDSHAKE_SERVER": "127.0.0.1"})
+                                     "REALITY_HANDSHAKE_SERVER": "127.0.0.1", "DIRECT_PORT": "55443"})
             for enabled in ("false", "true"):
                 env.update({"ENABLE_IPV6_LISTEN": enabled, "SERVER_IP_IPV6": "2001:db8::1" if enabled == "true" else ""})
                 config = core.GEN.build_config(env, [], "11111111-2222-4333-8444-555555555555", private, "abcd")

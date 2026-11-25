@@ -678,8 +678,10 @@ if sys.argv[4] == 'true':
 print('\n[Service]')
 print('ExecStartPre=' + ' '.join(map(quoted, args)))
 if sys.argv[2] == 'sing-box':
+    # Preserve writable state for relative cache and rule-set paths in non-root units.
+    print('StateDirectory=sing-box')
     print('ExecStart=')
-    print('ExecStart=' + ' '.join(map(quoted, [sys.argv[8], 'run', '-c', sys.argv[9]])))
+    print('ExecStart=' + ' '.join(map(quoted, [sys.argv[8], '-D', '/var/lib/sing-box', 'run', '-c', sys.argv[9]])))
     print('ExecReload=')
     print('ExecReload=' + ' '.join(map(quoted, args + ['--execute', '/bin/kill', '-HUP'])) + ' $MAINPID')
 PY

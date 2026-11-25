@@ -175,7 +175,8 @@ class SourceGuardTest(unittest.TestCase):
             self.assertEqual(commands[0], "", "clear any inherited -C directory or old config first")
             self.assertEqual(len(commands), 2)
             actual = [arg.replace("%%", "%").replace("$$", "$") for arg in shlex.split(commands[1])]
-            self.assertEqual(actual, [core_bin, "run", "-c", config])
+            self.assertIn("StateDirectory=sing-box", lines)
+            self.assertEqual(actual, [core_bin, "-D", "/var/lib/sing-box", "run", "-c", config])
             self.assertIn("%%", commands[1], "systemd percent specifiers must be escaped")
             self.assertIn("$${NAME}", commands[1], "systemd environment expansion must be escaped")
 

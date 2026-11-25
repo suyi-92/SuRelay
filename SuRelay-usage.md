@@ -488,7 +488,19 @@ REALITY_MAX_TIME_DIFFERENCE="1m"
 www.microsoft.com
 ```
 
-如果要换成其他网站，建议选一个稳定、真实、支持 TLS 443 的大站域名，并确保客户端节点里的 `servername` 和服务端一致。
+关闭自有域名时可以选择其他外部握手网站，并确保客户端节点里的 `servername` 和服务端 `REALITY_SERVER_NAME` 一致。配置检查（`--check-only`）、配置生成及 `sr` 维护应用会检查目标全部解析结果；任一 IPv4、IPv6 或 IPv4 映射 IPv6 地址落入 Cloudflare 公布的网段，都会拒绝配置，指向这些网段的自定义别名也会被拒绝。检查还识别标准 NAT64、6to4 和 Teredo 地址中内嵌的 CF IPv4；本地 NAT64 前缀 `64:ff9b:1::/48` 因无法确定具体转换编码而全部拒绝。DNS 解析失败或没有符合 `PROXY_IP_VERSION` 的地址时也会停止生成。通过检查后，生成的所有 Reality 入站共用选定的数值 IP，客户端 SNI 仍保留原域名，防止服务运行时 DNS 变化将回落目标改到 CF。
+
+CF 网段来自 [Cloudflare 官方 IP 列表](https://www.cloudflare.com/ips/)，内置列表核实于 2026-11-25。这项检查覆盖该列表中的网段，不保证覆盖其他 CDN、未列入列表的 BYOIP 地址或未识别的自定义地址转换。默认本机 Nginx 回落的边界不依赖该列表。仅输出端口、节点和订阅文件不需要重新解析握手域名；固定 IP 失效或目标地址变化时，保持 `RESET_PROXY_KEYS=false`，重新执行 `sudo bash bootstrap.sh --phase singbox` 获取并检查新地址。
+
+SuRelay 在启动、重启 sing-box 和升级内核前，也会审计现有 JSON 中所有启用的 Reality 入站。握手目标必须是非 CF 公布网段的数值 IP；旧配置若仍填写外部域名，会要求重新生成，避免仅检查当前 DNS 后继续使用可变化的域名。自有域名模式还会检查本机地址及回落端口是否匹配。审计失败时会停止相应操作；升级内核会在替换内核前先检查旧配置。更新代码不会自动改写或重启当前服务，已有部署需先重跑 `singbox` 阶段应用防护。
+
+IPv6 维护及内核升级失败回滚同样会审计 JSON；证书续期钩子也会审核实际 JSON 中的握手目标必须是通过检查的数值 IP，停用自有域名后，安全的外部固定 IP 仍可继续续期并重启 sing-box。
+
+可以在项目目录单独检查现有配置：
+
+```bash
+sudo python3 scripts/08-generate-singbox-config.py --config-env config.env --audit-config /etc/sing-box/config.json
+```
 
 如果启用自有域名：
 
@@ -502,6 +514,8 @@ NGINX_FALLBACK_PORT="8443"
 ```
 
 Cloudflare 侧需要先在控制台添加/托管 zone，并到域名注册商把 NS 改成 Cloudflare 分配的 nameserver。脚本默认会用 API token 创建或更新 `CUSTOM_DOMAIN` 的 A/AAAA 记录，`proxied=false`，也就是灰云 / DNS only。公网 `443` 继续由 sing-box 监听，普通 TLS fallback 到本机 Nginx `127.0.0.1:8443`；Nginx 默认站点根目录是 `/var/www/surelay-fallback`，会写入 `Digital Notes` 静态首页、`robots.txt` 和空 `favicon.ico`。`REALITY_SERVER_NAME` 会自动回填为 `CUSTOM_DOMAIN`，`REALITY_HANDSHAKE_SERVER` 会回填为 `127.0.0.1`，`REALITY_HANDSHAKE_PORT` 会回填为 `NGINX_FALLBACK_PORT`。订阅服务启用时只绑定本机，并通过 `https://CUSTOM_DOMAIN/sub/<VLESS_UUID>?target=ClashMeta` 对外访问。
+
+启用自有域名后，`NGINX_FALLBACK_HOST` 和 `REALITY_HANDSHAKE_SERVER` 必须是精确的 `127.0.0.1`，不能改为外部域名、外部 IP、通配监听地址或 `localhost`；握手端口必须与 `NGINX_FALLBACK_PORT` 相同。这样未认证 TLS 只访问本机 Nginx 的静态网页或固定本机订阅服务，不会被转发至 CF。使用 CF 灰云 DNS 本身不会产生开放反代；关键是 Reality 的握手目标保持本机回落。已有部署更新代码后需要重新运行 `singbox` 阶段应用防护，无需重置 UUID 或密钥。
 
 ### 5.7 客户端输出变量
 

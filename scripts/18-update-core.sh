@@ -8,13 +8,18 @@ require_supported_os
 [[ "$RESET_PROXY_KEYS" == false ]] || die "内核更新要求 RESET_PROXY_KEYS=false。"
 bin="$(singbox_bin)"
 [[ -n "$bin" && -f "$bin" ]] || die "请先完成 sing-box 安装。"
+singbox_check "$SINGBOX_CONFIG_PATH"
 backup_path "$bin"
 saved="$BACKUP_DIR/$bin"
 rollback_core() {
   rc=$?
   if [[ "$rc" != 0 && -f "$saved" ]]; then
     cp -a "$saved" "$bin"
-    service_restart sing-box || true
+    if singbox_check "$SINGBOX_CONFIG_PATH"; then
+      service_restart sing-box || true
+    else
+      warn "旧 Reality 配置未通过安全检查，未重新启动。"
+    fi
     warn "内核更新失败，已尝试恢复原二进制。包管理器记录可能仍为新版本，请检查日志。"
   fi
   exit "$rc"

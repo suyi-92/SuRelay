@@ -331,6 +331,10 @@ cd /opt/SuRelay
 sudo bash bootstrap.sh --phase custom-domain
 ```
 
+自有域名模式要求 `NGINX_FALLBACK_HOST` 与 `REALITY_HANDSHAKE_SERVER` 均为 `127.0.0.1`，握手端口必须等于 `NGINX_FALLBACK_PORT`，普通 TLS 只回落到本机静态站点。关闭自有域名时，配置检查和生成会解析外部握手目标、拒绝 Cloudflare 公布的 IP 网段，并固定通过检查的 IP；客户端 SNI 保持原域名。已有部署更新代码后，保留 `RESET_PROXY_KEYS=false`，重跑 `sudo bash bootstrap.sh --phase singbox` 应用防护；外部目标地址变化后也需重新应用。防护范围与配置说明见[Reality 配置](SuRelay-usage.md#56-vlessreality-变量)。
+
+SuRelay 启动、重启 sing-box 及升级内核前，还会审计现有 JSON 中的 Reality 握手目标。旧配置中的外部域名或 CF 地址会被拒绝，需先重新生成配置；更新代码本身不会改写正在运行的服务。
+
 ### 继续已暂停的 SSH final
 
 保留当前 SSH 窗口，在新终端验证公钥登录成功后执行，无需编辑配置：

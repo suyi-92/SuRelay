@@ -555,6 +555,7 @@ validate_config_basics() {
   [[ "$NGINX_FALLBACK_ROOT" == /* ]] || die "NGINX_FALLBACK_ROOT 必须是绝对路径"
   [[ "$NGINX_FALLBACK_CONF" == /* ]] || die "NGINX_FALLBACK_CONF 必须是绝对路径"
   if custom_domain_enabled; then
+    [[ "$NGINX_FALLBACK_HOST" == "127.0.0.1" ]] || die "启用自有域名时 NGINX_FALLBACK_HOST 必须为 127.0.0.1，禁止外部地址、域名和通配监听。"
     [[ -n "$CUSTOM_DOMAIN" ]] || die "ENABLE_CUSTOM_DOMAIN=true 时 CUSTOM_DOMAIN 不能为空"
     [[ "$CUSTOM_DOMAIN" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ && "$CUSTOM_DOMAIN" == *.* && "$CUSTOM_DOMAIN" != *..* ]] || die "CUSTOM_DOMAIN 不合法：$CUSTOM_DOMAIN"
     [[ -n "$CLOUDFLARE_ZONE_NAME" ]] || die "ENABLE_CUSTOM_DOMAIN=true 时 CLOUDFLARE_ZONE_NAME 不能为空"
@@ -573,7 +574,7 @@ validate_config_basics() {
   fi
   [[ "$VLESS_FLOW" == "" || "$VLESS_FLOW" == "xtls-rprx-vision" ]] || die "VLESS_FLOW 目前建议为空或 xtls-rprx-vision，当前：$VLESS_FLOW"
   [[ "$REALITY_SERVER_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "REALITY_SERVER_NAME 不合法：$REALITY_SERVER_NAME"
-  [[ "$REALITY_HANDSHAKE_SERVER" =~ ^[A-Za-z0-9._-]+$ ]] || die "REALITY_HANDSHAKE_SERVER 不合法：$REALITY_HANDSHAKE_SERVER"
+  [[ "$REALITY_HANDSHAKE_SERVER" =~ ^[A-Za-z0-9._:-]+$ ]] || die "REALITY_HANDSHAKE_SERVER 不合法：$REALITY_HANDSHAKE_SERVER"
   local protocol key enabled value used_ports=" $DIRECT_PORT $SSH_PORT "
   [[ "$ENABLE_SUBSCRIPTION_SERVER" != true ]] || used_ports+="$SUBSCRIPTION_LISTEN_PORT "
   [[ "$ENABLE_CUSTOM_DOMAIN" != true ]] || used_ports+="$NGINX_FALLBACK_PORT "
@@ -782,6 +783,7 @@ singbox_bin() {
 singbox_check() {
   local bin config
   config="${1:-$SINGBOX_CONFIG_PATH}"
+  run python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --config-env "$RRB_CONFIG_FILE" --audit-config "$config" --quiet || return "$?"
   bin="$(singbox_bin)"
   if [[ -z "$bin" ]]; then
     if is_dry_run; then

@@ -96,7 +96,11 @@ rollback_ipv6_node_on_exit() {
       ufw --force reload >>"$LOG_FILE" 2>&1 || true
     fi
     if [[ -e "$SINGBOX_BACKUP" ]]; then
-      service_restart sing-box || true
+      if singbox_check "$SINGBOX_CONFIG_PATH"; then
+        service_restart sing-box || true
+      else
+        warn "备份的 Reality 回落配置未通过安全检查，未重启旧配置；请修正后重新应用。"
+      fi
     fi
     warn "已尝试恢复；备份保留在：$BACKUP_DIR"
   fi

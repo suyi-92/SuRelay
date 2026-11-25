@@ -60,6 +60,7 @@ class ManagementTest(unittest.TestCase):
         self.config.write_text(core.env_text("", {
             "SERVER_ALIAS": "fixture", "SERVER_IP_IPV4": "192.0.2.1",
             "SINGBOX_CONFIG_PATH": str(self.root / "sing-box.json"),
+            "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
             "RRB_STATE_DIR": str(self.state), "ENABLE_UFW": "false",
         }))
         (self.root / "home-proxies.csv").write_text("tag,type,server,server_port,username,password,network,listen_port\n")
@@ -70,6 +71,38 @@ class ManagementTest(unittest.TestCase):
             (self.state / name).write_text(value)
         (self.root / "sing-box.json").write_text('{"original":true}')
         self.m = core.Manager(self.root)
+
+    def test_service_rejects_unsafe_stored_reality_before_start_restart_or_reload(self):
+        config_path = self.root / "sing-box.json"
+        for server in ("104.16.0.1", "innocent.example"):
+            config_path.write_text(json.dumps({"inbounds": [{"type": "vless", "tls": {
+                "enabled": True, "reality": {"enabled": True, "handshake": {
+                    "server": server, "server_port": 443}}}}]}))
+            for action in ("start", "restart", "reload"):
+                with self.subTest(server=server, action=action), \
+                        patch.object(self.m, "alpine", return_value=False), patch.object(core, "run") as invoke:
+                    with self.assertRaises(core.Error):
+                        self.m.service("sing-box", action, check=False)
+                    invoke.assert_not_called()
+
+    def test_service_accepts_safe_custom_reality_and_keeps_stop_available(self):
+        self.m.update({"ENABLE_CUSTOM_DOMAIN": "true", "CUSTOM_DOMAIN": "edge.example.com",
+                       "LE_EMAIL": "admin@example.com"})
+        config_path = self.root / "sing-box.json"
+        config_path.write_text(json.dumps({"inbounds": [{"type": "vless", "tls": {
+            "enabled": True, "reality": {"enabled": True, "handshake": {
+                "server": "127.0.0.1", "server_port": 8443}}}}]}))
+        with patch.object(self.m, "alpine", return_value=False), patch.object(core, "run") as invoke:
+            self.m.service("sing-box", "restart")
+            invoke.assert_called_once_with(["systemctl", "restart", "sing-box"], check=True)
+        # Stopping an unsafe old deployment and managing unrelated services must
+        # remain possible without first rewriting its configuration.
+        config_path.write_text("malformed old JSON")
+        for name, action in (("sing-box", "stop"), ("sing-box", "status"), ("nginx", "restart")):
+            with self.subTest(name=name, action=action), patch.object(self.m, "alpine", return_value=False), \
+                    patch.object(core, "run") as invoke:
+                self.m.service(name, action)
+                invoke.assert_called_once_with(["systemctl", action, name], check=True)
 
     def local_snapshot(self, paths):
         # Production snapshot paths are confined to the fixture for this test.

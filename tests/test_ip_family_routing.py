@@ -21,6 +21,7 @@ class IPFamilyRoutingTest(unittest.TestCase):
             "HY2_CERT_PATH": "/tmp/surelay-test-cert.pem",
             "HY2_KEY_PATH": "/tmp/surelay-test-key.pem",
             "HY2_SERVER_NAME": "edge.example.com",
+            "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
             **updates,
         })
 

@@ -181,24 +181,42 @@ EOF
 }
 
 write_renew_hook() {
-  local hook="/etc/letsencrypt/renewal-hooks/deploy/surelay-nginx.sh"
+  local hook="/etc/letsencrypt/renewal-hooks/deploy/surelay-nginx.sh" auditor
+  auditor="$(python3 "$SCRIPT_DIR/08-generate-singbox-config.py" --export-reality-auditor)" || return "$?"
+  [[ -n "$auditor" ]] || return 1
   [[ ! -f /etc/letsencrypt/renewal-hooks/deploy/reality-relay-bootstrap-nginx.sh ]] || hook=/etc/letsencrypt/renewal-hooks/deploy/reality-relay-bootstrap-nginx.sh
   run mkdir -p "$(dirname "$hook")"
-  write_root_file "$hook" 0755 <<'EOF'
-#!/usr/bin/env bash
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'surelay_config=%q\n' "$SINGBOX_CONFIG_PATH"
+    cat <<'EOF'
 set -Eeuo pipefail
+check_reality_fallback() {
+  python3 - "$surelay_config" <<'SURELAY_REALITY_AUDITOR'
+EOF
+    printf '%s\n' "$auditor"
+    cat <<'EOF'
+SURELAY_REALITY_AUDITOR
+}
 if [[ -x /sbin/openrc-run ]]; then
   if rc-service nginx status >/dev/null 2>&1; then
     rc-service nginx reload || rc-service nginx restart
   fi
-  if rc-service sing-box status >/dev/null 2>&1; then rc-service sing-box restart; fi
+  if rc-service sing-box status >/dev/null 2>&1; then
+    check_reality_fallback || exit "$?"
+    rc-service sing-box restart
+  fi
 else
   if systemctl is-active --quiet nginx; then
     systemctl reload nginx || systemctl restart nginx
   fi
-  if systemctl is-active --quiet sing-box; then systemctl restart sing-box; fi
+  if systemctl is-active --quiet sing-box; then
+    check_reality_fallback || exit "$?"
+    systemctl restart sing-box
+  fi
 fi
 EOF
+  } | write_root_file "$hook" 0755
   if is_alpine; then
     pkg_install busybox-openrc
     run mkdir -p /etc/periodic/daily

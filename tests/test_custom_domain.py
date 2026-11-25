@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +26,8 @@ def load_module(name: str, path: Path):
 gen = load_module("gen", ROOT / "scripts" / "08-generate-singbox-config.py")
 nodes = load_module("nodes", ROOT / "scripts" / "11-output-nodes.py")
 cf_dns = load_module("cf_dns", ROOT / "scripts" / "14-setup-cloudflare-dns.py")
+GIT_BASH = Path("C:/Program Files/Git/bin/bash.exe")
+BASH = str(GIT_BASH) if os.name == "nt" and GIT_BASH.is_file() else shutil.which("bash") if os.name != "nt" else None
 
 
 class CustomDomainConfigTest(unittest.TestCase):
@@ -79,6 +88,49 @@ class CustomDomainConfigTest(unittest.TestCase):
         self.assertIn("curl --noproxy '*' -k -fsS --resolve", script)
         self.assertIn("fallback homepage mismatch", script)
         self.assertIn("$base_url/healthz", script)
+
+    @unittest.skipUnless(BASH, "Requires background Bash")
+    def test_generated_renewal_hook_checks_actual_reality_before_restart(self):
+        script = (ROOT / "scripts" / "15-setup-custom-domain.sh").read_text(encoding="utf-8")
+        start = script.index("write_renew_hook() {")
+        function = script[start:script.index("\nreload_nginx()", start)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # This path also verifies shell quoting in the generated hook.
+            config = root / "config 'notes' $audit.json"
+            hook, service_log = root / "renew-hook.sh", root / "services.log"
+            environment = {**os.environ, "HOOK_OUTPUT": hook.as_posix(), "SERVICE_LOG": service_log.as_posix(),
+                           "PYTHONIOENCODING": "utf-8"}
+            generate = ('set -e\nrun() { :; }\nwrite_root_file() { cat > "$HOOK_OUTPUT"; }\n'
+                        f'python3() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
+                        f'SCRIPT_DIR={shlex.quote((ROOT / "scripts").as_posix())}\n'
+                        'is_alpine() { return 1; }\nSINGBOX_CONFIG_PATH="$1"\n'
+                        + function + '\nwrite_renew_hook\n')
+            result = subprocess.run([BASH, "--noprofile", "--norc", "-c", generate, "generate", config.as_posix()],
+                                    env=environment, capture_output=True, text=True, encoding="utf-8", timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            runner = (f'python3() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
+                      'systemctl() { printf "%s\\n" "$*" >> "$SERVICE_LOG"; }\n'
+                      'rc-service() { printf "%s\\n" "$*" >> "$SERVICE_LOG"; }\n'
+                      'source "$1"\n')
+
+            def inbound(server="127.0.0.1", port=52843):
+                return {"tls": {"reality": {"enabled": True, "handshake": {
+                    "server": server, "server_port": port}}}}
+
+            for target, accepted in ((inbound(), True), (inbound("192.0.2.30", 443), True),
+                                     (inbound("104.16.0.1"), False), (inbound("www.microsoft.com"), False),
+                                     (inbound("64:ff9b::6810:1"), False)):
+                with self.subTest(target=target):
+                    config.write_text(json.dumps({"inbounds": [inbound(), target]}), encoding="utf-8")
+                    service_log.write_text("", encoding="utf-8")
+                    result = subprocess.run([BASH, "--noprofile", "--norc", "-c", runner, "renew", hook.as_posix()],
+                                            env=environment, capture_output=True, text=True, encoding="utf-8", timeout=15)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    calls = service_log.read_text(encoding="utf-8")
+                    restarted = "restart sing-box" in calls or "sing-box restart" in calls
+                    self.assertEqual(restarted, accepted)
+                    self.assertTrue("reload nginx" in calls or "nginx reload" in calls)
 
     def test_subscription_scripts_use_derived_listen_and_public_ports(self):
         subscription_script = (ROOT / "scripts" / "13-setup-subscription.sh").read_text(encoding="utf-8")

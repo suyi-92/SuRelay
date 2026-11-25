@@ -152,6 +152,7 @@ class LiveProtocolTest(unittest.TestCase):
             while direct_port == socks_port:
                 socks_port = unused_port()
             env = GEN.defaults({"ENABLE_IPV6_LISTEN": "true", "ENABLE_SOCKS5": "true",
+                                "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
                                 "DIRECT_PORT": str(direct_port), "SOCKS5_PORT": str(socks_port),
                                 "PROXY_USERNAME": "fixture", "PROXY_PASSWORD": "fixture"})
             config = GEN.build_config(env, [], UUID, private, "abcd")
@@ -198,6 +199,7 @@ class LiveProtocolTest(unittest.TestCase):
                 ports.add(unused_port())
             direct, hy2, socks, ss, http_port, client_port, origin_port = sorted(ports)
             env = GEN.defaults({"SERVER_ALIAS": "local", "SERVER_IP_IPV4": "127.0.0.1",
+                                "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
                                 "DIRECT_PORT": str(direct), "ENABLE_HY2": "true", "HY2_PORT": str(hy2),
                                 "HY2_CERT_PATH": str(root / "cert.pem"), "HY2_KEY_PATH": str(root / "key.pem"),
                                 "HY2_SERVER_NAME": "localhost", "HY2_INSECURE": "true",

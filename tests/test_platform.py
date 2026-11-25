@@ -51,6 +51,37 @@ class PlatformTest(unittest.TestCase):
                 self.assertEqual(result.stdout.splitlines(), [method, f"/etc/nginx/{confdir}/surelay.conf"])
                 self.assertEqual(self.config.read_bytes(), original)
 
+    def test_custom_domain_rejects_nonloopback_fallback_before_deployment(self):
+        for host in ("www.cloudflare.com", "104.16.0.1", "0.0.0.0", "localhost", "127.0.0.2"):
+            with self.subTest(host=host):
+                self.config.write_text(
+                    'SERVER_ALIAS="test"\nENABLE_CUSTOM_DOMAIN="true"\n'
+                    'CUSTOM_DOMAIN="edge.example.com"\nLE_EMAIL="admin@example.com"\n'
+                    f'NGINX_FALLBACK_HOST="{host}"\nREALITY_HANDSHAKE_SERVER="{host}"\n'
+                )
+                result = self.run_shell('load_config; printf UNEXPECTED_SUCCESS')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("UNEXPECTED_SUCCESS", result.stdout)
+                self.assertIn("NGINX_FALLBACK_HOST", result.stderr)
+
+    def test_singbox_check_stops_after_audit_failure_in_if_context(self):
+        result = self.run_shell('''
+run() { return 42; }
+singbox_bin() {
+  printf reached >"$TEST_ROOT/core-marker"
+  command -v true
+}
+if singbox_check "$TEST_ROOT/candidate.json"; then
+  printf UNEXPECTED_SUCCESS
+  exit 90
+else
+  printf '%s\\n' "$?"
+fi
+''')
+        self.assert_ok(result)
+        self.assertEqual(result.stdout.strip(), "42")
+        self.assertFalse((self.root / "core-marker").exists())
+
     def test_memory_budget_uses_cgroup_limit_and_swap(self):
         (self.root / "memory.max").write_text(str(128 * 1024 * 1024))
         (self.root / "meminfo").write_text("MemTotal:       131072 kB\nSwapTotal:      524288 kB\n")

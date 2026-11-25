@@ -241,6 +241,12 @@ class Manager:
         return bool(re.search(r"(?m)^ID=['\"]?alpine['\"]?$", Path("/etc/os-release").read_text()))
 
     def service(self, name, action, check=True):
+        if name == "sing-box" and action in {"start", "restart", "reload"}:
+            try:
+                config = json.loads(self.path("SINGBOX_CONFIG_PATH").read_text(encoding="utf-8"))
+                GEN.check_generated_reality_handshakes(config, self.env)
+            except (OSError, ValueError, TypeError, AttributeError, GEN.ConfigError) as exc:
+                raise Error(f"无法检查 sing-box 的 Reality 回落配置：{exc}") from exc
         args = ["rc-service", name, action] if self.alpine() else ["systemctl", action, name]
         return run(args, check=check)
 

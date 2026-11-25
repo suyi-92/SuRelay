@@ -41,6 +41,7 @@ class RoutingTest(unittest.TestCase):
                     "MODE_443": "smart",
                     "SMART_AI_HOME_TAG": "frontier",
                     "REJECT_CN_PRIVATE": "true",
+                    "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
                 }
             )
 
@@ -55,6 +56,7 @@ class RoutingTest(unittest.TestCase):
                     "MODE_443": "smart",
                     "SMART_AI_HOME_TAG": "frontier",
                     "REJECT_CN_PRIVATE": "true",
+                    "REALITY_HANDSHAKE_SERVER": "127.0.0.1",
                 }
             )
         config = gen.build_config(

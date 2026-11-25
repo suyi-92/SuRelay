@@ -14,10 +14,13 @@ import copy
 import csv
 import hashlib
 import hmac
+import ipaddress
+import inspect
 import json
 import os
 import re
 import shlex
+import socket
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -54,6 +57,19 @@ EXTRA_PROTOCOLS = (
     ("http", "ENABLE_HTTP", "HTTP_PORT", ("tcp",)),
 )
 SHADOWSOCKS_METHODS = {"aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"}
+
+# Cloudflare's published HTTP proxy networks, verified 2026-11-25.
+# https://www.cloudflare.com/ips/ (ips-v4 and ips-v6)
+# Inspect every DNS answer and pin the selected address: checking a hostname
+# alone would let aliases or a later DNS change restore the open fallback.
+CLOUDFLARE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22", "2400:cb00::/32",
+    "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
+    "2a06:98c0::/29", "2c0f:f248::/32",
+))
 
 
 class ConfigError(SystemExit):
@@ -256,6 +272,119 @@ def custom_domain_enabled(env: Dict[str, str]) -> bool:
     return env.get("ENABLE_CUSTOM_DOMAIN", "false").lower() == "true"
 
 
+def checked_handshake_address(value: str):
+    address = ipaddress.ip_address(value)
+    candidates = [address]
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+            candidates.append(address)
+        elif address in ipaddress.ip_network("64:ff9b::/96"):
+            # DNS64 can synthesize a CF IPv4 destination on IPv6-only hosts.
+            candidates.append(ipaddress.IPv4Address(int(address) & 0xffffffff))
+        elif address in ipaddress.ip_network("64:ff9b:1::/48"):
+            raise ConfigError("Reality 握手目标使用本地 NAT64 前缀，无法确认实际 IPv4 目标；请使用本机 Nginx 或直接 IP 地址。")
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.sixtofour is not None:
+                candidates.append(address.sixtofour)
+            if address.teredo is not None:
+                candidates.extend(address.teredo)
+    if any(candidate in network for candidate in candidates for network in CLOUDFLARE_NETWORKS):
+        raise ConfigError(f"Reality 握手目标 {value} 属于 Cloudflare 网段；拒绝生成可能被借用的开放回落。请使用本机 Nginx 或非 Cloudflare 目标。")
+    return address
+
+
+def validate_reality_handshake(env: Dict[str, str]) -> None:
+    if custom_domain_enabled(env):
+        if env["NGINX_FALLBACK_HOST"] != "127.0.0.1":
+            raise ConfigError("启用自有域名时 NGINX_FALLBACK_HOST 必须为 127.0.0.1，禁止外部地址、域名和通配监听。")
+        if env["REALITY_HANDSHAKE_SERVER"] != "127.0.0.1":
+            raise ConfigError("启用自有域名时 REALITY_HANDSHAKE_SERVER 必须为 127.0.0.1。")
+        if env["REALITY_HANDSHAKE_PORT"] != env["NGINX_FALLBACK_PORT"]:
+            raise ConfigError("启用自有域名时 REALITY_HANDSHAKE_PORT 必须等于 NGINX_FALLBACK_PORT")
+    server = env["REALITY_HANDSHAKE_SERVER"]
+    try:
+        ipaddress.ip_address(server)
+    except ValueError:
+        if not DOMAIN_RE.fullmatch(server):
+            raise ConfigError(f"REALITY_HANDSHAKE_SERVER 不合法：{server}")
+    else:
+        checked_handshake_address(server)
+
+
+def resolve_reality_handshake_server(env: Dict[str, str]) -> str:
+    """Return a checked numeric endpoint, never a hostname resolved at runtime."""
+    validate_reality_handshake(env)
+    server = env["REALITY_HANDSHAKE_SERVER"]
+    try:
+        ipaddress.ip_address(server)
+    except ValueError:
+        pass
+    else:
+        return str(checked_handshake_address(server))
+    try:
+        answers = socket.getaddrinfo(server, as_port(env, "REALITY_HANDSHAKE_PORT"), type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ConfigError(f"无法解析 Reality 握手目标 {server}；未完成 Cloudflare 检查，停止生成配置：{exc}") from exc
+    addresses = []
+    for family, _, _, _, endpoint in answers:
+        if family not in {socket.AF_INET, socket.AF_INET6}:
+            continue
+        try:
+            address = checked_handshake_address(endpoint[0])
+        except ValueError as exc:
+            raise ConfigError(f"Reality 握手目标 {server} 返回了无效 IP 地址；停止生成配置。") from exc
+        if address not in addresses:
+            addresses.append(address)
+    # Check all answers before selecting a family, including answers that the
+    # current IP policy would not use. No unchecked DNS name reaches sing-box.
+    policy = env["PROXY_IP_VERSION"]
+    versions = {"ipv4": (4,), "ipv6": (6,), "dual": (4, 6)}[policy]
+    for version in versions:
+        for address in addresses:
+            if address.version == version:
+                return str(address)
+    raise ConfigError(f"Reality 握手目标 {server} 没有符合 PROXY_IP_VERSION={policy} 的地址；停止生成配置。")
+
+
+def check_generated_reality_handshakes(config: Dict[str, Any], env: Dict[str, str]) -> None:
+    """Check the actual JSON before starting a service, without resolving DNS."""
+    for inbound in config.get("inbounds", []):
+        reality = inbound.get("tls", {}).get("reality", {})
+        if not reality.get("enabled"):
+            continue
+        handshake = reality.get("handshake", {})
+        server = handshake.get("server", "")
+        try:
+            ipaddress.ip_address(server)
+        except ValueError as exc:
+            raise ConfigError("现有 Reality 握手目标尚未固定为经过检查的 IP；请重新生成并应用 sing-box 配置后再启动。") from exc
+        checked_handshake_address(server)
+        if custom_domain_enabled(env) and (
+                server != "127.0.0.1" or handshake.get("server_port") != as_port(env, "NGINX_FALLBACK_PORT")):
+            raise ConfigError("现有 Reality 配置未回落到本机 Nginx；请重新生成并应用 sing-box 配置后再启动。")
+
+
+def export_reality_auditor() -> str:
+    """Embed the same numeric-IP policy in renewal hooks, without checkout paths."""
+    networks = tuple(str(network) for network in CLOUDFLARE_NETWORKS)
+    return "\n".join((
+        "from __future__ import annotations",
+        "import ipaddress, json, sys",
+        "from pathlib import Path",
+        "class ConfigError(SystemExit): pass",
+        f"CLOUDFLARE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in {networks!r})",
+        inspect.getsource(custom_domain_enabled),
+        inspect.getsource(as_port),
+        inspect.getsource(checked_handshake_address),
+        inspect.getsource(check_generated_reality_handshakes),
+        "try:",
+        "    check_generated_reality_handshakes(json.loads(Path(sys.argv[1]).read_text(encoding='utf-8')), {})",
+        "except (OSError, ValueError, TypeError, AttributeError, ConfigError) as exc:",
+        "    raise SystemExit(f'Reality 回落检查失败，未重启 sing-box：{exc}')",
+    ))
+
+
 def apply_custom_domain_defaults(env: Dict[str, str]) -> None:
     if not custom_domain_enabled(env):
         return
@@ -390,9 +519,9 @@ def validate_env(env: Dict[str, str]) -> None:
         raise ConfigError("INSTALL_SINGBOX_METHOD 只能是 auto、apt、release 或 233boy")
     if env.get("VLESS_FLOW", "") not in {"", "xtls-rprx-vision"}:
         raise ConfigError("VLESS_FLOW 目前建议为空或 xtls-rprx-vision")
-    for key in ["REALITY_SERVER_NAME", "REALITY_HANDSHAKE_SERVER"]:
-        if not DOMAIN_RE.match(env[key]):
-            raise ConfigError(f"{key} 不合法：{env[key]}")
+    if not DOMAIN_RE.fullmatch(env["REALITY_SERVER_NAME"]):
+        raise ConfigError(f"REALITY_SERVER_NAME 不合法：{env['REALITY_SERVER_NAME']}")
+    validate_reality_handshake(env)
     for key in [
         "ENABLE_SFTP_USER",
         "USE_233BOY_INSTALLER",
@@ -952,7 +1081,7 @@ def build_vless_reality_inbound(tag: str, port: int, uuid: str, private_key: str
     reality: Dict[str, Any] = {
         "enabled": True,
         "handshake": {
-            "server": env["REALITY_HANDSHAKE_SERVER"],
+            "server": resolve_reality_handshake_server(env),
             "server_port": as_port(env, "REALITY_HANDSHAKE_PORT"),
         },
         "private_key": private_key,
@@ -1075,6 +1204,8 @@ def resolve_rule(inbound: Any, family: str) -> Dict[str, Any]:
 
 
 def build_config(env: Dict[str, str], rows: List[Dict[str, Any]], uuid: str, private_key: str, short_id: str) -> Dict[str, Any]:
+    # Resolve once for every inbound, preserving the caller's domain/SNI and env.
+    env = {**env, "REALITY_HANDSHAKE_SERVER": resolve_reality_handshake_server(env)}
     direct_port = as_port(env, "DIRECT_PORT")
     direct_inbound_tag = "vless-direct-443"
 
@@ -1186,6 +1317,8 @@ def main() -> int:
     ap.add_argument("--config-env", default=str(project_dir() / "config.env"))
     ap.add_argument("--check-only", action="store_true")
     ap.add_argument("--write", action="store_true")
+    ap.add_argument("--audit-config", type=Path, help="check Reality fallback safety in an existing sing-box JSON")
+    ap.add_argument("--export-reality-auditor", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--print-ports", action="store_true")
     ap.add_argument("--print-transport-ports", action="store_true")
     ap.add_argument("--print-nodes-json", action="store_true")
@@ -1193,10 +1326,21 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="only validate/write without printing the human summary")
     args = ap.parse_args()
 
+    if args.export_reality_auditor:
+        print(export_reality_auditor())
+        return 0
+
     env_path = Path(args.config_env).resolve()
     base = env_path.parent if env_path.exists() else project_dir()
     env = defaults(parse_env_file(env_path))
     validate_env(env)
+    if args.audit_config is not None:
+        try:
+            config = json.loads(args.audit_config.read_text(encoding="utf-8"))
+            check_generated_reality_handshakes(config, env)
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            raise ConfigError(f"无法检查现有 sing-box 配置的 Reality 回落：{exc}") from exc
+        return 0
     rows = load_rows(env, base, allow_empty=True)
 
     if args.print_ports:
@@ -1214,6 +1358,7 @@ def main() -> int:
         return 0
 
     if args.check_only:
+        resolve_reality_handshake_server(env)
         if not args.quiet:
             print_summary(env, rows)
         return 0

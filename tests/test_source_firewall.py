@@ -160,6 +160,92 @@ class SourceFirewallTest(unittest.TestCase):
         self.assertTrue(calls)
         self.assertFalse(any("-I" in args or Path(args[0]).name.endswith("-restore") for args in calls))
 
+    def test_nft_missing_chain_is_verified_before_first_apply_for_both_families(self):
+        plan = self.plan()
+        state = {version: {"INPUT": [["-A", "INPUT", "-j", "ufw-before-input"]],
+                           "SURELAY_SOURCE": None} for version in (4, 6)}
+        inventories = set()
+
+        def runner(args, *, input=None, check=True):
+            name = Path(args[0]).name
+            if name == "nft":
+                family = args[-1]
+                self.assertEqual(args, ["nft", "--json", "list", "chains", family])
+                version = 6 if family == "ip6" else 4
+                inventories.add(version)
+                # The same name in another table is not the filter chain.
+                body = json.dumps({"nftables": [{"metainfo": {"version": "1.0.6"}},
+                    {"chain": {"family": family, "table": "filter", "name": "ufw-before-input"}},
+                    {"chain": {"family": family, "table": "nat", "name": "SURELAY_SOURCE"}}]})
+            elif name == "ufw":
+                body = "Status: active\n"
+            else:
+                version = 6 if name.startswith("ip6tables") else 4
+                if name.endswith("-restore"):
+                    self.assertIn(version, inventories, "prove the chain is absent before creation")
+                    state[version]["SURELAY_SOURCE"] = firewall.parse_rules(input)
+                    body = ""
+                elif "-I" in args:
+                    state[version]["INPUT"].insert(0, ["-A", "INPUT", "-j", "SURELAY_SOURCE"])
+                    body = ""
+                elif "-S" in args:
+                    rules = state[version][args[-1]]
+                    if rules is None:
+                        error = f"{name} v1.8.9 (nf_tables): chain `SURELAY_SOURCE' in table `filter' is incompatible, use 'nft' tool."
+                        return subprocess.CompletedProcess(args, 1, "", error)
+                    body = rule_text(rules)
+                else:
+                    self.fail(f"unexpected firewall operation: {args}")
+            return subprocess.CompletedProcess(args, 0, body, "")
+
+        firewall.apply(plan, runner=runner)
+        self.assertEqual(inventories, {4, 6})
+        for version in (4, 6):
+            self.assertEqual(state[version]["SURELAY_SOURCE"], firewall.expected_rules(plan, version))
+
+    def test_nft_existing_incompatible_chain_and_unreadable_inventory_fail_closed(self):
+        for version in (4, 6):
+            family = "ip6" if version == 6 else "ip"
+            existing = json.dumps({"nftables": [{"chain": {
+                "family": family, "table": "filter", "name": "SURELAY_SOURCE"}}]})
+            for response in (subprocess.CompletedProcess([], 0, existing, ""),
+                             subprocess.CompletedProcess([], 1, "", "Operation not permitted"),
+                             subprocess.CompletedProcess([], 1, "", "No such file or directory"),
+                             subprocess.CompletedProcess([], 0, "not JSON", ""),
+                             subprocess.CompletedProcess([], 0, '{"nftables":[{"chain":{"name":"other"}}]}', ""),
+                             subprocess.CompletedProcess([], 0, '{"nftables":[{"error":"fixture"}]}', ""),
+                             firewall.FirewallError("nft executable unavailable")):
+                calls = []
+
+                def runner(args, *, input=None, check=True):
+                    calls.append(args)
+                    if args[0] == "nft":
+                        if isinstance(response, Exception):
+                            raise response
+                        return response
+                    self.assertIn("-S", args)
+                    error = f"{args[0]} v1.8.9 (nf_tables): chain `SURELAY_SOURCE' in table `filter' is incompatible, use 'nft' tool."
+                    return subprocess.CompletedProcess(args, 1, "", error)
+
+                with self.subTest(version=version, response=response), self.assertRaises(firewall.FirewallError):
+                    firewall._owned_chain(version, runner)
+                self.assertEqual(len(calls), 2)
+                self.assertFalse(any("-I" in args or Path(args[0]).name.endswith("-restore") for args in calls))
+
+    def test_other_iptables_errors_do_not_invoke_nft_or_create_chain(self):
+        for status, error in ((4, "Permission denied"), (1, "fixture failure"),
+                              (1, "iptables v1.8.9 (nf_tables): Permission denied"),
+                              (1, "another chain is incompatible, use 'nft' tool.")):
+            calls = []
+
+            def runner(args, *, input=None, check=True):
+                calls.append(args)
+                return subprocess.CompletedProcess(args, status, "", error)
+
+            with self.subTest(error=error), self.assertRaises(firewall.FirewallError):
+                firewall._owned_chain(4, runner)
+            self.assertEqual(len(calls), 1)
+
     def test_nonraising_runner_errors_still_stop_apply(self):
         calls = []
 

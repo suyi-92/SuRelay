@@ -145,6 +145,38 @@ def _check_family(plan, version, runner):
         raise FirewallError(f"IPv{version} 来源白名单的允许/拒绝规则不完整或顺序不正确；请重新应用防火墙。")
 
 
+def _nft_chain_exists(version, runner):
+    # iptables-nft 1.8.9 can call a *missing* chain "incompatible". A
+    # successful native chain inventory distinguishes absence from an existing
+    # nft chain whose rules iptables cannot understand. Never infer absence
+    # from a failed query or from stderr alone.
+    family = "ip6" if version == 6 else "ip"
+    result = _command_result(runner, ["nft", "--json", "list", "chains", family])
+    try:
+        records = json.loads(result.stdout)["nftables"]
+        if not isinstance(records, list):
+            raise ValueError("nftables is not a list")
+        exists = False
+        for record in records:
+            if not isinstance(record, dict) or len(record) != 1:
+                raise ValueError("invalid nft record")
+            kind, value = next(iter(record.items()))
+            if kind not in {"metainfo", "table", "chain"} or not isinstance(value, dict):
+                raise ValueError("unexpected nft record")
+            if kind == "metainfo":
+                continue
+            keys = ("family", "name") if kind == "table" else ("family", "table", "name")
+            if any(not isinstance(value.get(key), str) or not value[key] for key in keys):
+                raise ValueError("incomplete nft record")
+            if value["family"] != family:
+                raise ValueError("unexpected nft family")
+            if kind == "chain" and (value["family"], value["table"], value["name"]) == (family, "filter", CHAIN):
+                exists = True
+        return exists
+    except (ValueError, KeyError, TypeError) as exc:
+        raise FirewallError(f"IPv{version} nftables 链清单无法安全解析；未创建或覆盖来源链。") from exc
+
+
 def _owned_chain(version, runner):
     binary = _binary(version)
     args = [binary, "-w", WAIT_SECONDS, "-S", CHAIN]
@@ -153,6 +185,10 @@ def _owned_chain(version, runner):
         error = (result.stderr or "").lower()
         if "no chain" in error or "does not exist" in error:
             return None
+        incompatible = f"chain `{CHAIN.lower()}' in table `filter' is incompatible, use 'nft' tool."
+        if result.returncode == 1 and "(nf_tables)" in error and incompatible in error:
+            if not _nft_chain_exists(version, runner):
+                return None
         raise FirewallError(f"无法核查 IPv{version} 来源链归属：{(result.stderr or '').strip()}")
     rules = parse_rules(result.stdout)
     owner = ["-A", CHAIN, "-i", "lo", "-m", "comment", "--comment", SOURCE_MARKER, "-j", "RETURN"]

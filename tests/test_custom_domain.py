@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import shlex
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,11 +28,168 @@ def load_module(name: str, path: Path):
 gen = load_module("gen", ROOT / "scripts" / "08-generate-singbox-config.py")
 nodes = load_module("nodes", ROOT / "scripts" / "11-output-nodes.py")
 cf_dns = load_module("cf_dns", ROOT / "scripts" / "14-setup-cloudflare-dns.py")
+nginx_safety = load_module("nginx_safety", ROOT / "scripts" / "nginx_safety.py")
 GIT_BASH = Path("C:/Program Files/Git/bin/bash.exe")
 BASH = str(GIT_BASH) if os.name == "nt" and GIT_BASH.is_file() else shutil.which("bash") if os.name != "nt" else None
 
 
 class CustomDomainConfigTest(unittest.TestCase):
+    def test_only_verified_debian_default_is_disabled_and_backed_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nginx, backup = root / "nginx", root / "backup"
+            available = nginx / "sites-available/default"
+            available.parent.mkdir(parents=True)
+            available.write_text("factory Debian default\n")
+            enabled = nginx / "sites-enabled/default"
+            enabled.parent.mkdir()
+            try:
+                enabled.symlink_to(available)
+            except OSError as exc:
+                self.skipTest(f"requires symlinks: {exc}")
+            other = enabled.with_name("user-site.conf")
+            other.write_text("user configuration\n")
+            digest = hashlib.md5(available.read_bytes()).hexdigest()
+            def package(*args, **kwargs):
+                return subprocess.CompletedProcess(args, 0, stdout=f" {available} {digest}\n")
+            self.assertEqual(nginx_safety.disable_defaults(backup, nginx, runner=package), [str(enabled)])
+            self.assertFalse(enabled.is_symlink())
+            saved = backup / "nginx-defaults/sites-enabled/default"
+            self.assertTrue(saved.is_symlink())
+            self.assertEqual(os.readlink(saved), str(available))
+            self.assertEqual(available.read_text(), "factory Debian default\n")
+            self.assertEqual(other.read_text(), "user configuration\n")
+            self.assertEqual(nginx_safety.disable_defaults(backup, nginx, runner=package), [])
+
+    def test_customized_default_and_foreign_symlink_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            available, enabled = root / "nginx/sites-available/default", root / "nginx/sites-enabled/default"
+            available.parent.mkdir(parents=True)
+            enabled.parent.mkdir(parents=True)
+            available.write_text("custom site\n")
+            enabled.write_text("custom site\n")
+            def package(*args, **kwargs):
+                return subprocess.CompletedProcess(args, 0, stdout=f" {available} {'0' * 32}\n")
+            with self.assertRaises(nginx_safety.NginxSafetyError):
+                nginx_safety.disable_defaults(root / "backup", root / "nginx", runner=package)
+            self.assertEqual(enabled.read_text(), "custom site\n")
+
+    def test_alpine_factory_404_default_is_removed_but_custom_site_is_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            default = root / "nginx/http.d/default.conf"
+            default.parent.mkdir(parents=True)
+            default.write_text("# shipped default\n" + nginx_safety.ALPINE_DEFAULT)
+            nginx_safety.disable_defaults(root / "backup", root / "nginx")
+            self.assertFalse(default.exists())
+            self.assertTrue((root / "backup/nginx-defaults/http.d/default.conf").is_file())
+            default.write_text('server { listen 80; return 200 "my site"; }')
+            with self.assertRaises(nginx_safety.NginxSafetyError):
+                nginx_safety.disable_defaults(root / "another-backup", root / "nginx")
+            self.assertIn("my site", default.read_text())
+
+    def test_default_backup_cannot_be_inside_a_live_include_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nginx = root / "nginx"
+            with self.assertRaises(nginx_safety.NginxSafetyError):
+                nginx_safety.disable_defaults(nginx / "sites-enabled/backup", nginx)
+
+    @unittest.skipUnless(BASH, "Requires background Bash")
+    def test_nginx_package_guard_restores_existing_policy_even_when_install_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy-rc.d"
+            original = b"#!/bin/sh\nexit 42\n"
+            policy.write_bytes(original)
+            policy.chmod(0o751)
+            mode = policy.stat().st_mode
+            def packages(command, **kwargs):
+                for service, expected in (("nginx", 101), ("nginx.service", 101), ("sshd", 42)):
+                    result = subprocess.run([BASH, str(policy), service, "start"], capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, expected)
+                quiet = subprocess.run([BASH, str(policy), "--quiet", "nginx", "start"], capture_output=True, timeout=10)
+                self.assertEqual(quiet.returncode, 101)
+                return subprocess.CompletedProcess(command, 9)
+            self.assertEqual(nginx_safety.guarded_install(["mock-package-install"], policy_path=policy, runner=packages), 9)
+            self.assertEqual(policy.read_bytes(), original)
+            self.assertEqual(policy.stat().st_mode, mode)
+            self.assertEqual([p.name for p in root.iterdir()], ["policy-rc.d"])
+
+    def test_nginx_package_guard_preparation_failure_never_leaves_active_policy(self):
+        original_write = Path.write_text
+        original_chmod = Path.chmod
+        for failure in ("write", "chmod"):
+            for existing in (False, True):
+                with self.subTest(failure=failure, existing=existing), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    policy = root / "policy-rc.d"
+                    original = b"#!/bin/sh\nexit 42\n"
+                    if existing:
+                        policy.write_bytes(original)
+                    def write(path, text, *args, **kwargs):
+                        if failure == "write" and path.name == "policy-rc.d.wrapper":
+                            original_write(path, "partial", encoding="utf-8")
+                            raise OSError("simulated partial write failure")
+                        return original_write(path, text, *args, **kwargs)
+                    def chmod(path, *args, **kwargs):
+                        if failure == "chmod" and path.name == "policy-rc.d.wrapper":
+                            raise OSError("simulated chmod failure")
+                        return original_chmod(path, *args, **kwargs)
+                    with patch.object(Path, "write_text", write), patch.object(Path, "chmod", chmod):
+                        with self.assertRaises(OSError):
+                            nginx_safety.guarded_install(["must-not-run"], policy_path=policy,
+                                runner=lambda *args, **kwargs: self.fail("package command ran"))
+                    if existing:
+                        self.assertEqual(policy.read_bytes(), original)
+                        self.assertEqual([p.name for p in root.iterdir()], ["policy-rc.d"])
+                    else:
+                        self.assertFalse(policy.exists())
+                        self.assertEqual(list(root.iterdir()), [])
+
+    def test_nginx_package_guard_preserves_concurrent_policy_and_original_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy-rc.d"
+            original = b"#!/bin/sh\nexit 42\n"
+            replacement = b"#!/bin/sh\n# concurrently replaced\nexit 99\n"
+            policy.write_bytes(original)
+            def packages(command, **kwargs):
+                policy.write_bytes(replacement)
+                return subprocess.CompletedProcess(command, 0)
+            with self.assertRaises(nginx_safety.NginxSafetyError):
+                nginx_safety.guarded_install(["mock-package-install"], policy_path=policy, runner=packages)
+            self.assertEqual(policy.read_bytes(), replacement)
+            saved = [p / "policy-rc.d.original" for p in root.iterdir() if p.is_dir()]
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0].read_bytes(), original)
+
+    @unittest.skipUnless(BASH, "Requires background Bash")
+    def test_certificate_only_does_not_install_or_start_nginx(self):
+        script = (ROOT / "scripts/15-setup-custom-domain.sh").read_text(encoding="utf-8")
+        preparation = script[script.index("disable_nginx_defaults() {"):script.index("\ninstall_certbot")]
+        harness = r'''
+set -e
+RRB_CERTIFICATES_ONLY=true
+SCRIPT_DIR=/fixture/scripts
+RRB_PROJECT_DIR=/fixture
+BACKUP_DIR=/fixture/backup
+init_backup_dir() { :; }
+is_dry_run() { return 1; }
+is_alpine() { return 1; }
+log() { :; }
+service_active() { return 1; }
+service_reload() { printf 'unexpected nginx reload\n'; exit 98; }
+pkg_install() { printf 'packages %s\n' "$*"; }
+python3() { printf '{"disabled": []}\n'; }
+die() { printf '%s\n' "$*" >&2; exit 99; }
+'''
+        result = subprocess.run([BASH, "--noprofile", "--norc", "-c", harness + preparation],
+                                capture_output=True, text=True, encoding="utf-8", timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "packages ca-certificates curl openssl")
+
     def custom_domain_env(self, **overrides: str):
         env = {
             "SERVER_ALIAS": "edge",

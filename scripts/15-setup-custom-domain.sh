@@ -16,13 +16,40 @@ if ! custom_domain_enabled; then
   exit 0
 fi
 
-pkg_install ca-certificates curl nginx openssl
+disable_nginx_defaults() {
+  local output
+  local -a args=(python3 "$SCRIPT_DIR/nginx_safety.py" disable-default --backup-dir "$BACKUP_DIR")
+  is_dry_run && args+=(--dry-run)
+  output="$("${args[@]}")" || return "$?"
+  log "$output"
+  if [[ "$output" != *'"disabled": []'* ]] && ! is_dry_run && service_active nginx; then
+    run nginx -t || return "$?"
+    service_reload nginx || return "$?"
+  fi
+}
+
+# Remove only verified factory default nodes, before package actions and again
+# afterwards in case a fresh package creates them. Backups are individual files.
+init_backup_dir
+disable_nginx_defaults || die "无法安全禁用 Nginx 默认站点。"
+if [[ "${RRB_CERTIFICATES_ONLY:-false}" == true ]]; then
+  # DNS-01 certificates do not need a web server or its package auto-start.
+  pkg_install ca-certificates curl openssl
+elif is_alpine; then
+  pkg_install ca-certificates curl nginx openssl
+else
+  nginx_package_args=(python3 "$SCRIPT_DIR/nginx_safety.py" guarded-install)
+  is_dry_run && nginx_package_args+=(--dry-run)
+  "${nginx_package_args[@]}" -- bash -c 'source "$1/scripts/00-lib.sh"; shift; pkg_install "$@"' \
+    nginx-packages "$RRB_PROJECT_DIR" ca-certificates curl nginx openssl \
+    || die "Nginx 软件包安装失败；原服务启动策略已恢复。"
+fi
+disable_nginx_defaults || die "无法安全禁用 Nginx 默认站点。"
 install_certbot
 
 backup_path "$CLOUDFLARE_API_TOKEN_FILE" || true
 backup_path "$NGINX_FALLBACK_CONF" || true
 backup_path /etc/nginx/nginx.conf || true
-[[ -d /etc/nginx/sites-enabled ]] && backup_path /etc/nginx/sites-enabled || true
 
 ensure_cloudflare_credentials() {
   local dir
